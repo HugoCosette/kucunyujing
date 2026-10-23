@@ -73,7 +73,7 @@ export function formatFactors(row) {
 }
 
 export function formatProductEditorValue(product) {
-  const match = product.match(/^(.+?)(\d+[a-z]+)$/i)
+  const match = product.match(/^(\d+[a-z]+)(.+)$/i)
   return match ? `${match[1]}\n${match[2]}` : product
 }
 
