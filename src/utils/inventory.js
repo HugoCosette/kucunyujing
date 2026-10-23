@@ -1,15 +1,19 @@
 export function calculateInventoryRow(item, stockingRules) {
-  const ruleFactors = stockingRules[item.level][item.category][item.stockingType]
-  const strategyAvailable = Object.values(ruleFactors).every(Number.isFinite)
+  const ruleFactors = stockingRules[item.stockingType]?.[item.category]
+  const strategyAvailable = Boolean(
+    ruleFactors && Object.values(ruleFactors).every(Number.isFinite),
+  )
   const factors = strategyAvailable
     ? ruleFactors
     : { redLine: null, normal: null, peak: null }
-  const projectedStock = item.planned + item.scheduled + item.producing + item.warehouseStock
+  const planned = item.planned ?? 0
+  const inTransitStock = planned + item.producing
+  const theoreticalStock = item.warehouseStock + inTransitStock
   const redLineStock = strategyAvailable ? item.weeklyUsage * factors.redLine : null
   const normalStock = strategyAvailable ? item.weeklyUsage * factors.normal : null
   const peakStock = strategyAvailable ? item.weeklyUsage * factors.peak : null
-  const shortage = strategyAvailable ? normalStock - projectedStock : null
-  const urgency = getUrgency(projectedStock, redLineStock, normalStock, peakStock)
+  const shortage = strategyAvailable ? normalStock - theoreticalStock : null
+  const urgency = getUrgency(theoreticalStock, redLineStock, normalStock, peakStock)
 
   return {
     ...item,
@@ -19,7 +23,8 @@ export function calculateInventoryRow(item, stockingRules) {
     redLineStock,
     normalStock,
     peakStock,
-    projectedStock,
+    inTransitStock,
+    theoreticalStock,
     shortage,
     shortageRate:
       !strategyAvailable || normalStock === 0 ? null : (shortage / normalStock) * 100,
@@ -31,18 +36,18 @@ export function calculateInventoryRow(item, stockingRules) {
   }
 }
 
-function getUrgency(projectedStock, redLineStock, normalStock, peakStock) {
+function getUrgency(theoreticalStock, redLineStock, normalStock, peakStock) {
   if (redLineStock === null || normalStock === null || peakStock === null) {
     return { text: '规则缺省', tone: 'unavailable' }
   }
 
-  if (projectedStock < redLineStock) {
+  if (theoreticalStock < redLineStock) {
     return { text: '紧急补货', tone: 'red' }
   }
-  if (projectedStock > peakStock) {
+  if (theoreticalStock > peakStock) {
     return { text: '降低库存', tone: 'purple' }
   }
-  if (projectedStock >= normalStock * 0.8 && projectedStock <= normalStock * 1.2) {
+  if (theoreticalStock >= normalStock * 0.8 && theoreticalStock <= normalStock * 1.2) {
     return { text: '无需补货', tone: 'green' }
   }
   return { text: '常规补货', tone: 'yellow' }
