@@ -7,6 +7,7 @@ export function calculateInventoryRow(item, stockingRules) {
     ? ruleFactors
     : { redLine: null, normal: null, peak: null }
   const planned = item.planned ?? 0
+  const turnoverIn = item.turnoverIn ?? 0
   const inTransitStock = planned + item.producing
   const theoreticalStock = item.warehouseStock + inTransitStock
   const redLineStock = strategyAvailable ? item.weeklyUsage * factors.redLine : null
@@ -23,6 +24,7 @@ export function calculateInventoryRow(item, stockingRules) {
     redLineStock,
     normalStock,
     peakStock,
+    turnoverIn,
     inTransitStock,
     theoreticalStock,
     shortage,

@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   ElButton,
@@ -15,6 +15,8 @@ import {
 } from 'element-plus'
 import { zipSync } from 'fflate'
 import { stockingRules } from '@/data/stockingRules'
+import { DEFAULT_PANEL_KEY } from '@/data/panels'
+import PanelNavigation from '@/components/PanelNavigation.vue'
 import { useInventoryStore } from '@/stores/inventory'
 import { groupRowsByProduct } from '@/utils/productGroups'
 import {
@@ -25,8 +27,21 @@ import {
   formatRatio,
   normalizeProductName,
 } from '@/utils/inventory'
+import {
+  IMPORT_TEMPLATE_COLUMNS,
+  IMPORT_TEMPLATE_SAMPLE_ROWS,
+  parseInventorySheet,
+} from '@/utils/inventoryImport'
+import { readWorkbookRows } from '@/utils/xlsxSheet'
 
-const inventoryStore = useInventoryStore()
+const props = defineProps({
+  panelKey: {
+    type: String,
+    default: DEFAULT_PANEL_KEY,
+  },
+})
+
+const inventoryStore = useInventoryStore(props.panelKey)
 const inventoryItems = inventoryStore.inventoryItems
 const purchaseList = inventoryStore.purchaseList
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
@@ -56,6 +71,12 @@ const urgentPlanRows = ref([])
 const purchaseListDialogVisible = ref(false)
 const flyingPurchaseIcon = ref(null)
 const purchaseListPulse = ref(false)
+const importFileInputRef = ref(null)
+const importDialogVisible = ref(false)
+const importSummary = ref(null)
+const importFileName = ref('')
+// 导入只对主面板开放，示例面板保持原始演示数据。
+const canImportExcel = computed(() => props.panelKey === DEFAULT_PANEL_KEY)
 let purchaseFlyTimer = 0
 let purchasePulseTimer = 0
 
@@ -70,6 +91,7 @@ function createEmptyItem() {
     backorder: 0,
     weeklyUsage: 0,
     warehouseStock: 0,
+    turnoverIn: 0,
   }
 }
 
@@ -207,6 +229,8 @@ function toggleWarningFilter(key) {
 }
 
 const expandedProductKeys = ref(inventoryRows.value.map((row) => row.id))
+// 导入大表时全量展开会一次性渲染上千行（每行多个输入组件），这里限制自动展开的可见行数。
+const MAX_AUTO_EXPAND_ROWS = 200
 let knownProductKeys = new Set(expandedProductKeys.value)
 const productTransitionTimers = new Map()
 const productTransitionDuration = 120
@@ -248,8 +272,12 @@ function animateProductCollapse(row) {
 watch(inventoryRows, (groups) => {
   const currentKeys = new Set(groups.map((row) => row.id))
   const expandedKeys = new Set(expandedProductKeys.value.filter((key) => currentKeys.has(key)))
+  let visibleRowCount = groups.length
   for (const group of groups) {
-    if (!knownProductKeys.has(group.id)) expandedKeys.add(group.id)
+    if (knownProductKeys.has(group.id)) continue
+    if (visibleRowCount + group.children.length > MAX_AUTO_EXPAND_ROWS) continue
+    expandedKeys.add(group.id)
+    visibleRowCount += group.children.length
   }
   knownProductKeys = currentKeys
   expandedProductKeys.value = [...expandedKeys]
@@ -262,6 +290,11 @@ function handleExpandChange(row, expanded) {
   else keys.delete(row.id)
   expandedProductKeys.value = [...keys]
   if (expanded) animateProductExpansion(row.id)
+}
+
+// 未展开的颜色子行在表格里是隐藏的，只渲染文本，避免为上千行创建输入组件。
+function isRowExpanded(row) {
+  return row.isProductGroup || expandedProductKeys.value.includes(`product:${row.product}`)
 }
 
 function handleCellClick(row, column) {
@@ -518,16 +551,6 @@ function handleRowClick(row) {
   selectedRowId.value = row.id
 }
 
-function getProductInputWidth(product) {
-  const value = productDrafts[product] ?? product
-  const textWidth = [...value].reduce(
-    (width, character) => width + (/[^\x00-\xff]/.test(character) ? 14 : 8),
-    0,
-  )
-
-  return `${Math.min(108, Math.max(48, textWidth + 12))}px`
-}
-
 function getColorInputWidth(color) {
   const textWidth = [...color].reduce(
     (width, character) => width + (/[^\x00-\xff]/.test(character) ? 14 : 8),
@@ -579,7 +602,7 @@ function exportInventoryToExcel() {
     { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
     { label: '出口', columns: ['欠货', '周消耗'] },
-    { label: '库存', columns: ['在仓库存', '在途库存', '理论库存'] },
+    { label: '库存', columns: ['在仓库存', '周转入', '在途库存', '理论库存'] },
     { label: '数据反馈', columns: ['缺口量', '缺口率', '库销比'] },
     { label: '备货策略', columns: ['红线库存', '正常库存', '峰值库存', '系数'] },
   ]
@@ -608,6 +631,7 @@ function exportInventoryToExcel() {
     row.backorder,
     row.weeklyUsage,
     row.warehouseStock,
+    row.turnoverIn,
     row.inTransitStock,
     row.theoreticalStock,
     row.shortage ?? '缺省',
@@ -638,10 +662,10 @@ function exportInventoryToExcel() {
         `${getExcelColumnName(s.c)}${s.r + 1}:${getExcelColumnName(e.c)}${e.r + 1}`,
     )
     .join(' ')
-  const columnWidths = [10, 10, 18, 12, 14, 12, 12, 12, 10, 10, 12, 12, 12, 12, 12, 10, 12, 12, 12]
+  const columnWidths = [10, 10, 18, 12, 14, 12, 12, 12, 10, 10, 10, 12, 12, 12, 12, 12, 10, 12, 12, 12]
     .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
     .join('')
-  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${columnWidths}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A2:S${rows.length}"/><mergeCells count="${merges.length}">${mergeReferences
+  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${columnWidths}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A2:T${rows.length}"/><mergeCells count="${merges.length}">${mergeReferences
     .split(' ')
     .filter(Boolean)
     .map((ref) => `<mergeCell ref="${ref}"/>`)
@@ -743,6 +767,202 @@ function exportPurchaseListToExcel() {
   }
 }
 
+function skuKey(product, color) {
+  return `${normalizeProductName(product ?? '')}\u0000${String(color ?? '').trim()}`
+}
+
+function triggerImportExcel() {
+  const input = importFileInputRef.value
+  if (!input) return
+  input.value = ''
+  input.click()
+}
+
+async function handleImportFileChange(event) {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  if (!/\.xlsx$/i.test(file.name)) {
+    ElMessage.error('仅支持 .xlsx 格式的 Excel 文件')
+    return
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    ElMessage.error('文件超过 20MB，请拆分后再导入')
+    return
+  }
+
+  try {
+    const { sheetName, rows } = readWorkbookRows(await file.arrayBuffer())
+    const { items, errors, blankRows, ignoredPlannedRows } = parseInventorySheet(rows)
+
+    importFileName.value = file.name
+    importSummary.value = { sheetName, items, errors, blankRows, ignoredPlannedRows }
+    importDialogVisible.value = true
+  } catch (error) {
+    console.error('Failed to read inventory workbook', error)
+    ElMessage.error(`Excel 读取失败：${error instanceof Error ? error.message : '未知错误'}`)
+  }
+}
+
+function cancelImport() {
+  importDialogVisible.value = false
+  importSummary.value = null
+  importFileName.value = ''
+}
+
+// 整表替换：库存数据以 Excel 为准，需安排、撤销记录与采购清单按品名+颜色保留。
+function applyImportedItems(importedItems) {
+  const previousByKey = new Map()
+  for (const item of inventoryItems) {
+    previousByKey.set(skuKey(item.product, item.color), item)
+  }
+
+  const idByPreviousId = new Map()
+  const nextItems = importedItems.map((entry, index) => {
+    const id = index + 1
+    const previous = previousByKey.get(skuKey(entry.product, entry.color))
+    if (previous) idByPreviousId.set(previous.id, id)
+
+    return {
+      id,
+      product: entry.product,
+      color: entry.color,
+      category: entry.category,
+      stockingType: entry.stockingType,
+      planned: previous?.planned ?? null,
+      producing: entry.producing,
+      backorder: entry.backorder,
+      weeklyUsage: entry.weeklyUsage,
+      warehouseStock: entry.warehouseStock,
+      turnoverIn: entry.turnoverIn,
+    }
+  })
+
+  // 撤销快照按新 id 重建，避免新旧 id 相同或互换时互相覆盖。
+  const nextUndoHistory = new Map()
+  for (const [previousId, id] of idByPreviousId) {
+    const undo = plannedUndoHistory[previousId]
+    if (undo) nextUndoHistory.set(id, undo)
+  }
+  for (const key of Object.keys(plannedUndoHistory)) delete plannedUndoHistory[key]
+  for (const [id, undo] of nextUndoHistory) plannedUndoHistory[id] = undo
+
+  const nextItemById = new Map(nextItems.map((item) => [item.id, item]))
+  const nextPurchaseList = []
+  for (const purchaseItem of purchaseList) {
+    const nextId = idByPreviousId.get(purchaseItem.id)
+    const item = nextId === undefined ? null : nextItemById.get(nextId)
+    if (!item) continue
+
+    nextPurchaseList.push({
+      ...purchaseItem,
+      id: nextId,
+      product: item.product,
+      color: item.color,
+      planned: item.planned ?? 0,
+    })
+  }
+
+  inventoryItems.splice(0, inventoryItems.length, ...nextItems)
+  purchaseList.splice(0, purchaseList.length, ...nextPurchaseList)
+
+  // 大表导入先收起已有展开状态，避免沿用旧展开把上千行一次性渲染出来。
+  if (nextItems.length > MAX_AUTO_EXPAND_ROWS) {
+    expandedProductKeys.value = []
+    knownProductKeys = new Set()
+  }
+
+  for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
+  for (const key of Object.keys(productDrafts)) delete productDrafts[key]
+
+  selectedRowId.value = null
+}
+
+function confirmImport() {
+  const summary = importSummary.value
+  if (!summary) return
+
+  applyImportedItems(summary.items)
+  const skippedRows = summary.errors.length + summary.blankRows
+  const collapseHint =
+    summary.items.length > MAX_AUTO_EXPAND_ROWS ? '，品名已默认收起，点击品名可展开颜色明细' : ''
+  ElMessage.success(
+    skippedRows > 0
+      ? `已导入 ${summary.items.length} 行数据，跳过 ${skippedRows} 行${collapseHint}`
+      : `已导入 ${summary.items.length} 行数据${collapseHint}`,
+  )
+  cancelImport()
+}
+
+function buildSimpleWorkbook({ sheetName, rows, columnWidths }) {
+  const worksheetRows = rows
+    .map((row, rowIndex) => {
+      const cells = row
+        .map((value, columnIndex) => {
+          const reference = `${getExcelColumnName(columnIndex)}${rowIndex + 1}`
+          return createExcelCell(value, reference, rowIndex === 0 ? 1 : 0)
+        })
+        .join('')
+      return `<row r="${rowIndex + 1}">${cells}</row>`
+    })
+    .join('')
+  const cols = columnWidths
+    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
+    .join('')
+  const dimension = `A1:${getExcelColumnName(rows[0].length - 1)}${rows.length}`
+  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="${dimension}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${cols}</cols><sheetData>${worksheetRows}</sheetData></worksheet>`
+  const styleXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FF2F3B43"/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF3F6F8"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${sheetName}" sheetId="1" r:id="rId1"/></sheets></workbook>`
+  const files = {
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    'xl/workbook.xml': workbookXml,
+    'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    'xl/worksheets/sheet1.xml': worksheetXml,
+    'xl/styles.xml': styleXml,
+  }
+
+  return zipSync(
+    Object.fromEntries(
+      Object.entries(files).map(([path, content]) => [path, new TextEncoder().encode(content)]),
+    ),
+    { level: 6 },
+  )
+}
+
+function saveWorkbookFile(workbookBytes, fileName) {
+  const blob = new Blob([workbookBytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+  const downloadUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = downloadUrl
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000)
+}
+
+function downloadImportTemplate() {
+  try {
+    const workbookBytes = buildSimpleWorkbook({
+      sheetName: '导入模板',
+      rows: [IMPORT_TEMPLATE_COLUMNS, ...IMPORT_TEMPLATE_SAMPLE_ROWS],
+      columnWidths: IMPORT_TEMPLATE_COLUMNS.map((column) =>
+        column === '品名' ? 18 : column === '颜色' ? 16 : 12,
+      ),
+    })
+    saveWorkbookFile(workbookBytes, '库存导入模板.xlsx')
+    ElMessage.success('导入模板已保存，模板中的示例行请替换为真实数据')
+  } catch (error) {
+    console.error('Failed to build inventory import template', error)
+    ElMessage.error(`模板生成失败：${error instanceof Error ? error.message : '未知错误'}`)
+  }
+}
+
 function updateProductDraft(product, value) {
   productDrafts[product] = value
 }
@@ -788,84 +1008,98 @@ function commitProduct(currentProduct) {
         />
       </svg>
     </span>
-    <nav class="page-navigation" aria-label="页面导航">
-      <RouterLink to="/" class="page-navigation-link">主面板</RouterLink>
-      <RouterLink to="/config" class="page-navigation-link">配置信息</RouterLink>
-    </nav>
-    <div class="table-toolbar">
-      <div class="table-toolbar-group table-toolbar-group--left">
-        <ElButton type="primary" class="add-item-button" @click="openAddItemDialog">
-          + 加入商品
-        </ElButton>
-        <ElButton class="export-excel-button" @click="exportInventoryToExcel">
-          保存Excel
-        </ElButton>
+    <div class="page-sticky-header">
+      <PanelNavigation />
+      <div class="table-toolbar">
+        <div class="table-toolbar-group table-toolbar-group--left">
+          <ElButton type="primary" class="add-item-button" @click="openAddItemDialog">
+            + 加入商品
+          </ElButton>
+          <ElButton class="export-excel-button" @click="exportInventoryToExcel">
+            保存Excel
+          </ElButton>
+          <template v-if="canImportExcel">
+            <ElButton class="import-excel-button" @click="triggerImportExcel">
+              导入Excel
+            </ElButton>
+            <ElButton class="import-template-button" @click="downloadImportTemplate">
+              导入模板
+            </ElButton>
+            <input
+              ref="importFileInputRef"
+              class="import-file-input"
+              type="file"
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              @change="handleImportFileChange"
+            />
+          </template>
+        </div>
+        <div class="table-toolbar-group table-toolbar-group--right">
+          <ElButton
+            class="urgent-plan-button"
+            :disabled="urgentRows.length === 0"
+            @click="openUrgentPlanDialog"
+          >
+            紧急补货 <span class="urgent-count">{{ urgentRows.length }}</span>
+          </ElButton>
+          <ElButton
+            class="purchase-list-button"
+            :class="{ 'purchase-list-button--received': purchaseListPulse }"
+            @click="purchaseListDialogVisible = true"
+          >
+            本次采购清单 <span class="urgent-count">{{ purchaseList.length }}</span>
+          </ElButton>
+        </div>
       </div>
-      <div class="table-toolbar-group table-toolbar-group--right">
-        <ElButton
-          class="urgent-plan-button"
-          :disabled="urgentRows.length === 0"
-          @click="openUrgentPlanDialog"
-        >
-          紧急补货 <span class="urgent-count">{{ urgentRows.length }}</span>
-        </ElButton>
-        <ElButton
-          class="purchase-list-button"
-          :class="{ 'purchase-list-button--received': purchaseListPulse }"
-          @click="purchaseListDialogVisible = true"
-        >
-          本次采购清单 <span class="urgent-count">{{ purchaseList.length }}</span>
-        </ElButton>
+      <div class="inventory-filters" aria-label="库存筛选">
+        <ElInput
+          v-model="productFilter"
+          class="text-filter"
+          placeholder="按品名筛选"
+          aria-label="按品名筛选"
+          clearable
+        />
+        <ElInput
+          v-model="colorFilter"
+          class="text-filter"
+          placeholder="按颜色筛选"
+          aria-label="按颜色筛选"
+          clearable
+        />
+        <div class="warning-filters" role="group" aria-label="按预警状态筛选">
+          <button
+            v-for="filter in warningFilters"
+            :key="filter.key"
+            type="button"
+            class="warning-filter"
+            :class="[
+              `warning-filter--${filter.key}`,
+              {
+                'warning-filter--active':
+                  filter.key === 'all'
+                    ? !hasActiveFilters
+                    : selectedWarningTones.includes(filter.key),
+              },
+            ]"
+            :aria-pressed="
+              filter.key === 'all'
+                ? !hasActiveFilters
+                : selectedWarningTones.includes(filter.key)
+            "
+            @click="toggleWarningFilter(filter.key)"
+          >
+            <span
+              v-if="filter.key !== 'all'"
+              class="warning-filter-indicator"
+              :class="`urgency-indicator--${filter.key}`"
+              aria-hidden="true"
+            />
+            {{ filter.label }}
+            <span class="warning-filter-count">{{ warningCounts[filter.key] }}</span>
+          </button>
+        </div>
+        <ElButton class="reset-filters-button" @click="resetFilters">重置</ElButton>
       </div>
-    </div>
-    <div class="inventory-filters" aria-label="库存筛选">
-      <ElInput
-        v-model="productFilter"
-        class="text-filter"
-        placeholder="按品名筛选"
-        aria-label="按品名筛选"
-        clearable
-      />
-      <ElInput
-        v-model="colorFilter"
-        class="text-filter"
-        placeholder="按颜色筛选"
-        aria-label="按颜色筛选"
-        clearable
-      />
-      <div class="warning-filters" role="group" aria-label="按预警状态筛选">
-        <button
-          v-for="filter in warningFilters"
-          :key="filter.key"
-          type="button"
-          class="warning-filter"
-          :class="[
-            `warning-filter--${filter.key}`,
-            {
-              'warning-filter--active':
-                filter.key === 'all'
-                  ? !hasActiveFilters
-                  : selectedWarningTones.includes(filter.key),
-            },
-          ]"
-          :aria-pressed="
-            filter.key === 'all'
-              ? !hasActiveFilters
-              : selectedWarningTones.includes(filter.key)
-          "
-          @click="toggleWarningFilter(filter.key)"
-        >
-          <span
-            v-if="filter.key !== 'all'"
-            class="warning-filter-indicator"
-            :class="`urgency-indicator--${filter.key}`"
-            aria-hidden="true"
-          />
-          {{ filter.label }}
-          <span class="warning-filter-count">{{ warningCounts[filter.key] }}</span>
-        </button>
-      </div>
-      <ElButton class="reset-filters-button" @click="resetFilters">重置</ElButton>
     </div>
     <ElTable
       ref="inventoryTableRef"
@@ -883,19 +1117,23 @@ function commitProduct(currentProduct) {
       table-layout="fixed"
     >
     <ElTableColumn label="商品" align="center">
-      <ElTableColumn prop="product" label="品名/颜色" min-width="116" align="center">
+      <ElTableColumn prop="product" label="品名" min-width="88" align="center">
         <template #default="{ row }">
           <ElInput
             v-if="row.isProductGroup"
             :model-value="productDrafts[row.product] ?? row.product"
-            :style="{ width: getProductInputWidth(row.product) }"
             class="product-input"
             aria-label="品名"
             @update:model-value="updateProductDraft(row.product, $event)"
             @blur="commitProduct(row.product)"
           />
+          <span v-else class="product-name-text" :title="row.product">{{ row.product }}</span>
+        </template>
+      </ElTableColumn>
+      <ElTableColumn prop="color" label="颜色" min-width="90" align="center">
+        <template #default="{ row }">
           <ElInput
-            v-else
+            v-if="!row.isProductGroup && isRowExpanded(row)"
             :model-value="row.color"
             :style="{ width: getColorInputWidth(row.color) }"
             size="small"
@@ -903,6 +1141,7 @@ function commitProduct(currentProduct) {
             aria-label="颜色"
             @update:model-value="updateValue(row.id, 'color', $event)"
           />
+          <span v-else-if="!row.isProductGroup">{{ row.color }}</span>
         </template>
       </ElTableColumn>
       <ElTableColumn prop="urgency" label="预警" min-width="38" align="center">
@@ -922,6 +1161,7 @@ function commitProduct(currentProduct) {
       <ElTableColumn prop="planned" label="需安排" min-width="122" align="center">
         <template #default="{ row }">
           <template v-if="row.isProductGroup">{{ formatQuantity(row.planned) }}</template>
+          <template v-else-if="!isRowExpanded(row)">{{ formatQuantity(row.plannedDraft) }}</template>
           <div v-else class="planned-entry">
             <div
               class="planned-input-shell"
@@ -971,7 +1211,9 @@ function commitProduct(currentProduct) {
       </ElTableColumn>
       <ElTableColumn label="生产中" min-width="52" align="center">
         <template #default="{ row }">
-          <template v-if="row.isProductGroup">{{ formatQuantity(row.producing) }}</template>
+          <template v-if="row.isProductGroup || !isRowExpanded(row)">
+            {{ formatQuantity(row.producing) }}
+          </template>
           <ElInputNumber
             v-else
             :model-value="row.producing"
@@ -989,7 +1231,9 @@ function commitProduct(currentProduct) {
     <ElTableColumn label="出口" align="center">
       <ElTableColumn label="欠货" min-width="48" align="center">
         <template #default="{ row }">
-          <template v-if="row.isProductGroup">{{ formatQuantity(row.backorder) }}</template>
+          <template v-if="row.isProductGroup || !isRowExpanded(row)">
+            {{ formatQuantity(row.backorder) }}
+          </template>
           <ElInputNumber
             v-else
             :model-value="row.backorder"
@@ -1004,7 +1248,9 @@ function commitProduct(currentProduct) {
       </ElTableColumn>
       <ElTableColumn label="周消耗" min-width="54" align="center">
         <template #default="{ row }">
-          <template v-if="row.isProductGroup">{{ formatQuantity(row.weeklyUsage) }}</template>
+          <template v-if="row.isProductGroup || !isRowExpanded(row)">
+            {{ formatQuantity(row.weeklyUsage) }}
+          </template>
           <ElInputNumber
             v-else
             :model-value="row.weeklyUsage"
@@ -1022,7 +1268,9 @@ function commitProduct(currentProduct) {
     <ElTableColumn label="库存" align="center">
       <ElTableColumn label="在仓库存" min-width="54" align="center">
         <template #default="{ row }">
-          <template v-if="row.isProductGroup">{{ formatQuantity(row.warehouseStock) }}</template>
+          <template v-if="row.isProductGroup || !isRowExpanded(row)">
+            {{ formatQuantity(row.warehouseStock) }}
+          </template>
           <ElInputNumber
             v-else
             :model-value="row.warehouseStock"
@@ -1032,6 +1280,23 @@ function commitProduct(currentProduct) {
             class="editable-number"
             aria-label="在仓库存"
             @update:model-value="updateValue(row.id, 'warehouseStock', $event)"
+          />
+        </template>
+      </ElTableColumn>
+      <ElTableColumn label="周转入" min-width="54" align="center">
+        <template #default="{ row }">
+          <template v-if="row.isProductGroup || !isRowExpanded(row)">
+            {{ formatQuantity(row.turnoverIn) }}
+          </template>
+          <ElInputNumber
+            v-else
+            :model-value="row.turnoverIn"
+            :min="0"
+            :controls="false"
+            size="small"
+            class="editable-number"
+            aria-label="周转入"
+            @update:model-value="updateValue(row.id, 'turnoverIn', $event)"
           />
         </template>
       </ElTableColumn>
@@ -1108,6 +1373,9 @@ function commitProduct(currentProduct) {
           </ElFormItem>
           <ElFormItem label="在仓库存">
             <ElInputNumber v-model="addItemForm.warehouseStock" :min="0" :controls="false" />
+          </ElFormItem>
+          <ElFormItem label="周转入">
+            <ElInputNumber v-model="addItemForm.turnoverIn" :min="0" :controls="false" />
           </ElFormItem>
         </div>
       </ElForm>
@@ -1191,6 +1459,53 @@ function commitProduct(currentProduct) {
     </ElDialog>
 
     <ElDialog
+      v-model="importDialogVisible"
+      title="导入 Excel"
+      width="640px"
+      class="import-excel-dialog"
+      :close-on-click-modal="false"
+      @closed="cancelImport"
+    >
+      <template v-if="importSummary">
+        <ul class="import-summary">
+          <li>文件：{{ importFileName }}</li>
+          <li>工作表：{{ importSummary.sheetName }}</li>
+          <li>有效数据：{{ importSummary.items.length }} 行</li>
+          <li v-if="importSummary.errors.length">
+            跳过：{{ importSummary.errors.length }} 行（数据有误）
+          </li>
+          <li v-if="importSummary.blankRows">忽略空行：{{ importSummary.blankRows }} 行</li>
+          <li v-if="importSummary.ignoredPlannedRows">
+            忽略“需安排”列：{{ importSummary.ignoredPlannedRows }} 行有值，需安排以面板内采纳结果为准
+          </li>
+        </ul>
+        <div v-if="importSummary.errors.length" class="import-errors">
+          <p class="import-errors-title">以下行不会导入，请修正后重新导入：</p>
+          <ul>
+            <li v-for="error in importSummary.errors" :key="`${error.row}-${error.message}`">
+              第 {{ error.row }} 行：{{ error.message }}
+            </li>
+          </ul>
+        </div>
+        <p class="import-hint">
+          确认后用 Excel 数据替换主面板全部库存行；需安排、撤销记录和本次采购清单按“品名+颜色”保留。理论库存、预警、缺口量、缺口率、库销比仍由系统计算。
+        </p>
+      </template>
+      <template #footer>
+        <div class="dialog-footer">
+          <ElButton @click="cancelImport">取消</ElButton>
+          <ElButton
+            type="primary"
+            :disabled="!importSummary || importSummary.items.length === 0"
+            @click="confirmImport"
+          >
+            确认导入
+          </ElButton>
+        </div>
+      </template>
+    </ElDialog>
+
+    <ElDialog
       v-model="purchaseListDialogVisible"
       title="本次采购清单"
       width="680px"
@@ -1245,32 +1560,21 @@ function commitProduct(currentProduct) {
 </template>
 
 <style scoped>
-:global(:root) {
-  --industrial-page: #e7ecef;
-  --industrial-surface: #f5f7f8;
-  --industrial-header: #d4dee4;
-  --industrial-grid: #aab6be;
-  --industrial-grid-light: #c4cdd3;
-  --industrial-primary: #3f718d;
-  --industrial-primary-hover: #4d829f;
-  --industrial-primary-active: #315e77;
-  --industrial-danger: #b84f48;
-  --industrial-danger-hover: #a9433d;
-  --industrial-danger-active: #923a35;
-  --industrial-text: #2f3b43;
-  --industrial-muted: #65737c;
-  --industrial-urgent: #b84f48;
-  --industrial-overstock: #8e7a91;
-  --industrial-normal: #829a85;
-  --industrial-replenish: #c49a52;
-  --industrial-unavailable: #e1e6e9;
-}
-
 .inventory-page {
   position: relative;
   min-height: 100vh;
   padding: 12px;
   background: var(--industrial-page);
+}
+
+.page-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: -12px -12px 0;
+  padding: 12px 12px 0;
+  background: var(--industrial-page);
+  box-shadow: 0 6px 12px -10px rgba(34, 57, 69, 0.45);
 }
 
 .purchase-fly-icon {
@@ -1309,30 +1613,6 @@ function commitProduct(currentProduct) {
   .purchase-list-button--received {
     animation-duration: 1ms;
   }
-}
-
-.page-navigation {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 18px;
-  border-bottom: 1px solid var(--industrial-grid);
-}
-
-.page-navigation-link {
-  padding: 9px 16px;
-  color: var(--industrial-muted);
-  border-bottom: 2px solid transparent;
-  text-decoration: none;
-}
-
-.page-navigation-link:hover,
-.page-navigation-link.router-link-active {
-  color: var(--industrial-primary);
-}
-
-.page-navigation-link.router-link-active {
-  border-bottom-color: var(--industrial-primary);
-  font-weight: 600;
 }
 
 .table-toolbar {
@@ -1474,7 +1754,9 @@ function commitProduct(currentProduct) {
   --el-button-active-border-color: var(--industrial-primary-active);
 }
 
-.export-excel-button {
+.export-excel-button,
+.import-excel-button,
+.import-template-button {
   --el-button-text-color: var(--industrial-primary);
   --el-button-bg-color: var(--industrial-surface);
   --el-button-border-color: var(--industrial-primary);
@@ -1484,6 +1766,49 @@ function commitProduct(currentProduct) {
   --el-button-active-text-color: #fff;
   --el-button-active-bg-color: var(--industrial-primary-active);
   --el-button-active-border-color: var(--industrial-primary-active);
+}
+
+.import-file-input {
+  display: none;
+}
+
+.import-summary {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  color: var(--industrial-text);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.import-errors {
+  max-height: 220px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid #e6c9c4;
+  background: #fdf3f1;
+}
+
+.import-errors-title {
+  margin: 0 0 6px;
+  color: var(--industrial-danger);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.import-errors ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--industrial-text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.import-hint {
+  margin: 0;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .purchase-list-button {
@@ -1819,6 +2144,19 @@ function commitProduct(currentProduct) {
   text-align: center;
 }
 
+.inventory-table :deep(.product-input) {
+  width: 100%;
+  /* 用右侧留白抵消左侧展开图标，使父行品名与子行品名同样居中 */
+  max-width: calc(100% - 29px);
+  margin-right: 14px;
+}
+
+.inventory-table :deep(.el-table__expand-icon) {
+  width: 14px;
+  min-width: 14px;
+  margin-right: 0;
+}
+
 .inventory-table :deep(.product-input .el-input__wrapper) {
   padding: 0 2px;
   background: transparent;
@@ -1834,6 +2172,18 @@ function commitProduct(currentProduct) {
 .inventory-table :deep(.product-input .el-input__wrapper.is-focus) {
   border-color: var(--industrial-primary);
   box-shadow: 0 0 0 1px rgba(63, 113, 141, 0.24);
+}
+
+.inventory-table :deep(.product-name-text) {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translateY(-50%);
 }
 
 .inventory-table :deep(.editable-text .el-input__inner) {
