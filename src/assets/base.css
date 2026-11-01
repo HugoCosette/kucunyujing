@@ -4,6 +4,27 @@
   box-sizing: border-box;
 }
 
+:root {
+  --industrial-page: #e7ecef;
+  --industrial-surface: #f5f7f8;
+  --industrial-header: #d4dee4;
+  --industrial-grid: #aab6be;
+  --industrial-grid-light: #c4cdd3;
+  --industrial-primary: #3f718d;
+  --industrial-primary-hover: #4d829f;
+  --industrial-primary-active: #315e77;
+  --industrial-danger: #b84f48;
+  --industrial-danger-hover: #a9433d;
+  --industrial-danger-active: #923a35;
+  --industrial-text: #2f3b43;
+  --industrial-muted: #65737c;
+  --industrial-urgent: #b84f48;
+  --industrial-overstock: #8e7a91;
+  --industrial-normal: #829a85;
+  --industrial-replenish: #c49a52;
+  --industrial-unavailable: #e1e6e9;
+}
+
 html,
 body,
 #app {

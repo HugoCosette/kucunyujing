@@ -4,6 +4,7 @@ const aggregatedFields = [
   'backorder',
   'weeklyUsage',
   'warehouseStock',
+  'turnoverIn',
   'inTransitStock',
   'theoreticalStock',
 ]

@@ -2,6 +2,12 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElOption, ElSelect, ElTable, ElTableColumn } from 'element-plus'
 import { stockingRules } from '@/data/stockingRules'
+import {
+  DEFAULT_PANEL_KEY,
+  getPanelConfigLabel,
+  isExamplePanel,
+} from '@/data/panels'
+import PanelNavigation from '@/components/PanelNavigation.vue'
 import { useInventoryStore } from '@/stores/inventory'
 import { groupRowsByProduct } from '@/utils/productGroups'
 import {
@@ -10,7 +16,20 @@ import {
   formatQuantity,
 } from '@/utils/inventory'
 
-const inventoryItems = useInventoryStore().inventoryItems
+// 示例配置（/example/config）复用同一份组件与计算逻辑，仅作对照演示，勿改示例数据。
+const props = defineProps({
+  panelKey: {
+    type: String,
+    default: DEFAULT_PANEL_KEY,
+  },
+})
+
+const inventoryItems = useInventoryStore(props.panelKey).inventoryItems
+const examplePanel = isExamplePanel(props.panelKey)
+const configLabel = getPanelConfigLabel(props.panelKey)
+const panelDescription = examplePanel
+  ? '示例配置：维护示例面板的备货类型和色彩类别，仅供对照演示，请勿修改。'
+  : '维护主面板的备货类型和色彩类别；备货策略根据规则自动计算。'
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const selectedRowId = ref(null)
 const configTableRef = ref(null)
@@ -150,15 +169,12 @@ function updateValue(id, field, value) {
 <template>
   <main class="config-page">
     <div class="config-content">
-      <nav class="page-navigation" aria-label="页面导航">
-        <RouterLink to="/" class="page-navigation-link">主面板</RouterLink>
-        <RouterLink to="/config" class="page-navigation-link">配置信息</RouterLink>
-      </nav>
+      <PanelNavigation />
 
       <header class="config-heading">
         <div>
-          <h1>配置信息</h1>
-          <p>维护备货类型和色彩类别；备货策略根据规则自动计算。</p>
+          <h1>{{ configLabel }}</h1>
+          <p>{{ panelDescription }}</p>
         </div>
         <span class="config-record-count">{{ inventoryLeafRows.length }} 条库存记录</span>
       </header>
@@ -260,30 +276,6 @@ function updateValue(id, field, value) {
   width: 760px;
   max-width: 100%;
   margin: 0 auto;
-}
-
-.page-navigation {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 18px;
-  border-bottom: 1px solid var(--industrial-grid);
-}
-
-.page-navigation-link {
-  padding: 9px 16px;
-  color: var(--industrial-muted);
-  border-bottom: 2px solid transparent;
-  text-decoration: none;
-}
-
-.page-navigation-link:hover,
-.page-navigation-link.router-link-active {
-  color: var(--industrial-primary);
-}
-
-.page-navigation-link.router-link-active {
-  border-bottom-color: var(--industrial-primary);
-  font-weight: 600;
 }
 
 .config-heading {
