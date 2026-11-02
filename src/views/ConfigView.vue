@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { ElOption, ElSelect, ElTable, ElTableColumn } from 'element-plus'
+import { ElButton, ElOption, ElSelect, ElTable, ElTableColumn } from 'element-plus'
 import { stockingRules } from '@/data/stockingRules'
 import {
   DEFAULT_PANEL_KEY,
@@ -49,6 +49,51 @@ const inventoryLeafRows = computed(() =>
 )
 
 const inventoryRows = computed(() => groupRowsByProduct(inventoryLeafRows.value))
+
+// 配置信息页仍用 ElTable（含展开行与下拉），3 万行无法一次渲染：
+// 行数小保持品名树形；行数大改为扁平分页，避免每个 SKU 两个下拉的渲染开销。
+const CONFIG_FLAT_LIMIT = 500
+const CONFIG_FLAT_PAGE_SIZE = 60
+const CONFIG_PAGE_ROW_BUDGET = 300
+const configFlat = computed(() => inventoryLeafRows.value.length > CONFIG_FLAT_LIMIT)
+const configLeafPageCount = computed(() =>
+  Math.max(1, Math.ceil(inventoryLeafRows.value.length / CONFIG_FLAT_PAGE_SIZE)),
+)
+const pagedLeafRows = computed(() => {
+  const start = (configPage.value - 1) * CONFIG_FLAT_PAGE_SIZE
+  return inventoryLeafRows.value.slice(start, start + CONFIG_FLAT_PAGE_SIZE)
+})
+const configPage = ref(1)
+const configPages = computed(() => {
+  const pages = []
+  let currentPage = []
+  let rowCount = 0
+
+  for (const group of inventoryRows.value) {
+    const groupRowCount = group.children.length
+    if (currentPage.length > 0 && rowCount + groupRowCount > CONFIG_PAGE_ROW_BUDGET) {
+      pages.push(currentPage)
+      currentPage = []
+      rowCount = 0
+    }
+    currentPage.push(group)
+    rowCount += groupRowCount
+  }
+  if (currentPage.length > 0) pages.push(currentPage)
+  return pages.length > 0 ? pages : [[]]
+})
+const configPageCount = computed(() =>
+  configFlat.value ? configLeafPageCount.value : configPages.value.length,
+)
+const configTableRows = computed(() =>
+  configFlat.value
+    ? pagedLeafRows.value
+    : configPages.value[Math.min(configPage.value, configPages.value.length) - 1] ?? [],
+)
+
+watch(configPageCount, (pageCount) => {
+  if (configPage.value > pageCount) configPage.value = pageCount
+})
 const expandedProductKeys = ref(inventoryRows.value.map((row) => row.id))
 let knownProductKeys = new Set(expandedProductKeys.value)
 const productTransitionTimers = new Map()
@@ -182,9 +227,9 @@ function updateValue(id, field, value) {
       <ElTable
         ref="configTableRef"
         class="config-table"
-        :data="inventoryRows"
+        :data="configTableRows"
         row-key="id"
-        :expand-row-keys="expandedProductKeys"
+        :expand-row-keys="configFlat ? [] : expandedProductKeys"
         @expand-change="handleExpandChange"
         :tree-props="{ children: 'children' }"
         :cell-class-name="getCellClassName"
@@ -195,12 +240,19 @@ function updateValue(id, field, value) {
         table-layout="fixed"
       >
         <ElTableColumn label="商品" align="center">
-          <ElTableColumn prop="product" label="品名/颜色" width="140" align="center">
+          <ElTableColumn prop="product" label="品名" width="100" align="center">
             <template #default="{ row }">
-              <span v-if="row.isProductGroup" class="config-product-name">
+              <span v-if="row.isProductGroup" class="config-product-name">{{ row.product }}</span>
+              <span v-else class="config-product-text" :title="row.product">
                 {{ row.product }}
               </span>
-              <span v-else>{{ row.color }}</span>
+            </template>
+          </ElTableColumn>
+          <ElTableColumn prop="color" label="颜色" width="140" align="center">
+            <template #default="{ row }">
+              <span v-if="!row.isProductGroup" class="config-color-text" :title="row.color">
+                {{ row.color }}
+              </span>
             </template>
           </ElTableColumn>
         </ElTableColumn>
@@ -260,6 +312,20 @@ function updateValue(id, field, value) {
           </ElTableColumn>
         </ElTableColumn>
       </ElTable>
+
+      <div v-if="configPageCount > 1" class="config-pager">
+        <ElButton size="small" :disabled="configPage <= 1" @click="configPage -= 1">
+          上一页
+        </ElButton>
+        <span class="config-pager-info">第 {{ configPage }} / {{ configPageCount }} 页</span>
+        <ElButton
+          size="small"
+          :disabled="configPage >= configPageCount"
+          @click="configPage += 1"
+        >
+          下一页
+        </ElButton>
+      </div>
     </div>
   </main>
 </template>
@@ -279,7 +345,7 @@ function updateValue(id, field, value) {
 }
 
 .config-heading {
-  width: 552px;
+  width: 652px;
   max-width: 100%;
   display: flex;
   align-items: center;
@@ -305,8 +371,22 @@ function updateValue(id, field, value) {
   font-size: 13px;
 }
 
+.config-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 0 0;
+}
+
+.config-pager-info {
+  color: var(--industrial-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .config-table {
-  width: 552px;
+  width: 652px;
   --el-color-primary: var(--industrial-primary);
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
@@ -403,6 +483,14 @@ function updateValue(id, field, value) {
 
 .config-product-name {
   display: inline-block;
+  white-space: nowrap;
+}
+
+.config-product-text,
+.config-color-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

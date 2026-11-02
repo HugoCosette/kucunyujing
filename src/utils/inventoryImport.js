@@ -1,6 +1,6 @@
 import { normalizeProductName } from './inventory.js'
 
-// 导入模板列：只包含基本面信息与参与计算的输入项，需安排由面板自己维护。
+// 导入模板列：只包含基本面信息与计算所需的输入项，需安排由面板自己维护。
 export const IMPORT_TEMPLATE_COLUMNS = [
   '备货类型',
   '色彩',
@@ -10,12 +10,13 @@ export const IMPORT_TEMPLATE_COLUMNS = [
   '欠货',
   '周消耗',
   '在仓库存',
+  '在途库存',
   '周转入',
 ]
 
 export const IMPORT_TEMPLATE_SAMPLE_ROWS = [
-  ['热销', '黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 0],
-  ['常规', '彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 0],
+  ['热销', '黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0],
+  ['常规', '彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0],
 ]
 
 const HEADER_ALIASES = new Map([
@@ -31,6 +32,7 @@ const HEADER_ALIASES = new Map([
   ['欠货', 'backorder'],
   ['周消耗', 'weeklyUsage'],
   ['在仓库存', 'warehouseStock'],
+  ['在途库存', 'inTransitStock'],
   ['周转入', 'turnoverIn'],
   // 仅用于识别并提示被忽略的列，不参与导入。
   ['需安排', 'planned'],
@@ -41,6 +43,7 @@ const QUANTITY_FIELDS = [
   { field: 'backorder', label: '欠货' },
   { field: 'weeklyUsage', label: '周消耗' },
   { field: 'warehouseStock', label: '在仓库存' },
+  { field: 'inTransitStock', label: '在途库存' },
   { field: 'turnoverIn', label: '周转入' },
 ]
 

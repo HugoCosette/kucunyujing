@@ -8,7 +8,10 @@ export function calculateInventoryRow(item, stockingRules) {
     : { redLine: null, normal: null, peak: null }
   const planned = item.planned ?? 0
   const turnoverIn = item.turnoverIn ?? 0
-  const inTransitStock = planned + item.producing
+  // 在途库存为导入/录入值；旧数据（种子数据）没有该字段时沿用原口径兜底。
+  const inTransitStock = Number.isFinite(item.inTransitStock)
+    ? item.inTransitStock
+    : planned + item.producing
   const theoreticalStock = item.warehouseStock + inTransitStock
   const redLineStock = strategyAvailable ? item.weeklyUsage * factors.redLine : null
   const normalStock = strategyAvailable ? item.weeklyUsage * factors.normal : null
