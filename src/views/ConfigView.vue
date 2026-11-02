@@ -28,8 +28,8 @@ const inventoryItems = useInventoryStore(props.panelKey).inventoryItems
 const examplePanel = isExamplePanel(props.panelKey)
 const configLabel = getPanelConfigLabel(props.panelKey)
 const panelDescription = examplePanel
-  ? '示例配置：维护示例面板的备货类型和色彩类别，仅供对照演示，请勿修改。'
-  : '维护主面板的备货类型和色彩类别；备货策略根据规则自动计算。'
+  ? '示例配置：维护示例面板的热度和色彩类别，仅供对照演示，请勿修改。'
+  : '维护主面板的热度和色彩类别；备货策略根据规则自动计算。'
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const selectedRowId = ref(null)
 const configTableRef = ref(null)
@@ -258,14 +258,14 @@ function updateValue(id, field, value) {
         </ElTableColumn>
 
         <ElTableColumn label="信息" align="center">
-          <ElTableColumn label="备货类型" width="76" align="center">
+          <ElTableColumn label="热度" width="76" align="center">
             <template #default="{ row }">
               <ElSelect
                 v-if="!row.isProductGroup"
                 :model-value="row.stockingType"
                 size="small"
                 class="config-select"
-                aria-label="备货类型"
+                aria-label="热度"
                 @update:model-value="updateValue(row.id, 'stockingType', $event)"
               >
                 <ElOption label="热销" value="热销" />
@@ -275,17 +275,9 @@ function updateValue(id, field, value) {
           </ElTableColumn>
           <ElTableColumn label="色彩" width="64" align="center">
             <template #default="{ row }">
-              <ElSelect
-                v-if="!row.isProductGroup"
-                :model-value="row.category"
-                size="small"
-                class="config-select"
-                aria-label="色彩"
-                @update:model-value="updateValue(row.id, 'category', $event)"
-              >
-                <ElOption label="黑白" value="黑白" />
-                <ElOption label="彩色" value="彩色" />
-              </ElSelect>
+              <span v-if="!row.isProductGroup" class="config-color-text" :title="row.category">
+                {{ row.category }}
+              </span>
             </template>
           </ElTableColumn>
         </ElTableColumn>

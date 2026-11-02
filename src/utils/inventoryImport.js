@@ -2,7 +2,7 @@ import { normalizeProductName } from './inventory.js'
 
 // 导入模板列：只包含基本面信息与计算所需的输入项，需安排由面板自己维护。
 export const IMPORT_TEMPLATE_COLUMNS = [
-  '备货类型',
+  '热度',
   '色彩',
   '品名',
   '颜色',
@@ -24,6 +24,8 @@ const HEADER_ALIASES = new Map([
   ['产品名称', 'product'],
   ['颜色', 'color'],
   ['色号', 'color'],
+  ['热度', 'stockingType'],
+  // 兼容旧模板 / 旧导出文件的表头写法。
   ['备货类型', 'stockingType'],
   ['备货分类', 'stockingType'],
   ['色彩', 'category'],
@@ -155,7 +157,7 @@ export function parseInventorySheet(rows) {
     const stockingType = parseEnum(
       readCell('stockingType'),
       STOCKING_TYPES,
-      '备货类型',
+      '热度',
       row.rowNumber,
       rowErrors,
     )

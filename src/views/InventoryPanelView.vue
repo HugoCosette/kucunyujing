@@ -59,6 +59,29 @@ const productFilter = ref('')
 const colorFilter = ref('')
 const expandingProductKeys = ref(new Set())
 const selectedRowId = ref(null)
+
+// 导入成功提示（带 5 秒进度条）
+const importToast = reactive({ visible: false, message: '', progress: 100 })
+let importToastTimer = null
+let importToastStart = 0
+function showImportToast(message) {
+  if (importToastTimer) clearInterval(importToastTimer)
+  importToast.message = message
+  importToast.progress = 100
+  importToast.visible = true
+  importToastStart = Date.now()
+  const duration = 5000
+  importToastTimer = setInterval(() => {
+    const elapsed = Date.now() - importToastStart
+    const remaining = Math.max(0, 1 - elapsed / duration)
+    importToast.progress = remaining * 100
+    if (elapsed >= duration) {
+      clearInterval(importToastTimer)
+      importToastTimer = null
+      importToast.visible = false
+    }
+  }, 50)
+}
 const urgentPlanDialogVisible = ref(false)
 const urgentPlanRows = ref([])
 const purchaseListDialogVisible = ref(false)
@@ -123,6 +146,26 @@ function refreshLeafRow(id) {
 rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
+
+// 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
+const plannedPreviewTones = reactive({})
+
+function refreshPlannedPreviewTone(item) {
+  if (!item || !Reflect.has(plannedDrafts, item.id)) {
+    if (item) delete plannedPreviewTones[item.id]
+    return
+  }
+
+  plannedPreviewTones[item.id] = calculateInventoryRow(
+    { ...item, planned: plannedDrafts[item.id] ?? 0 },
+    stockingRules,
+  ).urgencyTone
+}
+
+function getPlannedTone(row) {
+  if (!Reflect.has(plannedDrafts, row.id)) return row.urgencyTone
+  return plannedPreviewTones[row.id] ?? row.urgencyTone
+}
 
 const warningFilters = [
   { key: 'all', label: '全部' },
@@ -266,6 +309,7 @@ const TABLE_COLUMNS = [
   { key: 'turnoverIn', label: '周转入', width: 74, group: '库存' },
   { key: 'inTransitStock', label: '在途库存', width: 84, group: '库存' },
   { key: 'theoreticalStock', label: '理论库存', width: 84, group: '库存' },
+  { key: 'projectedStock', label: '预计库存', width: 84, group: '库存' },
   { key: 'shortage', label: '缺口量', width: 72, group: '数据反馈' },
   { key: 'shortageRate', label: '缺口率', width: 76, group: '数据反馈' },
   { key: 'stockSalesRatio', label: '库销比', width: 68, group: '数据反馈' },
@@ -348,6 +392,7 @@ onBeforeUnmount(() => {
   if (purchasePulseTimer) clearTimeout(purchasePulseTimer)
   if (filterDebounceTimer) clearTimeout(filterDebounceTimer)
   if (tableScrollFrame) cancelAnimationFrame(tableScrollFrame)
+  if (importToastTimer) clearInterval(importToastTimer)
   tableResizeObserver?.disconnect()
 })
 
@@ -365,7 +410,7 @@ function openUrgentPlanDialog() {
     color: row.color,
     currentPlanned: row.planned ?? 0,
     additionalPlan: 0,
-    recommendedPlan: Math.max(0, Math.ceil(row.normalStock * 0.8 - row.theoreticalStock)),
+    recommendedPlan: Math.max(0, Math.ceil(row.normalStock * 0.8 - row.projectedStock)),
   }))
   urgentPlanDialogVisible.value = true
 }
@@ -382,6 +427,7 @@ function submitUrgentPlans() {
       }
       item.planned = (item.planned ?? 0) + planRow.additionalPlan
       delete plannedDrafts[planRow.id]
+      delete plannedPreviewTones[planRow.id]
       refreshLeafRow(planRow.id)
       syncPurchaseItem(item)
     }
@@ -409,10 +455,29 @@ function getPlannedDraft(row) {
   return hasPlannedDraft(row.id) ? plannedDrafts[row.id] : row.planned
 }
 
+// 需安排建议值：补到“正常库存 80% 下限”的差额（基于理论库存，采纳后叠加为预计库存）。
+function getPlannedPlaceholder(row) {
+  if (!row.strategyAvailable) return ''
+
+  const targetPlanned = Math.max(
+    row.planned ?? 0,
+    0,
+    Math.ceil(row.normalStock * 0.8 - row.theoreticalStock),
+  )
+  return `${formatQuantity(targetPlanned)}`
+}
+
+function getPlannedPlaceholderTitle(row) {
+  if (!row.strategyAvailable) return '备货规则缺省，无法计算建议需安排量'
+
+  return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存的 80% 下限；该建议不会自动采纳`
+}
+
 function updatePlannedDraft(id, value) {
   if (Reflect.has(plannedUndoHistory, id)) return
 
   plannedDrafts[id] = value
+  refreshPlannedPreviewTone(itemById.value.get(id))
 }
 
 function snapshotPurchaseItem(id) {
@@ -468,6 +533,7 @@ function acceptPlannedDraft(row) {
   }
   item.planned = plannedDrafts[row.id] ?? 0
   delete plannedDrafts[row.id]
+  delete plannedPreviewTones[row.id]
   refreshLeafRow(row.id)
   syncPurchaseItem(item)
 }
@@ -529,6 +595,7 @@ function undoPlannedAcceptance(row) {
   item.planned = undo.previousPlanned
   restorePurchaseItem(row.id, undo.previousPurchaseItem)
   delete plannedDrafts[row.id]
+  delete plannedPreviewTones[row.id]
   delete plannedUndoHistory[row.id]
   refreshLeafRow(row.id)
 }
@@ -547,11 +614,18 @@ function getRowClassName({ row }) {
 
 function handleRowClick(row) {
   if (row.isProductGroup) {
-    selectedRowId.value = null
+    // 点击 SPU 汇总行时保留之前选中的 SKU 高亮，不清除。
     return
   }
 
   selectedRowId.value = row.id
+}
+
+function handleProductCellClick(row) {
+  toggleProductGroup(row)
+  if (!row.isProductGroup) {
+    selectedRowId.value = row.id
+  }
 }
 
 function getColorInputWidth(color) {
@@ -603,11 +677,11 @@ function createExcelCell(value, reference, styleIndex = 0) {
 
 function exportInventoryToExcel() {
   const columnGroups = [
-    { label: '信息', columns: ['备货类型', '色彩'] },
+    { label: '信息', columns: ['热度', '色彩'] },
     { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
     { label: '出口', columns: ['欠货', '周消耗'] },
-    { label: '库存', columns: ['在仓库存', '周转入', '在途库存', '理论库存'] },
+    { label: '库存', columns: ['在仓库存', '周转入', '在途库存', '理论库存', '预计库存'] },
     { label: '数据反馈', columns: ['缺口量', '缺口率', '库销比'] },
     { label: '备货策略', columns: ['红线库存', '正常库存', '峰值库存', '系数'] },
   ]
@@ -639,6 +713,7 @@ function exportInventoryToExcel() {
     row.turnoverIn,
     row.inTransitStock,
     row.theoreticalStock,
+    row.projectedStock,
     row.shortage ?? '缺省',
     formatRate(row.shortageRate, row.strategyAvailable),
     formatRatio(row.stockSalesRatio),
@@ -667,10 +742,10 @@ function exportInventoryToExcel() {
         `${getExcelColumnName(s.c)}${s.r + 1}:${getExcelColumnName(e.c)}${e.r + 1}`,
     )
     .join(' ')
-  const columnWidths = [10, 10, 18, 12, 14, 12, 12, 12, 10, 10, 10, 12, 12, 12, 12, 12, 10, 12, 12, 12]
+  const columnWidths = [10, 10, 18, 12, 14, 12, 12, 12, 10, 10, 10, 12, 12, 12, 12, 12, 12, 12, 10, 12, 12, 12]
     .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
     .join('')
-  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${columnWidths}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A2:T${rows.length}"/><mergeCells count="${merges.length}">${mergeReferences
+  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${columnWidths}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A2:U${rows.length}"/><mergeCells count="${merges.length}">${mergeReferences
     .split(' ')
     .filter(Boolean)
     .map((ref) => `<mergeCell ref="${ref}"/>`)
@@ -875,6 +950,7 @@ function applyImportedItems(importedItems) {
   purchaseList.splice(0, purchaseList.length, ...nextPurchaseList)
 
   for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
+  for (const key of Object.keys(plannedPreviewTones)) delete plannedPreviewTones[key]
   for (const key of Object.keys(productDrafts)) delete productDrafts[key]
 
   // 整表替换属于结构性变化，重建排序与单行缓存。
@@ -888,10 +964,13 @@ function confirmImport() {
 
   applyImportedItems(summary.items)
   const skippedRows = summary.errors.length + summary.blankRows
-  ElMessage.success(
+  const spuCount = new Set(summary.items.map((item) => item.product)).size
+  const skuCount = new Set(summary.items.map((item) => `${item.product}\u0000${item.color}`)).size
+  const importedMessage = `成功导入 ${summary.items.length} 行数据，含 ${spuCount} 个SPU，${skuCount} 个SKU`
+  showImportToast(
     skippedRows > 0
-      ? `已导入 ${summary.items.length} 行数据，跳过 ${skippedRows} 行`
-      : `已导入 ${summary.items.length} 行数据`,
+      ? `${importedMessage}，跳过 ${skippedRows} 行`
+      : importedMessage,
   )
   cancelImport()
 }
@@ -995,6 +1074,17 @@ function commitProduct(currentProduct) {
 
 <template>
   <main class="inventory-page">
+    <div v-if="importToast.visible" class="import-toast" role="status" aria-live="polite">
+      <span class="import-toast__icon" aria-hidden="true">
+        <svg viewBox="0 0 16 16">
+          <path d="M6.5 11.5 3 8l1.06-1.06 2.44 2.44 5.44-5.44L13 5l-6.5 6.5Z" fill="currentColor" />
+        </svg>
+      </span>
+      <span class="import-toast__message">{{ importToast.message }}</span>
+      <div class="import-toast__progress">
+        <div class="import-toast__progress-bar" :style="{ width: `${importToast.progress}%` }"></div>
+      </div>
+    </div>
     <span
       v-if="flyingPurchaseIcon"
       class="purchase-fly-icon"
@@ -1134,6 +1224,10 @@ function commitProduct(currentProduct) {
               v-for="column in TABLE_COLUMNS"
               :key="column.key"
               class="inventory-vtable__head-cell"
+              :class="{
+                'inventory-vtable__head-cell--deep-right':
+                  column.key === 'planned' || column.key === 'inTransitStock',
+              }"
             >
               {{ column.label }}
             </div>
@@ -1158,7 +1252,7 @@ function commitProduct(currentProduct) {
             >
               <div
                 class="inventory-vtable__cell inventory-vtable__cell--product"
-                @click.stop="toggleProductGroup(row)"
+                @click.stop="handleProductCellClick(row)"
               >
                 <template v-if="row.isProductGroup">
                   <span
@@ -1215,8 +1309,8 @@ function commitProduct(currentProduct) {
                 />
               </div>
               <div
-                class="inventory-vtable__cell"
-                :class="`planned-cell planned-cell--${row.urgencyTone}`"
+                class="inventory-vtable__cell inventory-vtable__cell--deep-right"
+                :class="`planned-cell planned-cell--${getPlannedTone(row)}`"
               >
                 <template v-if="row.isProductGroup">{{ formatQuantity(row.planned) }}</template>
                 <div v-else class="planned-entry">
@@ -1226,7 +1320,12 @@ function commitProduct(currentProduct) {
                   >
                     <ElInputNumber
                       :model-value="getPlannedDraft(row)"
-                      :title="hasPlannedUndo(row.id) ? '已采纳，点击撤销后可修改' : '记录本次计划采购数量'"
+                      :placeholder="getPlannedPlaceholder(row)"
+                      :title="
+                        hasPlannedUndo(row.id)
+                          ? '已采纳，点击撤销后可修改'
+                          : getPlannedPlaceholderTitle(row)
+                      "
                       :min="0"
                       :controls="false"
                       size="small"
@@ -1333,7 +1432,7 @@ function commitProduct(currentProduct) {
                   @update:model-value="updateValue(row.id, 'turnoverIn', $event)"
                 />
               </div>
-              <div class="inventory-vtable__cell">
+              <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
                 <template v-if="row.isProductGroup">
                   {{ formatQuantity(row.inTransitStock) }}
                 </template>
@@ -1350,6 +1449,9 @@ function commitProduct(currentProduct) {
               </div>
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.theoreticalStock) }}
+              </div>
+              <div class="inventory-vtable__cell">
+                {{ formatQuantity(row.projectedStock) }}
               </div>
               <div class="inventory-vtable__cell">{{ formatQuantity(row.shortage) }}</div>
               <div class="inventory-vtable__cell">
@@ -1545,6 +1647,60 @@ function commitProduct(currentProduct) {
   padding: 12px;
   overflow: hidden;
   background: var(--industrial-page);
+}
+
+.import-toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  z-index: 5000;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 320px;
+  max-width: 480px;
+  padding: 12px 16px 10px;
+  color: var(--industrial-text);
+  border: 1px solid #e1f3d8;
+  border-radius: 4px;
+  background: #f0f9eb;
+  box-shadow: 0 4px 12px rgba(34, 57, 69, 0.15);
+  overflow: hidden;
+}
+
+.import-toast__icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: #67c23a;
+}
+
+.import-toast__icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.import-toast__message {
+  flex: 1;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.import-toast__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(103, 194, 58, 0.15);
+}
+
+.import-toast__progress-bar {
+  height: 100%;
+  background: #67c23a;
+  transition: width 50ms linear;
 }
 
 .page-sticky-header {
@@ -1983,6 +2139,14 @@ function commitProduct(currentProduct) {
   border-right: 1px solid var(--industrial-grid-light);
   line-height: 20px;
   white-space: nowrap;
+}
+
+.inventory-vtable__cell--deep-right {
+  border-right: 2px solid var(--industrial-grid);
+}
+
+.inventory-vtable__head-cell--deep-right {
+  border-right: 2px solid var(--industrial-grid);
 }
 
 .inventory-vtable__cell--product {

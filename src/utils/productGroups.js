@@ -7,6 +7,7 @@ const aggregatedFields = [
   'turnoverIn',
   'inTransitStock',
   'theoreticalStock',
+  'projectedStock',
 ]
 
 const strategyFields = ['redLineStock', 'normalStock', 'peakStock', 'shortage']
