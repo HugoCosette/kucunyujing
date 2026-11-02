@@ -8,16 +8,19 @@ export function calculateInventoryRow(item, stockingRules) {
     : { redLine: null, normal: null, peak: null }
   const planned = item.planned ?? 0
   const turnoverIn = item.turnoverIn ?? 0
-  // 在途库存为导入/录入值；旧数据（种子数据）没有该字段时沿用原口径兜底。
+  // 在途库存为导入/录入值；未提供该字段的旧数据按“生产中”兜底。
   const inTransitStock = Number.isFinite(item.inTransitStock)
     ? item.inTransitStock
-    : planned + item.producing
+    : item.producing
+  // 理论库存是事实层：只由导入数据派生。
   const theoreticalStock = item.warehouseStock + inTransitStock
+  // 预计库存是评估层：事实层叠加“已采纳的需安排”，供使用者评估补货后结果。
+  const projectedStock = theoreticalStock + planned
   const redLineStock = strategyAvailable ? item.weeklyUsage * factors.redLine : null
   const normalStock = strategyAvailable ? item.weeklyUsage * factors.normal : null
   const peakStock = strategyAvailable ? item.weeklyUsage * factors.peak : null
-  const shortage = strategyAvailable ? normalStock - theoreticalStock : null
-  const urgency = getUrgency(theoreticalStock, redLineStock, normalStock, peakStock)
+  const shortage = strategyAvailable ? normalStock - projectedStock : null
+  const urgency = getUrgency(projectedStock, redLineStock, normalStock, peakStock)
 
   return {
     ...item,
@@ -30,6 +33,7 @@ export function calculateInventoryRow(item, stockingRules) {
     turnoverIn,
     inTransitStock,
     theoreticalStock,
+    projectedStock,
     shortage,
     shortageRate:
       !strategyAvailable || normalStock === 0 ? null : (shortage / normalStock) * 100,
