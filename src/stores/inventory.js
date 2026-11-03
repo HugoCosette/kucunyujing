@@ -1,14 +1,29 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { initialInventoryItems } from '@/data/inventoryItems'
+import { stockingRules } from '@/data/stockingRules'
+import { createDefaultHeatConfig } from '@/data/heatRules'
 import { DEFAULT_PANEL_KEY, inventoryPanels } from '@/data/panels'
+import { applyHeatConfigToItems } from '@/utils/heatRules'
 
-function createInventoryState() {
+function cloneStockingCoefficients() {
+  return JSON.parse(JSON.stringify(stockingRules))
+}
+
+function createInventoryState(panelKey) {
   const inventoryItems = ref(initialInventoryItems.map((item) => ({ ...item })))
   const purchaseList = ref([])
   const plannedUndoHistory = ref({})
+  const heatConfig = ref(createDefaultHeatConfig())
+  const stockingCoefficients = ref(cloneStockingCoefficients())
 
-  return { inventoryItems, purchaseList, plannedUndoHistory }
+  // 主面板的热度不再取自种子数据，统一按热度配置的默认规则计算；
+  // 示例面板保留原热度，仅作对照演示。
+  if (panelKey === DEFAULT_PANEL_KEY) {
+    applyHeatConfigToItems(inventoryItems.value, heatConfig.value)
+  }
+
+  return { inventoryItems, purchaseList, plannedUndoHistory, heatConfig, stockingCoefficients }
 }
 
 // 每个面板一份独立状态：main 为主面板，example 为示例面板。
@@ -16,7 +31,7 @@ function createInventoryState() {
 const inventoryStoreDefinitions = Object.fromEntries(
   inventoryPanels.map((panel) => [
     panel.key,
-    defineStore(`inventory-${panel.key}`, createInventoryState),
+    defineStore(`inventory-${panel.key}`, () => createInventoryState(panel.key)),
   ]),
 )
 
