@@ -1,8 +1,9 @@
+import { QUANTITY_FIELDS } from '@/data/quantityFields'
 import { normalizeProductName } from './inventory.js'
 
 // 导入模板列：只包含基本面信息与计算所需的输入项，需安排由面板自己维护。
+// 热度由“热度配置”规则计算，不再作为导入列。
 export const IMPORT_TEMPLATE_COLUMNS = [
-  '热度',
   '色彩',
   '品名',
   '颜色',
@@ -15,8 +16,8 @@ export const IMPORT_TEMPLATE_COLUMNS = [
 ]
 
 export const IMPORT_TEMPLATE_SAMPLE_ROWS = [
-  ['热销', '黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0],
-  ['常规', '彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0],
+  ['黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0],
+  ['彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0],
 ]
 
 const HEADER_ALIASES = new Map([
@@ -24,6 +25,7 @@ const HEADER_ALIASES = new Map([
   ['产品名称', 'product'],
   ['颜色', 'color'],
   ['色号', 'color'],
+  // 旧模板的热度列仅用于统计被忽略的行数，不参与导入。
   ['热度', 'stockingType'],
   // 兼容旧模板 / 旧导出文件的表头写法。
   ['备货类型', 'stockingType'],
@@ -40,16 +42,6 @@ const HEADER_ALIASES = new Map([
   ['需安排', 'planned'],
 ])
 
-const QUANTITY_FIELDS = [
-  { field: 'producing', label: '生产中' },
-  { field: 'backorder', label: '欠货' },
-  { field: 'weeklyUsage', label: '周消耗' },
-  { field: 'warehouseStock', label: '在仓库存' },
-  { field: 'inTransitStock', label: '在途库存' },
-  { field: 'turnoverIn', label: '周转入' },
-]
-
-const STOCKING_TYPES = ['热销', '常规']
 const CATEGORIES = ['黑白', '彩色']
 const EMPTY_QUANTITY_TOKENS = new Set(['', '--', '-', '—', '缺省', 'null'])
 const HEADER_SCAN_ROWS = 10
@@ -118,6 +110,7 @@ export function parseInventorySheet(rows) {
   const seenKeys = new Map()
   let blankRows = 0
   let ignoredPlannedRows = 0
+  let ignoredHeatRows = 0
 
   for (const row of rows.slice(headerIndex + 1)) {
     const readCell = (field) => {
@@ -131,6 +124,7 @@ export function parseInventorySheet(rows) {
     }
 
     if (String(readCell('planned') ?? '').trim() !== '') ignoredPlannedRows += 1
+    if (String(readCell('stockingType') ?? '').trim() !== '') ignoredHeatRows += 1
 
     const product = normalizeProductName(String(readCell('product') ?? ''))
     const color = String(readCell('color') ?? '').trim()
@@ -154,13 +148,6 @@ export function parseInventorySheet(rows) {
     for (const { field, label } of QUANTITY_FIELDS) {
       quantities[field] = parseQuantity(readCell(field), label, row.rowNumber, rowErrors)
     }
-    const stockingType = parseEnum(
-      readCell('stockingType'),
-      STOCKING_TYPES,
-      '热度',
-      row.rowNumber,
-      rowErrors,
-    )
     const category = parseEnum(
       readCell('category'),
       CATEGORIES,
@@ -175,7 +162,7 @@ export function parseInventorySheet(rows) {
     }
 
     seenKeys.set(rowKey, row.rowNumber)
-    items.push({ product, color, stockingType, category, ...quantities })
+    items.push({ product, color, category, ...quantities })
   }
 
   if (!items.length) {
@@ -184,5 +171,5 @@ export function parseInventorySheet(rows) {
     )
   }
 
-  return { items, errors, blankRows, ignoredPlannedRows }
+  return { items, errors, blankRows, ignoredPlannedRows, ignoredHeatRows }
 }

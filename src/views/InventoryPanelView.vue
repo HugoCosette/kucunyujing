@@ -12,7 +12,7 @@ import {
   ElTableColumn,
 } from 'element-plus'
 import { zipSync } from 'fflate'
-import { stockingRules } from '@/data/stockingRules'
+// 系数由 store 维护，便于配置页修改后全局生效。
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import { useInventoryStore } from '@/stores/inventory'
@@ -25,6 +25,8 @@ import {
   formatRatio,
   normalizeProductName,
 } from '@/utils/inventory'
+import { QUANTITY_FIELDS } from '@/data/quantityFields'
+import { applyHeatConfigToItems, resolveHeatType } from '@/utils/heatRules'
 import {
   IMPORT_TEMPLATE_COLUMNS,
   IMPORT_TEMPLATE_SAMPLE_ROWS,
@@ -106,7 +108,7 @@ const itemById = computed(() => {
 })
 
 function buildLeafRow(item) {
-  const row = calculateInventoryRow(item, stockingRules)
+  const row = calculateInventoryRow(item, inventoryStore.stockingCoefficients)
   return {
     ...row,
     searchProduct: row.product.toLocaleLowerCase('zh-CN'),
@@ -146,6 +148,8 @@ function refreshLeafRow(id) {
 rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
+// 系数配置修改后，整表按新系数重算。
+watch(() => inventoryStore.stockingCoefficients, rebuildLeafRows, { deep: true })
 
 // 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
 const plannedPreviewTones = reactive({})
@@ -158,7 +162,7 @@ function refreshPlannedPreviewTone(item) {
 
   plannedPreviewTones[item.id] = calculateInventoryRow(
     { ...item, planned: plannedDrafts[item.id] ?? 0 },
-    stockingRules,
+    inventoryStore.stockingCoefficients,
   ).urgencyTone
 }
 
@@ -642,6 +646,10 @@ function updateValue(id, field, value) {
     const item = itemById.value.get(id)
     if (!item) return
     item[field] = value
+    // 热度因子的手动修改也即时参与热度判定，避免派生字段与当前数据脱节。
+    if (QUANTITY_FIELDS.some((entry) => entry.field === field)) {
+      item.stockingType = resolveHeatType(item, inventoryStore.heatConfig)
+    }
     refreshLeafRow(id)
   }
 }
@@ -875,10 +883,18 @@ async function handleImportFileChange(event) {
 
   try {
     const { sheetName, rows } = readWorkbookRows(await file.arrayBuffer())
-    const { items, errors, blankRows, ignoredPlannedRows } = parseInventorySheet(rows)
+    const { items, errors, blankRows, ignoredPlannedRows, ignoredHeatRows } =
+      parseInventorySheet(rows)
 
     importFileName.value = file.name
-    importSummary.value = { sheetName, items, errors, blankRows, ignoredPlannedRows }
+    importSummary.value = {
+      sheetName,
+      items,
+      errors,
+      blankRows,
+      ignoredPlannedRows,
+      ignoredHeatRows,
+    }
     importDialogVisible.value = true
   } catch (error) {
     console.error('Failed to read inventory workbook', error)
@@ -910,7 +926,6 @@ function applyImportedItems(importedItems) {
       product: entry.product,
       color: entry.color,
       category: entry.category,
-      stockingType: entry.stockingType,
       planned: previous?.planned ?? null,
       producing: entry.producing,
       backorder: entry.backorder,
@@ -920,6 +935,9 @@ function applyImportedItems(importedItems) {
       turnoverIn: entry.turnoverIn,
     }
   })
+
+  // 热度由当前热度配置决定，导入文件中的“热度”列不再参与。
+  applyHeatConfigToItems(nextItems, inventoryStore.heatConfig)
 
   // 撤销快照按新 id 重建，避免新旧 id 相同或互换时互相覆盖。
   const nextUndoHistory = new Map()
@@ -1556,6 +1574,9 @@ function commitProduct(currentProduct) {
           <li v-if="importSummary.blankRows">忽略空行：{{ importSummary.blankRows }} 行</li>
           <li v-if="importSummary.ignoredPlannedRows">
             忽略“需安排”列：{{ importSummary.ignoredPlannedRows }} 行有值，需安排以面板内采纳结果为准
+          </li>
+          <li v-if="importSummary.ignoredHeatRows">
+            忽略“热度”列：{{ importSummary.ignoredHeatRows }} 行有值，热度按配置规则计算
           </li>
         </ul>
         <div v-if="importSummary.errors.length" class="import-errors">
