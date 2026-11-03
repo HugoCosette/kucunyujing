@@ -9,9 +9,11 @@ import {
   ElMessage,
   ElOption,
   ElSelect,
+  ElIcon,
   ElTable,
   ElTableColumn,
 } from 'element-plus'
+import { Delete } from '@element-plus/icons-vue'
 import {
   HEAT_OPERATORS,
   HEAT_TYPES,
@@ -350,11 +352,12 @@ function confirmCoefficientConfig() {
                 <ElButton
                   size="small"
                   text
+                  type="danger"
                   class="heat-factor-remove"
                   aria-label="移除因子"
                   @click="removeFactor(type, factor.field)"
                 >
-                  ×
+                  <ElIcon><Delete /></ElIcon>
                 </ElButton>
               </div>
               <p v-if="!heatDraft[type].length" class="heat-factor-empty">
@@ -495,10 +498,10 @@ function confirmCoefficientConfig() {
         @cell-click="handleCellClick"
         @row-click="handleRowClick"
         border
-        table-layout="fixed"
+        table-layout="auto"
       >
         <ElTableColumn label="商品" align="center">
-          <ElTableColumn prop="product" label="品名" width="100" align="center">
+          <ElTableColumn prop="product" label="品名" align="center">
             <template #default="{ row }">
               <span v-if="row.isProductGroup" class="config-product-name">{{ row.product }}</span>
               <span v-else class="config-product-text" :title="row.product">
@@ -506,7 +509,7 @@ function confirmCoefficientConfig() {
               </span>
             </template>
           </ElTableColumn>
-          <ElTableColumn prop="color" label="颜色" width="140" align="center">
+          <ElTableColumn prop="color" label="颜色" align="center">
             <template #default="{ row }">
               <span v-if="!row.isProductGroup" class="config-color-text" :title="row.color">
                 {{ row.color }}
@@ -516,14 +519,14 @@ function confirmCoefficientConfig() {
         </ElTableColumn>
 
         <ElTableColumn label="信息" align="center">
-          <ElTableColumn label="热度" width="76" align="center">
+          <ElTableColumn label="热度" align="center">
             <template #default="{ row }">
               <span v-if="!row.isProductGroup" class="config-heat-text">
                 {{ row.stockingType }}
               </span>
             </template>
           </ElTableColumn>
-          <ElTableColumn label="色彩" width="64" align="center">
+          <ElTableColumn label="色彩" align="center">
             <template #default="{ row }">
               <span v-if="!row.isProductGroup" class="config-color-text" :title="row.category">
                 {{ row.category }}
@@ -533,18 +536,18 @@ function confirmCoefficientConfig() {
         </ElTableColumn>
 
         <ElTableColumn label="备货策略" align="center">
-          <ElTableColumn label="红线库存" width="68" align="center">
+          <ElTableColumn label="红线库存" align="center">
             <template #default="{ row }">
               {{ formatQuantity(row.redLineStock) }}
             </template>
           </ElTableColumn>
-          <ElTableColumn label="正常库存" width="68" align="center">
+          <ElTableColumn label="正常库存" align="center">
             <template #default="{ row }">{{ formatQuantity(row.normalStock) }}</template>
           </ElTableColumn>
-          <ElTableColumn label="峰值库存" width="68" align="center">
+          <ElTableColumn label="峰值库存" align="center">
             <template #default="{ row }">{{ formatQuantity(row.peakStock) }}</template>
           </ElTableColumn>
-          <ElTableColumn label="系数" width="68" align="center">
+          <ElTableColumn label="系数" align="center">
             <template #default="{ row }">
               <span
                 v-if="!row.isProductGroup"
@@ -581,9 +584,11 @@ function confirmCoefficientConfig() {
 }
 
 .config-content {
-  width: 760px;
+  width: 100%;
   max-width: 100%;
   margin: 0 auto;
+  padding: 0 12px;
+  box-sizing: border-box;
 }
 
 .config-heading {
@@ -617,7 +622,7 @@ function confirmCoefficientConfig() {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
-  width: 652px;
+  width: 100%;
   max-width: 100%;
   margin-bottom: 12px;
   align-items: stretch;
@@ -631,9 +636,6 @@ function confirmCoefficientConfig() {
   border: 1px solid var(--industrial-grid);
   border-radius: 4px;
   background: var(--industrial-surface);
-  height: 100%;
-  display: flex;
-  flex-direction: column;
 }
 
 .heat-config-heading {
@@ -708,7 +710,8 @@ function confirmCoefficientConfig() {
 
 .heat-factor-remove {
   padding: 0;
-  color: var(--industrial-muted);
+  color: var(--industrial-danger);
+  font-size: 16px;
 }
 
 .heat-factor-empty {
@@ -745,9 +748,6 @@ function confirmCoefficientConfig() {
   border: 1px solid var(--industrial-grid);
   border-radius: 4px;
   background: var(--industrial-surface);
-  height: 100%;
-  display: flex;
-  flex-direction: column;
 }
 
 .coefficient-config-heading {
@@ -818,8 +818,7 @@ function confirmCoefficientConfig() {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: auto;
-  padding-top: 10px;
+  margin-top: 10px;
 }
 
 .coefficient-config-dirty {
@@ -829,7 +828,7 @@ function confirmCoefficientConfig() {
 }
 
 .config-table-heading {
-  width: 652px;
+  width: 100%;
   max-width: 100%;
   display: flex;
   align-items: center;
@@ -858,7 +857,7 @@ function confirmCoefficientConfig() {
 }
 
 .config-table {
-  width: 652px;
+  width: 100%;
   --el-color-primary: var(--industrial-primary);
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
