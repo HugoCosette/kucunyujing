@@ -1,12 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import InventoryPanelView from '../views/InventoryPanelView.vue'
+import AllDataPanelView from '../views/AllDataPanelView.vue'
 import ConfigView from '../views/ConfigView.vue'
 import { inventoryPanels } from '@/data/panels'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    // 主面板 + 配置信息 是需求迭代目标；示例面板 + 示例配置 仅作对照示例，勿改。
+    // 主面板 + 全面板 + 配置信息 是需求迭代目标；示例面板 + 示例配置 仅作对照示例，勿改。
     ...inventoryPanels.flatMap((panel) => [
       {
         path: panel.path,
@@ -14,6 +15,16 @@ const router = createRouter({
         component: InventoryPanelView,
         props: { panelKey: panel.key },
       },
+      ...(panel.allPath
+        ? [
+            {
+              path: panel.allPath,
+              name: panel.allRouteName,
+              component: AllDataPanelView,
+              props: { panelKey: panel.key },
+            },
+          ]
+        : []),
       {
         path: panel.configPath,
         name: panel.configRouteName,

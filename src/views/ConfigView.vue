@@ -5,6 +5,7 @@ import {
   ElDropdown,
   ElDropdownItem,
   ElDropdownMenu,
+  ElInput,
   ElInputNumber,
   ElMessage,
   ElOption,
@@ -15,12 +16,16 @@ import {
 } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 import {
+  COEFFICIENT_FIELDS,
+  HEAT_CATEGORIES,
   HEAT_OPERATORS,
   HEAT_TYPES,
-  cloneHeatConfig,
+  cloneHeatSpecs,
+  createHeatSpec,
   getHeatFieldLabel,
+  toCoefficientMap,
 } from '@/data/heatRules'
-import { QUANTITY_FIELDS } from '@/data/quantityFields'
+import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 import {
   DEFAULT_PANEL_KEY,
   getPanelConfigLabel,
@@ -34,7 +39,7 @@ import {
   formatFactors,
   formatQuantity,
 } from '@/utils/inventory'
-import { applyHeatConfigToItems } from '@/utils/heatRules'
+import { applyHeatSpecsToItems } from '@/utils/heatRules'
 
 // 示例配置（/example/config）复用同一份组件与计算逻辑，仅作对照演示，勿改示例数据。
 const props = defineProps({
@@ -46,25 +51,10 @@ const props = defineProps({
 
 const inventoryStore = useInventoryStore(props.panelKey)
 const inventoryItems = inventoryStore.inventoryItems
-const heatDraft = ref(cloneHeatConfig(inventoryStore.heatConfig))
-const heatDirty = computed(
-  () => JSON.stringify(heatDraft.value) !== JSON.stringify(inventoryStore.heatConfig),
-)
-
-const coefficientDraft = ref(
-  JSON.parse(JSON.stringify(inventoryStore.stockingCoefficients)),
-)
-const coefficientDirty = computed(
-  () =>
-    JSON.stringify(coefficientDraft.value) !==
-    JSON.stringify(inventoryStore.stockingCoefficients),
-)
-const coefficientTypeGroups = computed(() =>
-  HEAT_TYPES.map((type) => ({
-    type,
-    label: `${type}系数`,
-    categories: ['黑白', '彩色'].map((category) => ({ type, category })),
-  })),
+// 热度规格同时承载因子与系数，两块配置共用同一份草稿，确认后一起生效。
+const specDraft = ref(cloneHeatSpecs(inventoryStore.heatSpecs))
+const specDirty = computed(
+  () => JSON.stringify(specDraft.value) !== JSON.stringify(inventoryStore.heatSpecs),
 )
 const examplePanel = isExamplePanel(props.panelKey)
 const configLabel = getPanelConfigLabel(props.panelKey)
@@ -77,17 +67,18 @@ const configTableRef = ref(null)
 const collapsingProductKeys = ref(new Set())
 const expandingProductKeys = ref(new Set())
 
-const inventoryLeafRows = computed(() =>
-  inventoryItems
-    .map((item) => calculateInventoryRow(item, inventoryStore.stockingCoefficients))
+const inventoryLeafRows = computed(() => {
+  const coefficientMap = toCoefficientMap(inventoryStore.heatSpecs)
+  return inventoryItems
+    .map((item) => calculateInventoryRow(item, coefficientMap))
     .sort(
       (first, second) =>
         productCollator.compare(first.product, second.product) ||
         Number(second.color === '黑色') - Number(first.color === '黑色') ||
         productCollator.compare(first.color, second.color) ||
         first.id - second.id,
-    ),
-)
+    )
+})
 
 const inventoryRows = computed(() => groupRowsByProduct(inventoryLeafRows.value))
 
@@ -245,50 +236,60 @@ function handleRowClick(row) {
   selectedRowId.value = row.id
 }
 
-function availableFactorFields(type) {
-  const used = new Set(heatDraft.value[type].map((factor) => factor.field))
-  return QUANTITY_FIELDS.filter((entry) => !used.has(entry.field))
+function availableFactorFields(spec) {
+  const used = new Set(spec.factors.map((factor) => factor.field))
+  return HEAT_FACTOR_FIELDS.filter((entry) => !used.has(entry.field))
 }
 
-function addFactor(type, field) {
+function addFactor(spec, field) {
   if (!field) return
-  const factors = heatDraft.value[type]
-  if (factors.some((factor) => factor.field === field)) return
-  factors.push({ field, operator: HEAT_OPERATORS[0].value, value: 0 })
+  if (spec.factors.some((factor) => factor.field === field)) return
+  spec.factors.push({ field, operator: HEAT_OPERATORS[0].value, value: 0 })
 }
 
-function removeFactor(type, field) {
-  const factors = heatDraft.value[type]
-  const index = factors.findIndex((factor) => factor.field === field)
-  if (index >= 0) factors.splice(index, 1)
+function removeFactor(spec, field) {
+  const index = spec.factors.findIndex((factor) => factor.field === field)
+  if (index >= 0) spec.factors.splice(index, 1)
 }
 
-function resetHeatDraft() {
-  heatDraft.value = cloneHeatConfig(inventoryStore.heatConfig)
+function addHeatSpec(type) {
+  const spec = createHeatSpec(specDraft.value, type)
+  const lastSameTypeIndex = specDraft.value
+    .map((entry) => entry.type)
+    .lastIndexOf(type)
+  if (lastSameTypeIndex >= 0) {
+    specDraft.value.splice(lastSameTypeIndex + 1, 0, spec)
+    return
+  }
+  specDraft.value.push(spec)
 }
 
-function confirmHeatConfig() {
-  const nextConfig = cloneHeatConfig(heatDraft.value)
-  inventoryStore.heatConfig = nextConfig
-  applyHeatConfigToItems(inventoryItems, nextConfig)
-  heatDraft.value = cloneHeatConfig(nextConfig)
-  ElMessage.success('热度配置已应用')
+function removeHeatSpec(id) {
+  if (specDraft.value.length <= 1) return
+  const index = specDraft.value.findIndex((spec) => spec.id === id)
+  if (index >= 0) specDraft.value.splice(index, 1)
 }
 
-function resetCoefficientDraft() {
-  coefficientDraft.value = JSON.parse(
-    JSON.stringify(inventoryStore.stockingCoefficients),
-  )
+function resetSpecDraft() {
+  specDraft.value = cloneHeatSpecs(inventoryStore.heatSpecs)
 }
 
-function confirmCoefficientConfig() {
-  inventoryStore.stockingCoefficients = JSON.parse(
-    JSON.stringify(coefficientDraft.value),
-  )
-  coefficientDraft.value = JSON.parse(
-    JSON.stringify(inventoryStore.stockingCoefficients),
-  )
-  ElMessage.success('系数配置已应用')
+function confirmSpecConfig() {
+  const labels = specDraft.value.map((spec) => spec.label.trim())
+  if (labels.some((label) => !label)) {
+    ElMessage.error('热度规格名称不能为空')
+    return
+  }
+  if (new Set(labels).size !== labels.length) {
+    ElMessage.error('热度规格名称不能重复')
+    return
+  }
+
+  const nextSpecs = cloneHeatSpecs(specDraft.value)
+  inventoryStore.heatSpecs = nextSpecs
+  applyHeatSpecsToItems(inventoryItems, nextSpecs)
+  specDraft.value = cloneHeatSpecs(nextSpecs)
+  ElMessage.success('热度与系数配置已应用')
 }
 </script>
 
@@ -309,22 +310,40 @@ function confirmCoefficientConfig() {
         <div class="heat-config-heading">
           <h2 id="heat-config-title">热度配置</h2>
           <span class="heat-config-hint">
-            按导入数值判定热度：命中热销全部条件即为热销，其余为常规。
+            按动销指标（月均条数 / 订单总数 / 动销月份 / 动销客户）依次匹配规格，第一个全部条件满足的规格生效；都不满足时兜底到最后一个规格。
           </span>
         </div>
 
         <div class="heat-config-groups">
-          <section v-for="type in HEAT_TYPES" :key="type" class="heat-config-group">
+          <section
+            v-for="spec in specDraft"
+            :key="spec.id"
+            class="heat-config-group"
+          >
             <div class="heat-config-group-heading">
-              <h3>{{ type }}配置</h3>
-              <span class="heat-config-group-note">
-                {{ type === '热销' ? '全部条件满足时优先归为热销' : '未命中热销时归为常规' }}
-              </span>
+              <ElInput
+                v-model="spec.label"
+                size="small"
+                class="heat-spec-label"
+                aria-label="热度规格名称"
+              />
+              <span class="heat-config-group-note">{{ spec.type }}规格</span>
+              <ElButton
+                size="small"
+                text
+                type="danger"
+                class="heat-spec-remove"
+                :disabled="specDraft.length <= 1"
+                aria-label="删除热度规格"
+                @click="removeHeatSpec(spec.id)"
+              >
+                <ElIcon><Delete /></ElIcon>
+              </ElButton>
             </div>
 
             <div class="heat-factor-list">
               <div
-                v-for="factor in heatDraft[type]"
+                v-for="factor in spec.factors"
                 :key="factor.field"
                 class="heat-factor-row"
               >
@@ -355,26 +374,26 @@ function confirmCoefficientConfig() {
                   type="danger"
                   class="heat-factor-remove"
                   aria-label="移除因子"
-                  @click="removeFactor(type, factor.field)"
+                  @click="removeFactor(spec, factor.field)"
                 >
                   <ElIcon><Delete /></ElIcon>
                 </ElButton>
               </div>
-              <p v-if="!heatDraft[type].length" class="heat-factor-empty">
-                尚未配置因子，该配置不会命中。
+              <p v-if="!spec.factors.length" class="heat-factor-empty">
+                尚未配置因子，该规格不会命中。
               </p>
             </div>
 
             <ElDropdown
               trigger="click"
-              :disabled="!availableFactorFields(type).length"
-              @command="(field) => addFactor(type, field)"
+              :disabled="!availableFactorFields(spec).length"
+              @command="(field) => addFactor(spec, field)"
             >
               <ElButton size="small" text class="heat-factor-add">＋ 添加因子</ElButton>
               <template #dropdown>
                 <ElDropdownMenu>
                   <ElDropdownItem
-                    v-for="field in availableFactorFields(type)"
+                    v-for="field in availableFactorFields(spec)"
                     :key="field.field"
                     :command="field.field"
                   >
@@ -386,16 +405,12 @@ function confirmCoefficientConfig() {
           </section>
         </div>
 
-        <div class="heat-config-actions">
-          <span class="heat-config-dirty">{{ heatDirty ? '有未保存的修改' : '' }}</span>
-          <ElButton size="small" :disabled="!heatDirty" @click="resetHeatDraft">重置</ElButton>
-          <ElButton
-            size="small"
-            type="primary"
-            :disabled="!heatDirty"
-            @click="confirmHeatConfig"
-          >
-            确定
+        <div class="heat-config-add">
+          <ElButton size="small" text @click="addHeatSpec(HEAT_TYPES[0])">
+            ＋ {{ HEAT_TYPES[0] }}规格
+          </ElButton>
+          <ElButton size="small" text @click="addHeatSpec(HEAT_TYPES[1])">
+            ＋ {{ HEAT_TYPES[1] }}规格
           </ElButton>
         </div>
       </section>
@@ -410,74 +425,52 @@ function confirmCoefficientConfig() {
 
         <div class="coefficient-config-types">
           <section
-            v-for="typeGroup in coefficientTypeGroups"
-            :key="typeGroup.type"
+            v-for="spec in specDraft"
+            :key="spec.id"
             class="coefficient-config-type"
           >
-            <h3>{{ typeGroup.label }}</h3>
+            <h3>{{ spec.label }}系数</h3>
             <div class="coefficient-config-type-grid">
               <section
-                v-for="categoryGroup in typeGroup.categories"
-                :key="categoryGroup.category"
+                v-for="category in HEAT_CATEGORIES"
+                :key="category"
                 class="coefficient-config-group"
               >
-                <h4>{{ categoryGroup.category }}</h4>
-                <div class="coefficient-config-row">
-                  <span>红线</span>
+                <h4>{{ category }}</h4>
+                <div
+                  v-for="field in COEFFICIENT_FIELDS"
+                  :key="field.key"
+                  class="coefficient-config-row"
+                >
+                  <span>{{ field.label }}</span>
                   <ElInputNumber
-                    v-model="coefficientDraft[categoryGroup.type][categoryGroup.category].redLine"
+                    v-model="spec.coefficients[category][field.key]"
                     :min="0"
                     size="small"
                     class="coefficient-config-input"
-                    aria-label="红线系数"
-                  />
-                </div>
-                <div class="coefficient-config-row">
-                  <span>正常</span>
-                  <ElInputNumber
-                    v-model="coefficientDraft[categoryGroup.type][categoryGroup.category].normal"
-                    :min="0"
-                    size="small"
-                    class="coefficient-config-input"
-                    aria-label="正常系数"
-                  />
-                </div>
-                <div class="coefficient-config-row">
-                  <span>峰值</span>
-                  <ElInputNumber
-                    v-model="coefficientDraft[categoryGroup.type][categoryGroup.category].peak"
-                    :min="0"
-                    size="small"
-                    class="coefficient-config-input"
-                    aria-label="峰值系数"
+                    :aria-label="`${field.label}系数`"
                   />
                 </div>
               </section>
             </div>
           </section>
         </div>
-
-        <div class="coefficient-config-actions">
-          <span class="coefficient-config-dirty">
-            {{ coefficientDirty ? '有未保存的修改' : '' }}
-          </span>
-          <ElButton
-            size="small"
-            :disabled="!coefficientDirty"
-            @click="resetCoefficientDraft"
-          >
-            重置
-          </ElButton>
-          <ElButton
-            size="small"
-            type="primary"
-            :disabled="!coefficientDirty"
-            @click="confirmCoefficientConfig"
-          >
-            确定
-          </ElButton>
-        </div>
       </section>
+      </div>
+
+      <div class="config-actions">
+        <span class="config-dirty">{{ specDirty ? '有未保存的修改' : '' }}</span>
+        <ElButton size="small" :disabled="!specDirty" @click="resetSpecDraft">
+          重置
+        </ElButton>
+        <ElButton
+          size="small"
+          type="primary"
+          :disabled="!specDirty"
+          @click="confirmSpecConfig"
+        >
+          确定
+        </ElButton>
       </div>
 
       <div class="config-table-heading">
@@ -726,18 +719,26 @@ function confirmCoefficientConfig() {
   color: var(--industrial-primary);
 }
 
-.heat-config-actions {
+.heat-config-add {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 6px;
 }
 
-.heat-config-dirty {
-  margin-right: auto;
-  color: var(--industrial-muted);
-  font-size: 12px;
+.heat-spec-label {
+  width: 88px;
+}
+
+.heat-spec-label :deep(.el-input__wrapper) {
+  background: var(--industrial-surface);
+  box-shadow: 0 0 0 1px var(--industrial-grid-light) inset;
+}
+
+.heat-spec-remove {
+  margin-left: auto;
+  padding: 0;
+  font-size: 15px;
 }
 
 .coefficient-config-section {
@@ -813,15 +814,16 @@ function confirmCoefficientConfig() {
   width: 100%;
 }
 
-.coefficient-config-actions {
+.config-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 10px;
+  width: 100%;
+  margin: 8px 0 12px;
 }
 
-.coefficient-config-dirty {
+.config-dirty {
   margin-right: auto;
   color: var(--industrial-muted);
   font-size: 12px;
@@ -969,14 +971,9 @@ function confirmCoefficientConfig() {
   color: var(--industrial-text);
 }
 
-@media (max-width: 780px) {
-  .config-content {
-    width: 760px;
-    max-width: none;
-  }
-
-  .config-page {
-    overflow-x: auto;
+@media (max-width: 600px) {
+  .config-top-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>
