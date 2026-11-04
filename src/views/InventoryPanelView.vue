@@ -26,11 +26,13 @@ import {
   normalizeProductName,
 } from '@/utils/inventory'
 import { QUANTITY_FIELDS } from '@/data/quantityFields'
-import { applyHeatConfigToItems, resolveHeatType } from '@/utils/heatRules'
+import { toCoefficientMap } from '@/data/heatRules'
+import { applyHeatSpecsToItems, resolveHeatLabel } from '@/utils/heatRules'
 import {
   IMPORT_TEMPLATE_COLUMNS,
   IMPORT_TEMPLATE_SAMPLE_ROWS,
   parseInventorySheet,
+  readSheetTable,
 } from '@/utils/inventoryImport'
 import { readWorkbookRows } from '@/utils/xlsxSheet'
 
@@ -107,8 +109,8 @@ const itemById = computed(() => {
   return map
 })
 
-function buildLeafRow(item) {
-  const row = calculateInventoryRow(item, inventoryStore.stockingCoefficients)
+function buildLeafRow(item, coefficientMap) {
+  const row = calculateInventoryRow(item, coefficientMap)
   return {
     ...row,
     searchProduct: row.product.toLocaleLowerCase('zh-CN'),
@@ -116,20 +118,25 @@ function buildLeafRow(item) {
   }
 }
 
-function compareLeafRows(first, second) {
-  return (
-    productCollator.compare(first.product, second.product) ||
-    Number(second.color === '黑色') - Number(first.color === '黑色') ||
-    productCollator.compare(first.color, second.color) ||
-    first.id - second.id
-  )
-}
-
 const inventoryLeafRows = shallowRef([])
 const leafRowIndexById = new Map()
 
 function rebuildLeafRows() {
-  const rows = inventoryItems.map(buildLeafRow).sort(compareLeafRows)
+  const coefficientMap = toCoefficientMap(inventoryStore.heatSpecs)
+  const rows = inventoryItems.map((item) => buildLeafRow(item, coefficientMap))
+  // 按品名聚合月均条数，品名按聚合值降序排列；同品名内按月均条数降序，再按颜色。
+  const productMonthlyAvg = new Map()
+  for (const row of rows) {
+    productMonthlyAvg.set(row.product, (productMonthlyAvg.get(row.product) ?? 0) + (row.monthlyAvgCount ?? 0))
+  }
+  rows.sort((first, second) => {
+    const productDiff =
+      (productMonthlyAvg.get(second.product) ?? 0) - (productMonthlyAvg.get(first.product) ?? 0)
+    if (productDiff !== 0) return productDiff
+    const monthlyDiff = (second.monthlyAvgCount ?? 0) - (first.monthlyAvgCount ?? 0)
+    if (monthlyDiff !== 0) return monthlyDiff
+    return productCollator.compare(first.color, second.color) || first.id - second.id
+  })
   leafRowIndexById.clear()
   rows.forEach((row, index) => leafRowIndexById.set(row.id, index))
   inventoryLeafRows.value = rows
@@ -141,7 +148,7 @@ function refreshLeafRow(id) {
   if (index === undefined || !item) return
 
   const rows = inventoryLeafRows.value.slice()
-  rows[index] = buildLeafRow(item)
+  rows[index] = buildLeafRow(item, toCoefficientMap(inventoryStore.heatSpecs))
   inventoryLeafRows.value = rows
 }
 
@@ -149,7 +156,7 @@ rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
 // 系数配置修改后，整表按新系数重算。
-watch(() => inventoryStore.stockingCoefficients, rebuildLeafRows, { deep: true })
+watch(() => inventoryStore.heatSpecs, rebuildLeafRows, { deep: true })
 
 // 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
 const plannedPreviewTones = reactive({})
@@ -162,7 +169,7 @@ function refreshPlannedPreviewTone(item) {
 
   plannedPreviewTones[item.id] = calculateInventoryRow(
     { ...item, planned: plannedDrafts[item.id] ?? 0 },
-    inventoryStore.stockingCoefficients,
+    toCoefficientMap(inventoryStore.heatSpecs),
   ).urgencyTone
 }
 
@@ -297,6 +304,18 @@ function toggleProductGroup(row) {
   expandedProductKeys.value = [...keys]
 }
 
+function toggleAllProductGroups() {
+  const groupIds = inventoryRows.value.map((row) => row.id)
+  const allExpanded = groupIds.length > 0 && groupIds.every((id) => expandedProductKeys.value.includes(id))
+  if (allExpanded) {
+    expandedProductKeys.value = []
+    for (const id of groupIds) clearProductTransition(id)
+  } else {
+    expandedProductKeys.value = [...groupIds]
+    for (const id of groupIds) animateProductExpansion(id)
+  }
+}
+
 // —— 虚拟滚动 ——
 // 只渲染视口内的行，DOM 节点数量与数据量解耦。
 const TABLE_ROW_HEIGHT = 34
@@ -309,9 +328,9 @@ const TABLE_COLUMNS = [
   { key: 'producing', label: '生产中', width: 76, group: '入口' },
   { key: 'backorder', label: '欠货', width: 68, group: '出口' },
   { key: 'weeklyUsage', label: '周消耗', width: 76, group: '出口' },
-  { key: 'warehouseStock', label: '在仓库存', width: 84, group: '库存' },
   { key: 'turnoverIn', label: '周转入', width: 74, group: '库存' },
   { key: 'inTransitStock', label: '在途库存', width: 84, group: '库存' },
+  { key: 'warehouseStock', label: '在仓库存', width: 84, group: '库存' },
   { key: 'theoreticalStock', label: '理论库存', width: 84, group: '库存' },
   { key: 'projectedStock', label: '预计库存', width: 84, group: '库存' },
   { key: 'shortage', label: '缺口量', width: 72, group: '数据反馈' },
@@ -648,7 +667,7 @@ function updateValue(id, field, value) {
     item[field] = value
     // 热度因子的手动修改也即时参与热度判定，避免派生字段与当前数据脱节。
     if (QUANTITY_FIELDS.some((entry) => entry.field === field)) {
-      item.stockingType = resolveHeatType(item, inventoryStore.heatConfig)
+      item.stockingType = resolveHeatLabel(item, inventoryStore.heatSpecs)
     }
     refreshLeafRow(id)
   }
@@ -689,7 +708,7 @@ function exportInventoryToExcel() {
     { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
     { label: '出口', columns: ['欠货', '周消耗'] },
-    { label: '库存', columns: ['在仓库存', '周转入', '在途库存', '理论库存', '预计库存'] },
+    { label: '库存', columns: ['周转入', '在途库存', '在仓库存', '理论库存', '预计库存'] },
     { label: '数据反馈', columns: ['缺口量', '缺口率', '库销比'] },
     { label: '备货策略', columns: ['红线库存', '正常库存', '峰值库存', '系数'] },
   ]
@@ -717,9 +736,9 @@ function exportInventoryToExcel() {
     row.producing,
     row.backorder,
     row.weeklyUsage,
-    row.warehouseStock,
     row.turnoverIn,
     row.inTransitStock,
+    row.warehouseStock,
     row.theoreticalStock,
     row.projectedStock,
     row.shortage ?? '缺省',
@@ -885,10 +904,13 @@ async function handleImportFileChange(event) {
     const { sheetName, rows } = readWorkbookRows(await file.arrayBuffer())
     const { items, errors, blankRows, ignoredPlannedRows, ignoredHeatRows } =
       parseInventorySheet(rows)
+    // 同一份行数据再读一遍全量表格，供全面板展示 Excel 的全部列与全部数据行。
+    const sheet = readSheetTable(rows)
 
     importFileName.value = file.name
     importSummary.value = {
       sheetName,
+      sheet,
       items,
       errors,
       blankRows,
@@ -933,11 +955,16 @@ function applyImportedItems(importedItems) {
       warehouseStock: entry.warehouseStock,
       inTransitStock: entry.inTransitStock,
       turnoverIn: entry.turnoverIn,
+      // 动销指标参与热度配置，导入后随行保留。
+      monthlyAvgCount: entry.monthlyAvgCount,
+      totalOrders: entry.totalOrders,
+      activeMonths: entry.activeMonths,
+      activeCustomers: entry.activeCustomers,
     }
   })
 
   // 热度由当前热度配置决定，导入文件中的“热度”列不再参与。
-  applyHeatConfigToItems(nextItems, inventoryStore.heatConfig)
+  applyHeatSpecsToItems(nextItems, inventoryStore.heatSpecs)
 
   // 撤销快照按新 id 重建，避免新旧 id 相同或互换时互相覆盖。
   const nextUndoHistory = new Map()
@@ -981,6 +1008,8 @@ function confirmImport() {
   if (!summary) return
 
   applyImportedItems(summary.items)
+  // 全面板展示的是本次 Excel 的原始表格（全部列、全部数据行）。
+  inventoryStore.importedSheet = { sheetName: summary.sheetName, ...summary.sheet }
   const skippedRows = summary.errors.length + summary.blankRows
   const spuCount = new Set(summary.items.map((item) => item.product)).size
   const skuCount = new Set(summary.items.map((item) => `${item.product}\u0000${item.color}`)).size
@@ -1177,6 +1206,9 @@ function commitProduct(currentProduct) {
         </div>
         <ElButton class="reset-filters-button" @click="resetFilters">重置</ElButton>
         <div class="table-actions">
+          <ElButton class="toggle-groups-button" size="small" @click="toggleAllProductGroups">
+            {{ inventoryRows.length > 0 && inventoryRows.every((row) => expandedProductKeys.includes(row.id)) ? '全部收起' : '全部展开' }}
+          </ElButton>
           <ElButton class="export-excel-button" @click="exportInventoryToExcel">
             保存Excel
           </ElButton>
@@ -1244,7 +1276,7 @@ function commitProduct(currentProduct) {
               class="inventory-vtable__head-cell"
               :class="{
                 'inventory-vtable__head-cell--deep-right':
-                  column.key === 'planned' || column.key === 'inTransitStock',
+                  column.key === 'planned' || column.key === 'warehouseStock',
               }"
             >
               {{ column.label }}
@@ -1425,19 +1457,6 @@ function commitProduct(currentProduct) {
                 />
               </div>
               <div class="inventory-vtable__cell">
-                <template v-if="row.isProductGroup">{{ formatQuantity(row.warehouseStock) }}</template>
-                <ElInputNumber
-                  v-else
-                  :model-value="row.warehouseStock"
-                  :min="0"
-                  :controls="false"
-                  size="small"
-                  class="editable-number"
-                  aria-label="在仓库存"
-                  @update:model-value="updateValue(row.id, 'warehouseStock', $event)"
-                />
-              </div>
-              <div class="inventory-vtable__cell">
                 <template v-if="row.isProductGroup">{{ formatQuantity(row.turnoverIn) }}</template>
                 <ElInputNumber
                   v-else
@@ -1450,7 +1469,7 @@ function commitProduct(currentProduct) {
                   @update:model-value="updateValue(row.id, 'turnoverIn', $event)"
                 />
               </div>
-              <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
+              <div class="inventory-vtable__cell">
                 <template v-if="row.isProductGroup">
                   {{ formatQuantity(row.inTransitStock) }}
                 </template>
@@ -1463,6 +1482,19 @@ function commitProduct(currentProduct) {
                   class="editable-number"
                   aria-label="在途库存"
                   @update:model-value="updateValue(row.id, 'inTransitStock', $event)"
+                />
+              </div>
+              <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
+                <template v-if="row.isProductGroup">{{ formatQuantity(row.warehouseStock) }}</template>
+                <ElInputNumber
+                  v-else
+                  :model-value="row.warehouseStock"
+                  :min="0"
+                  :controls="false"
+                  size="small"
+                  class="editable-number"
+                  aria-label="在仓库存"
+                  @update:model-value="updateValue(row.id, 'warehouseStock', $event)"
                 />
               </div>
               <div class="inventory-vtable__cell">
@@ -1568,6 +1600,10 @@ function commitProduct(currentProduct) {
           <li>文件：{{ importFileName }}</li>
           <li>工作表：{{ importSummary.sheetName }}</li>
           <li>有效数据：{{ importSummary.items.length }} 行</li>
+          <li>
+            Excel 全量：{{ importSummary.sheet.columns.length }} 列 /
+            {{ importSummary.sheet.rows.length }} 行（全面板展示）
+          </li>
           <li v-if="importSummary.errors.length">
             跳过：{{ importSummary.errors.length }} 行（数据有误）
           </li>
@@ -1588,7 +1624,7 @@ function commitProduct(currentProduct) {
           </ul>
         </div>
         <p class="import-hint">
-          确认后用 Excel 数据替换主面板全部库存行；需安排、撤销记录和本次采购清单按“品名+颜色”保留。理论库存、预警、缺口量、缺口率、库销比仍由系统计算。
+          确认后用 Excel 数据替换主面板全部库存行；需安排、撤销记录和本次采购清单按“品名+颜色”保留。理论库存、预警、缺口量、缺口率、库销比仍由系统计算。全面板会展示该 Excel 的全部列与全部数据行。
         </p>
       </template>
       <template #footer>

@@ -1,7 +1,7 @@
-import { QUANTITY_FIELDS } from '@/data/quantityFields'
+import { HEAT_FACTOR_FIELDS, QUANTITY_FIELDS } from '@/data/quantityFields'
 import { normalizeProductName } from './inventory.js'
 
-// 导入模板列：只包含基本面信息与计算所需的输入项，需安排由面板自己维护。
+// 导入模板列：主面板基本面信息 + 计算所需输入项 + 热度配置的动销指标。
 // 热度由“热度配置”规则计算，不再作为导入列。
 export const IMPORT_TEMPLATE_COLUMNS = [
   '色彩',
@@ -13,11 +13,12 @@ export const IMPORT_TEMPLATE_COLUMNS = [
   '在仓库存',
   '在途库存',
   '周转入',
+  ...HEAT_FACTOR_FIELDS.map((entry) => entry.label),
 ]
 
 export const IMPORT_TEMPLATE_SAMPLE_ROWS = [
-  ['黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0],
-  ['彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0],
+  ['黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0, 4120, 14520, 12, 9],
+  ['彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0, 4980, 11800, 12, 6],
 ]
 
 const HEADER_ALIASES = new Map([
@@ -38,6 +39,7 @@ const HEADER_ALIASES = new Map([
   ['在仓库存', 'warehouseStock'],
   ['在途库存', 'inTransitStock'],
   ['周转入', 'turnoverIn'],
+  ...HEAT_FACTOR_FIELDS.map((entry) => [entry.label, entry.field]),
   // 仅用于识别并提示被忽略的列，不参与导入。
   ['需安排', 'planned'],
 ])
@@ -50,6 +52,11 @@ function normalizeHeader(value) {
   return String(value ?? '')
     .replace(/[\s\u3000]+/g, '')
     .replace(/[*＊]/g, '')
+}
+
+// 表头文字 → 库存字段名，全面板据此判断哪些列可做 SPU 汇总。
+export function resolveInventoryField(label) {
+  return HEADER_ALIASES.get(normalizeHeader(label)) ?? ''
 }
 
 function isRowEmpty(cells) {
@@ -145,7 +152,7 @@ export function parseInventorySheet(rows) {
 
     const rowErrors = []
     const quantities = {}
-    for (const { field, label } of QUANTITY_FIELDS) {
+    for (const { field, label } of [...QUANTITY_FIELDS, ...HEAT_FACTOR_FIELDS]) {
       quantities[field] = parseQuantity(readCell(field), label, row.rowNumber, rowErrors)
     }
     const category = parseEnum(
@@ -172,4 +179,40 @@ export function parseInventorySheet(rows) {
   }
 
   return { items, errors, blankRows, ignoredPlannedRows, ignoredHeatRows }
+}
+
+// 全面板展示用：不做字段映射与校验，完整保留表头以下的所有非空行与全部列。
+// 主面板仍按 parseInventorySheet 的特定字段导入，两者共用同一份行数据。
+export function readSheetTable(rows) {
+  const header = locateHeader(rows)
+  if (!header) {
+    throw new Error('未找到表头：Excel 中需要包含“品名”和“颜色”两列')
+  }
+
+  const { headerIndex } = header
+  const headerCells = rows[headerIndex].cells
+  const dataRows = rows.slice(headerIndex + 1).filter((row) => !isRowEmpty(row.cells))
+  // 部分文件会残留无内容的格式单元格，按实际有值的最后一列截断，避免出现大量空列。
+  let columnCount = 0
+  const markLastUsedColumn = (cells) => {
+    for (let index = cells.length - 1; index >= 0; index -= 1) {
+      if (String(cells[index] ?? '').trim() !== '') {
+        columnCount = Math.max(columnCount, index + 1)
+        return
+      }
+    }
+  }
+  markLastUsedColumn(headerCells)
+  for (const row of dataRows) markLastUsedColumn(row.cells)
+
+  const columns = Array.from({ length: columnCount }, (_, index) => {
+    const label = String(headerCells[index] ?? '').trim()
+    return { key: `c${index}`, label: label || `列${index + 1}` }
+  })
+  const tableRows = dataRows.map((row) => ({
+    rowNumber: row.rowNumber,
+    cells: Array.from({ length: columnCount }, (_, index) => row.cells[index] ?? ''),
+  }))
+
+  return { columns, rows: tableRows }
 }

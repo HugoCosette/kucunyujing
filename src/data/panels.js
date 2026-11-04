@@ -6,6 +6,10 @@ export const MAIN_PANEL = {
   label: '主面板',
   path: '/',
   routeName: 'home',
+  // 全面板：只读展示主面板导入 Excel 的全部数据，与主面板共用同一份 store。
+  allLabel: '全面板',
+  allPath: '/all',
+  allRouteName: 'allData',
   configLabel: '配置信息',
   configPath: '/config',
   configRouteName: 'config',
@@ -26,10 +30,17 @@ export const EXAMPLE_PANEL = {
 export const inventoryPanels = [MAIN_PANEL, EXAMPLE_PANEL]
 
 function toNavEntries(panel) {
-  return [
-    { key: panel.key, label: panel.label, path: panel.path },
-    { key: `${panel.key}-config`, label: panel.configLabel, path: panel.configPath },
-  ]
+  const entries = [{ key: panel.key, label: panel.label, path: panel.path }]
+  // 只有声明了 allPath 的面板才提供“全面板”入口（目前仅主面板）。
+  if (panel.allPath) {
+    entries.push({ key: `${panel.key}-all`, label: panel.allLabel, path: panel.allPath })
+  }
+  entries.push({
+    key: `${panel.key}-config`,
+    label: panel.configLabel,
+    path: panel.configPath,
+  })
+  return entries
 }
 
 // 顶部导航的左右两组入口：主面板组在左，示例数据组在右。
