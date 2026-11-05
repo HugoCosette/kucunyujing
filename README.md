@@ -46,8 +46,9 @@ npm run build
 
 首次部署需要在 GitHub 上确认两件事：
 
-1. **Pages 源**：仓库 `Settings → Pages → Build and deployment → Source` 选 **GitHub Actions**
-   （工作流里已加 `enablement: true`，多数情况下会自动开启）。
+1. **Pages 源**（必须手动点一次，工作流没有权限自己开）：仓库 `Settings → Pages → Build and deployment → Source`
+   选 **GitHub Actions**。设置完点一下 Actions 里失败的那次运行 → `Re-run all jobs`；
+   之后的提交都会自动发布。
 2. **仓库可见性**：GitHub Pages 只在**公开仓库**或 **Pro/Team/Enterprise 私有仓库**上可用。
    若账号没有付费计划，需要把仓库改成 Public（`Settings → General → Danger Zone → Change visibility`），
    且发布出来的站点本来就是公开的，任何人都能访问。
