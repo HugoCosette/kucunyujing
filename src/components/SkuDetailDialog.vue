@@ -33,7 +33,7 @@ const dialogVisible = computed({
   set: (value) => emit('update:visible', value),
 })
 
-// 模式 / 热度档 / 因子等级全部按当前配置现算，与主面板、配置页同一套口径。
+// 模式 / 评分档 / 因子等级全部按当前配置现算，与主面板、配置页同一套口径。
 const evaluated = computed(() =>
   props.item ? evaluateItem(props.item, createEvaluator(stockingStore.config)) : null,
 )
@@ -240,7 +240,7 @@ onBeforeUnmount(disposeChart)
           <span class="sku-detail__value">{{ evaluated?.ruleName || '未命中模式' }}</span>
         </div>
         <div class="sku-detail__meta-item">
-          <span class="sku-detail__label">热度</span>
+          <span class="sku-detail__label">评分档</span>
           <span class="sku-detail__value">{{ evaluated?.tierName || '--' }}</span>
         </div>
         <div class="sku-detail__meta-item">
@@ -254,7 +254,7 @@ onBeforeUnmount(disposeChart)
       </div>
 
       <h4 class="sku-detail__section">
-        热度因子评分
+        评分因子
         <span v-if="evaluated?.gradeSummary" class="sku-detail__section-hint">
           等级明细 {{ evaluated.gradeSummary }}
         </span>
@@ -272,7 +272,7 @@ onBeforeUnmount(disposeChart)
           <span class="sku-factor__value">{{ formatFactorValue(detail) }}</span>
         </div>
       </div>
-      <div v-else class="sku-detail__empty">当前模式没有配置热度因子</div>
+      <div v-else class="sku-detail__empty">当前模式没有配置评分因子</div>
 
       <h4 class="sku-detail__section">
         月度销量

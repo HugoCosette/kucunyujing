@@ -1,8 +1,8 @@
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 
 // 整表替换主面板库存行：库存数据以总表为准，需安排、撤销记录与采购清单按唯一标识保留，
-// 因此改品名或颜色不会丢失已采纳的补货计划。动销指标只来自销售表，缺列或缺值记为空（热度记 Z）。
-// 模式 / 热度档 / 系数不写回行数据，由视图按当前配置现算。
+// 因此改品名或颜色不会丢失已采纳的补货计划。动销指标只来自销售表，缺列或缺值记为空（评分记 Z）。
+// 模式 / 评分档 / 系数不写回行数据，由视图按当前配置现算。
 export function applyImportedInventory(store, importedItems, { salesBySku = null } = {}) {
   const { inventoryItems, purchaseList, plannedUndoHistory } = store
 
@@ -40,7 +40,7 @@ export function applyImportedInventory(store, importedItems, { salesBySku = null
     }
   })
 
-  // 模式判定、热度分档与系数统一由视图按当前配置计算。
+  // 模式判定、评分分档与系数统一由视图按当前配置计算。
 
   // 撤销快照按新 id 重建，避免新旧 id 相同或互换时互相覆盖。
   const nextUndoHistory = new Map()

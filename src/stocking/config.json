@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-11-05T09:37:46.862Z",
+  "updatedAt": "2026-11-05T11:06:45.379Z",
   "rules": [
     {
       "id": "rule-1",
@@ -42,7 +42,7 @@
       "tiers": [
         {
           "id": "rule-1-tier-hot-a",
-          "name": "热销3S",
+          "name": "3S",
           "isDefault": false,
           "conditions": [
             {
@@ -66,13 +66,18 @@
         },
         {
           "id": "rule-1-tier-mw1z9gs1",
-          "name": "热销2S",
+          "name": "2S1A",
           "isDefault": false,
           "conditions": [
             {
               "grade": "S",
               "operator": "gte",
               "count": 2
+            },
+            {
+              "grade": "A",
+              "operator": "gte",
+              "count": 1
             }
           ],
           "coefficients": {
@@ -90,7 +95,7 @@
         },
         {
           "id": "rule-1-tier-mw1zcbv5",
-          "name": "热销1S",
+          "name": "1S",
           "isDefault": false,
           "conditions": [
             {
@@ -134,7 +139,7 @@
     },
     {
       "id": "rule-default",
-      "name": "兜底规则",
+      "name": "兜底模式",
       "isDefault": true,
       "factors": [],
       "grades": {

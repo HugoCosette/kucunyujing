@@ -22,7 +22,7 @@ const metricLabelOf = (field) =>
 
 const salesMetricText = computed(() => {
   const fields = props.summary?.sales?.metricFields ?? []
-  return fields.length ? fields.map(metricLabelOf).join(' / ') : '未包含（热度因子记 Z）'
+  return fields.length ? fields.map(metricLabelOf).join(' / ') : '未包含（评分因子记 Z）'
 })
 
 const canConfirm = computed(
@@ -68,7 +68,7 @@ function closeDialog() {
             忽略“需安排”列：{{ summary.inventory.ignoredPlannedRows }} 行有值，需安排以面板内采纳结果为准
           </li>
           <li v-if="summary.inventory.ignoredHeatRows">
-            忽略“热度”列：{{ summary.inventory.ignoredHeatRows }} 行有值，热度按备货配置计算
+            忽略“评分档”列（旧模板为“热度”）：{{ summary.inventory.ignoredHeatRows }} 行有值，评分档按备货配置计算
           </li>
           <li v-if="summary.inventory.ignoredMetricRows">
             忽略“动销指标”列：{{ summary.inventory.ignoredMetricRows }} 行有值，动销指标以销售表为准
@@ -137,7 +137,7 @@ function closeDialog() {
 
       <p class="import-sources__hint">
         确认后：总表整表替换主面板库存行（需安排、撤销记录与采购清单按唯一标识保留）；销售表的动销指标写入对应 SKU，1-12
-        月条数与重量叠加到销售表页；随后按备货配置重算模式、热度档与系数。理论库存、预警、缺口量、缺口率、库销比仍由系统计算。
+        月条数与重量叠加到销售表页；随后按备货配置重算模式、评分档与系数。理论库存、预警、缺口量、缺口率、库销比仍由系统计算。
       </p>
     </template>
 

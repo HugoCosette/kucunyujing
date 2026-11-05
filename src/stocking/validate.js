@@ -165,7 +165,7 @@ export function normalizeConfig(config) {
 function validateGrades(rule, errors, warnings) {
   const entries = Object.entries(rule.grades)
   if (entries.length === 0) {
-    warnings.push({ message: `${rule.name}：未启用热度因子，所有 SKU 记为 Z` })
+    warnings.push({ message: `${rule.name}：未启用评分因子，所有 SKU 记为 Z` })
     return
   }
 
