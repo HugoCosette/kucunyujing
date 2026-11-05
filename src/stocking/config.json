@@ -1,16 +1,16 @@
 {
   "version": 1,
-  "updatedAt": "2026-11-05T01:37:57.166Z",
+  "updatedAt": "2026-11-05T09:37:46.862Z",
   "rules": [
     {
       "id": "rule-1",
-      "name": "规则1",
+      "name": "模式1",
       "isDefault": false,
       "factors": [
         {
           "field": "monthlyAvgCount",
           "operator": "gte",
-          "value": 500
+          "value": 1000
         }
       ],
       "grades": {

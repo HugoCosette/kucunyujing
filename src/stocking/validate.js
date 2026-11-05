@@ -112,7 +112,7 @@ function normalizeTier(tier, ruleId, index) {
   }
 }
 
-// 每个规则必须且只能有一个默认档，且固定在末位。
+// 每个模式必须且只能有一个默认档，且固定在末位。
 function normalizeTiers(tiers, ruleId) {
   const list = (Array.isArray(tiers) ? tiers : []).map((tier, index) =>
     normalizeTier(tier, ruleId, index),
@@ -129,7 +129,7 @@ function normalizeRule(rule, index) {
   const id = String(source.id ?? '').trim() || nextId(`rule-${index + 1}`)
   return {
     id,
-    name: String(source.name ?? '').trim() || `规则${index + 1}`,
+    name: String(source.name ?? '').trim() || `模式${index + 1}`,
     isDefault: Boolean(source.isDefault),
     factors: normalizeFactors(source.factors),
     grades: normalizeGrades(source.grades),
@@ -137,7 +137,7 @@ function normalizeRule(rule, index) {
   }
 }
 
-// 归一化：补全结构、丢弃非法字段、保证默认规则与默认档固定末位。
+// 归一化：补全结构、丢弃非法字段、保证默认模式与默认档固定末位。
 export function normalizeConfig(config) {
   const source = isPlainObject(config) ? config : {}
   const rules = (Array.isArray(source.rules) ? source.rules : []).map((rule, index) =>
@@ -283,7 +283,7 @@ function boundsIntersect(left, right) {
   return leftValues.some((value) => rightValues.includes(value))
 }
 
-// 规则设计要求互斥：任意两条规则的因子区间只要有交集就会提示，交由使用者收窄条件。
+// 模式设计要求互斥：任意两条模式的因子区间只要有交集就会提示，交由使用者收窄条件。
 export function detectRuleOverlap(rules) {
   const candidates = rules.filter((rule) => !rule.isDefault && rule.factors.length > 0)
   const boundsList = candidates.map((rule) => ruleBounds(rule))
@@ -316,14 +316,14 @@ export function validateConfig(config) {
 
   normalized.rules.forEach((rule) => {
     if (!rule.name) {
-      errors.push({ message: '规则名称不能为空' })
+      errors.push({ message: '模式名称不能为空' })
     } else if (names.has(rule.name)) {
-      errors.push({ message: `规则名称「${rule.name}」重复` })
+      errors.push({ message: `模式名称「${rule.name}」重复` })
     }
     names.add(rule.name)
 
     if (!rule.isDefault && rule.factors.length === 0) {
-      warnings.push({ message: `${rule.name}：未配置规则因子，该规则不参与匹配` })
+      warnings.push({ message: `${rule.name}：未配置模式因子，该模式不参与匹配` })
     }
 
     validateGrades(rule, errors, warnings)
@@ -332,7 +332,7 @@ export function validateConfig(config) {
 
   detectRuleOverlap(normalized.rules).forEach(({ a, b }) => {
     warnings.push({
-      message: `规则「${a}」与「${b}」的因子区间可能重叠，同一 SKU 会命中多条规则，请收窄条件`,
+      message: `模式「${a}」与「${b}」的因子区间可能重叠，同一 SKU 会命中多条模式，请收窄条件`,
     })
   })
 

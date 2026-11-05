@@ -4,7 +4,7 @@ import { initialInventoryItems } from '@/data/inventoryItems'
 import { DEFAULT_PANEL_KEY, inventoryPanels } from '@/data/panels'
 
 // 演示数据缺少唯一标识、总出库数量与动销指标：按周消耗折算一组稳定数值，
-// 让规则判定与热度分档在未导入 Excel 时同样可见；导入后一律以 Excel 为准。
+// 让模式判定与热度分档在未导入 Excel 时同样可见；导入后一律以 Excel 为准。
 function withDemoSourceFields(item) {
   return {
     ...item,
@@ -27,7 +27,7 @@ function createInventoryState() {
   // 数据可达数万 SKU，用 shallowRef 保存整体替换的对象，不做逐行深度响应式。
   const salesSheet = shallowRef(null)
 
-  // 规则 / 热度档 / 系数在视图计算时按当前配置现算，store 只保存导入的原始数据。
+  // 模式 / 热度档 / 系数在视图计算时按当前配置现算，store 只保存导入的原始数据。
   return { inventoryItems, purchaseList, plannedUndoHistory, salesSheet }
 }
 

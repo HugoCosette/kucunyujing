@@ -2,7 +2,7 @@ import { shallowRef } from 'vue'
 import { defineStore } from 'pinia'
 import { loadConfig, resetConfig, saveConfig } from '@/stocking'
 
-// 备货规则配置全应用只有一份：主面板与示例面板的配置页共用，改任一处效果一致。
+// 备货模式配置全应用只有一份：主面板与示例面板的配置页共用，改任一处效果一致。
 export const useStockingConfigStore = defineStore('stocking-config', () => {
   const config = shallowRef(loadConfig())
 

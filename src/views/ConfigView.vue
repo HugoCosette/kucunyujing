@@ -58,12 +58,12 @@ const examplePanel = isExamplePanel(props.panelKey)
 const configLabel = getPanelConfigLabel(props.panelKey)
 const panelDescription = examplePanel
   ? '示例配置：与主面板共用同一份备货配置，仅供对照演示。'
-  : '维护规则、热度打分与备货系数；修改会写回 src/stocking/config.json。'
+  : '维护模式、热度打分与备货系数；修改会写回 src/stocking/config.json。'
 
 // —— 配置草稿 ——
 const configDraft = ref(normalizeConfig(stockingStore.config))
 const selectedRuleId = ref(configDraft.value.rules[0]?.id ?? '')
-// 规则删除需要二次点击确认，避免误删整条规则。
+// 模式删除需要二次点击确认，避免误删整条模式。
 const pendingRuleDeleteId = ref('')
 let ruleDeleteTimer = 0
 const configDirty = computed(
@@ -81,7 +81,7 @@ const activeRule = computed(
 
 // —— 草稿撤销 / 重做 ——
 // 历史只覆盖「未保存的草稿」：改动前存一份 JSON 快照，连续输入合并成一步，
-// 结构性操作（增删规则 / 档位 / 因子 / 条件）各自单独成步。
+// 结构性操作（增删模式 / 档位 / 因子 / 条件）各自单独成步。
 const HISTORY_LIMIT = 50
 const HISTORY_DEBOUNCE = 600
 const undoStack = ref([])
@@ -207,7 +207,7 @@ function handleHistoryShortcut(event) {
 
 onMounted(() => document.addEventListener('keydown', handleHistoryShortcut))
 
-// 规则/档位的实际命中分布：配置改动后延迟重算，避免逐键全量评估。
+// 模式/档位的实际命中分布：配置改动后延迟重算，避免逐键全量评估。
 const distribution = ref(null)
 let distributionTimer = 0
 
@@ -263,18 +263,18 @@ function usedGradeFields(rule) {
   return Object.keys(rule?.grades ?? {})
 }
 
-// —— 规则 ——
+// —— 模式 ——
 function addRule() {
   const used = new Set(
     configDraft.value.rules.filter((rule) => !rule.isDefault).map((rule) => rule.name),
   )
   let index = 1
-  while (used.has(`规则${index}`)) index += 1
+  while (used.has(`模式${index}`)) index += 1
 
   const id = `rule-${Date.now().toString(36)}`
   const rule = {
     id,
-    name: `规则${index}`,
+    name: `模式${index}`,
     isDefault: false,
     factors: [],
     grades: { monthlyAvgCount: createThresholds('monthlyAvgCount') },
@@ -338,7 +338,7 @@ function requestRemoveRule(rule) {
   removeRule(rule)
 }
 
-// 切换规则时取消待确认状态，避免按钮文案残留到另一条规则上。
+// 切换模式时取消待确认状态，避免按钮文案残留到另一条模式上。
 watch(selectedRuleId, () => {
   pendingRuleDeleteId.value = ''
   if (ruleDeleteTimer) {
@@ -347,7 +347,7 @@ watch(selectedRuleId, () => {
   }
 })
 
-// —— 规则因子 ——
+// —— 模式因子 ——
 function addRuleFactor(field) {
   const rule = activeRule.value
   if (!rule) return
@@ -459,8 +459,8 @@ async function confirmConfig() {
       .map((item) => `${item.product}/${item.color}`)
       .join('、')
     const proceed = await ElMessageBox.confirm(
-      `有 ${conflictCount} 个 SKU 命中多条规则（如：${samples}），将按规则列表中靠前的一条处理。是否仍然保存？`,
-      '规则存在重叠',
+      `有 ${conflictCount} 个 SKU 命中多条模式（如：${samples}），将按模式列表中靠前的一条处理。是否仍然保存？`,
+      '模式存在重叠',
       { confirmButtonText: '仍然保存', cancelButtonText: '返回修改', type: 'warning' },
     )
       .then(() => true)
@@ -705,13 +705,13 @@ function handleRowClick(row) {
 
       <section class="rule-config-section" aria-labelledby="rule-config-title">
         <div class="rule-config-heading">
-          <h2 id="rule-config-title">规则与系数配置</h2>
+          <h2 id="rule-config-title">模式与系数配置</h2>
           <span class="rule-config-hint">
-            规则之间互相独立：一个 SKU 只能命中一条规则，都不命中时归「默认规则」；规则内按热度因子打 S/A/B/C，达到档位条件即为该热度档。
+            模式之间互相独立：一个 SKU 只能命中一条模式，都不命中时归「默认模式」；模式内按热度因子打 S/A/B/C，达到档位条件即为该热度档。
           </span>
         </div>
 
-        <div class="rule-tabs" role="tablist" aria-label="规则">
+        <div class="rule-tabs" role="tablist" aria-label="模式">
           <button
             v-for="rule in configDraft.rules"
             :key="rule.id"
@@ -730,7 +730,7 @@ function handleRowClick(row) {
               {{ ruleHitCount(rule.name) ?? 0 }}
             </span>
           </button>
-          <ElButton size="small" text class="rule-tab-add" @click="addRule">＋ 新增规则</ElButton>
+          <ElButton size="small" text class="rule-tab-add" @click="addRule">＋ 新增模式</ElButton>
         </div>
 
         <div
@@ -743,14 +743,14 @@ function handleRowClick(row) {
               v-model="activeRule.name"
               size="small"
               class="rule-name-input"
-              aria-label="规则名称"
+              aria-label="模式名称"
             />
             <span v-if="activeRule.isDefault" class="rule-card__badge">兜底：无条件命中</span>
             <span v-else class="rule-card__badge rule-card__badge--muted">
               {{
                 activeRule.factors.length
                   ? `命中 ${ruleHitCount(activeRule.name) ?? '--'} 个 SKU`
-                  : '未配置规则因子，暂不参与匹配'
+                  : '未配置模式因子，暂不参与匹配'
               }}
             </span>
             <span class="rule-card__spacer" />
@@ -763,13 +763,13 @@ function handleRowClick(row) {
               class="rule-delete-button"
               @click="requestRemoveRule(activeRule)"
             >
-              {{ pendingRuleDeleteId === activeRule.id ? '确认删除？' : '删除规则' }}
+              {{ pendingRuleDeleteId === activeRule.id ? '确认删除？' : '删除模式' }}
             </ElButton>
           </div>
 
           <div v-if="!activeRule.isDefault" class="rule-block">
             <div class="rule-block__heading">
-              <h3>① 规则因子</h3>
+              <h3>① 模式因子</h3>
               <span class="rule-block__hint">全部条件同时满足才算命中；同字段可加多条表达区间</span>
               <StockingFieldPicker
                 label="＋ 添加条件"
@@ -832,7 +832,7 @@ function handleRowClick(row) {
                 </ElButton>
               </div>
             </div>
-            <p v-else class="rule-block__empty">尚未配置条件，该规则不参与匹配。</p>
+            <p v-else class="rule-block__empty">尚未配置条件，该模式不参与匹配。</p>
           </div>
 
           <div class="rule-block">
@@ -1091,7 +1091,7 @@ function handleRowClick(row) {
         </ElTableColumn>
 
         <ElTableColumn label="信息" align="center">
-          <ElTableColumn label="规则" align="center">
+          <ElTableColumn label="模式" align="center">
             <template #default="{ row }">
               <span v-if="!row.isProductGroup" class="config-heat-text">{{ row.ruleName }}</span>
             </template>

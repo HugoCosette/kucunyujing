@@ -35,7 +35,7 @@ export function createDefaultRule(overrides = {}) {
   const id = source.id ?? 'rule-default'
   return {
     id,
-    name: source.name ?? '默认规则',
+    name: source.name ?? '默认模式',
     isDefault: source.isDefault ?? true,
     factors: source.factors ?? [],
     grades: source.grades ?? { monthlyAvgCount: createThresholds('monthlyAvgCount') },
@@ -43,7 +43,7 @@ export function createDefaultRule(overrides = {}) {
   }
 }
 
-// 内置默认配置：一个命中热销条件的「规则1」+ 无条件兜底的「默认规则」。
+// 内置默认配置：一个命中热销条件的「模式1」+ 无条件兜底的「默认模式」。
 // 这是「恢复默认」的唯一依据，与 src/stocking/config.json 的初始内容保持一致。
 export function createDefaultConfig() {
   return {
@@ -52,7 +52,7 @@ export function createDefaultConfig() {
     rules: [
       {
         id: 'rule-1',
-        name: '规则1',
+        name: '模式1',
         isDefault: false,
         factors: [
           { field: 'monthlyAvgCount', operator: 'gte', value: 200 },
@@ -81,7 +81,7 @@ export function createDefaultConfig() {
       },
       {
         id: 'rule-default',
-        name: '默认规则',
+        name: '默认模式',
         isDefault: true,
         factors: [],
         grades: { monthlyAvgCount: createThresholds('monthlyAvgCount') },
