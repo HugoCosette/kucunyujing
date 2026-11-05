@@ -6,16 +6,24 @@ export function calculateInventoryRow(item) {
   const ruleFactors = coefficientSet?.[item.category] ?? null
 
   let strategyIssue = ''
+  let strategyIssueShort = ''
   if (!coefficientSet) {
     strategyIssue = '未命中任何规则档位'
+    strategyIssueShort = '未命中档位'
   } else if (!ruleFactors) {
-    strategyIssue = item.category
-      ? `该热度档未配置「${item.category}」系数`
-      : '色彩未填写，无法确定取黑白还是彩色系数'
+    if (item.category) {
+      strategyIssue = `该热度档未配置「${item.category}」系数`
+      strategyIssueShort = `缺${item.category}系数`
+    } else {
+      strategyIssue = '色彩未填写，无法确定取黑白还是彩色系数'
+      strategyIssueShort = '色彩未填'
+    }
   } else if (!Object.values(ruleFactors).every(Number.isFinite)) {
     strategyIssue = '红线 / 正常 / 峰值系数未填写完整'
+    strategyIssueShort = '系数未填全'
   } else if (weeklyUsage <= 0) {
     strategyIssue = '周消耗为 0，备货库存无法计算'
+    strategyIssueShort = '周消耗为0'
   }
 
   const strategyAvailable = strategyIssue === ''
@@ -56,6 +64,7 @@ export function calculateInventoryRow(item) {
     stockSalesRatio: weeklyUsage === 0 ? null : item.warehouseStock / weeklyUsage,
     strategyAvailable,
     strategyIssue,
+    strategyIssueShort,
     urgencyText: urgency.text,
     urgencyTone: urgency.tone,
   }

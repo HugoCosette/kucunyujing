@@ -16,7 +16,10 @@ import { zipSync } from 'fflate'
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import ImportSourcesDialog from '@/components/ImportSourcesDialog.vue'
+import ImportSplitTablesDialog from '@/components/ImportSplitTablesDialog.vue'
+import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import { useSourceImport } from '@/composables/useSourceImport'
+import { useSplitImport } from '@/composables/useSplitImport'
 import { useInventoryStore } from '@/stores/inventory'
 import { groupRowsByProduct } from '@/utils/productGroups'
 import {
@@ -95,6 +98,10 @@ const purchaseListPulse = ref(false)
 const canImportExcel = computed(() => props.panelKey === DEFAULT_PANEL_KEY)
 
 // 主面板与销售表共用同一条导入流程：一次可选总表 + 销售表，按表头识别，顺序不限。
+const sourceImport = useSourceImport({
+  panelKey: props.panelKey,
+  onApplied: handleSourcesImported,
+})
 const {
   fileInputRef: importFileInputRef,
   dialogVisible: importDialogVisible,
@@ -103,7 +110,20 @@ const {
   handleFilesChange: handleImportFileChange,
   cancel: cancelImport,
   confirm: confirmImport,
-} = useSourceImport({ panelKey: props.panelKey, onApplied: handleSourcesImported })
+} = sourceImport
+
+// 导入分表：选 5 张分表 → 清洗出总表 + 销售表 → 复用上面的导入流程确认写入。
+const {
+  dialogVisible: splitImportDialogVisible,
+  roles: splitImportRoles,
+  matching: splitImportMatching,
+  progress: splitImportProgress,
+  open: triggerSplitImport,
+  select: selectSplitImportFiles,
+  clear: clearSplitImportFiles,
+  start: startSplitImport,
+  cancel: cancelSplitImport,
+} = useSplitImport({ sourceImport })
 let purchaseFlyTimer = 0
 let purchasePulseTimer = 0
 
@@ -354,7 +374,6 @@ function toggleAllProductGroups() {
 const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
 const TABLE_COLUMNS = [
-  { key: 'skuId', label: '唯一标识', width: 110, group: '信息' },
   { key: 'rule', label: '规则', width: 96, group: '信息' },
   { key: 'tier', label: '热度', width: 84, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
@@ -1153,6 +1172,13 @@ function commitProduct(currentProduct) {
           </ElButton>
           <template v-if="canImportExcel">
             <ElButton
+              class="import-split-button"
+              title="选择 5 张分表，先清洗出总表与销售表再导入"
+              @click="triggerSplitImport"
+            >
+              导入分表
+            </ElButton>
+            <ElButton
               class="import-excel-button"
               title="可一次选择总表与销售表两个文件"
               @click="triggerImportExcel"
@@ -1246,15 +1272,6 @@ function commitProduct(currentProduct) {
             >
               <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
                 <span
-                  v-if="!row.isProductGroup"
-                  class="stocking-text"
-                  :title="row.skuId ? `唯一标识：${row.skuId}` : ''"
-                >
-                  {{ row.skuId }}
-                </span>
-              </div>
-              <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
-                <span
                   v-if="!row.isProductGroup && row.ruleName"
                   class="stocking-text"
                   :class="{ 'stocking-text--conflict': row.ruleConflict }"
@@ -1311,16 +1328,18 @@ function commitProduct(currentProduct) {
                 </template>
                 <span v-else class="product-name-text" :title="row.product">{{ row.product }}</span>
               </div>
-              <div class="inventory-vtable__cell">
-                <ElInput
-                  v-if="!row.isProductGroup"
-                  :model-value="row.color"
-                  :style="{ width: getColorInputWidth(row.color) }"
-                  size="small"
-                  class="editable-text"
-                  aria-label="颜色"
-                  @update:model-value="updateValue(row.id, 'color', $event)"
-                />
+              <div class="inventory-vtable__cell inventory-vtable__cell--color">
+                <template v-if="!row.isProductGroup">
+                  <ElInput
+                    :model-value="row.color"
+                    :style="{ width: getColorInputWidth(row.color) }"
+                    size="small"
+                    class="editable-text"
+                    aria-label="颜色"
+                    @update:model-value="updateValue(row.id, 'color', $event)"
+                  />
+                  <SkuDetailDialog :item="row" :panel-key="panelKey" />
+                </template>
               </div>
               <div
                 class="inventory-vtable__cell"
@@ -1568,6 +1587,17 @@ function commitProduct(currentProduct) {
       :summary="importSummary"
       @confirm="confirmImport"
       @cancel="cancelImport"
+    />
+
+    <ImportSplitTablesDialog
+      v-model="splitImportDialogVisible"
+      :roles="splitImportRoles"
+      :matching="splitImportMatching"
+      :progress="splitImportProgress"
+      @select="selectSplitImportFiles"
+      @clear="clearSplitImportFiles"
+      @start="startSplitImport"
+      @cancel="cancelSplitImport"
     />
 
     <ElDialog
@@ -1844,6 +1874,7 @@ function commitProduct(currentProduct) {
 
 .export-excel-button,
 .import-excel-button,
+.import-split-button,
 .import-template-button {
   --el-button-text-color: var(--industrial-primary);
   --el-button-bg-color: var(--industrial-surface);
@@ -2094,6 +2125,10 @@ function commitProduct(currentProduct) {
 
 .inventory-vtable__head-cell--deep-right {
   border-right: 2px solid var(--industrial-grid);
+}
+
+.inventory-vtable__cell--color {
+  gap: 2px;
 }
 
 .inventory-vtable__cell--product {

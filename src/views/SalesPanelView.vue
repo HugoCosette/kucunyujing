@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { ElButton, ElInput } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
+import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 import { SALES_MONTH_FIELDS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
@@ -21,28 +22,26 @@ const inventoryItems = inventoryStore.inventoryItems
 const salesSheet = computed(() => inventoryStore.salesSheet)
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 
-const SKU_ID_INDEX = 0
-const PRODUCT_INDEX = 1
+const PRODUCT_INDEX = 0
+const COLOR_INDEX = 1
 const MONTH_START_INDEX = SALES_TABLE_COLUMNS.findIndex((column) => column.month === 1)
 const MONTH_COLUMN_WIDTH = 92
 const tableColumns = SALES_TABLE_COLUMNS.map((column, index) => ({
   ...column,
   index,
   width:
-    index === SKU_ID_INDEX
-      ? 120
-      : index === PRODUCT_INDEX
-        ? 170
-        : index === 2
-          ? 130
-          : column.month
-            ? MONTH_COLUMN_WIDTH
-            : 96,
+    index === PRODUCT_INDEX
+      ? 170
+      : index === 1
+        ? 130
+        : column.month
+          ? MONTH_COLUMN_WIDTH
+          : 96,
 }))
-// 唯一标识、品名、颜色之后全部是数值列，参与品名父行求和。
+// 品名、颜色之后全部是数值列，参与品名父行求和。
 const quantityColumnIndexes = tableColumns
   .map((column) => column.index)
-  .filter((index) => index > 2)
+  .filter((index) => index > 1)
 
 function toCellValue(value) {
   return value === null || value === undefined ? '' : value
@@ -50,7 +49,6 @@ function toCellValue(value) {
 
 function buildSalesCells(item, sales) {
   const cells = [
-    item.skuId,
     item.product,
     item.color,
     // 4 个动销指标保留主面板导入值，销售表文件里的同名列不参与。
@@ -93,6 +91,8 @@ function rebuildRows() {
       const cells = buildSalesCells(item, bySku?.get(item.skuId))
       return {
         id: item.id,
+        // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算规则 / 热度 / 因子等级。
+        item,
         cells,
         // 预存小写索引，搜索时只做 includes。
         searchText: cells.join('\u0000').toLocaleLowerCase('zh-CN'),
@@ -361,6 +361,7 @@ onBeforeUnmount(() => {
                 :class="{
                   'sales-vtable__cell--divider': column.index === MONTH_START_INDEX,
                   'sales-vtable__cell--product': column.index === PRODUCT_INDEX,
+                  'sales-vtable__cell--color': column.index === COLOR_INDEX,
                 }"
                 :title="formatCell(row, column)"
                 role="cell"
@@ -387,6 +388,12 @@ onBeforeUnmount(() => {
                   <span class="sales-vtable__product" :title="row.product">
                     {{ row.product }}
                   </span>
+                </template>
+                <template v-else-if="column.index === COLOR_INDEX && row.item">
+                  <span class="sales-vtable__color" :title="formatCell(row, column)">
+                    {{ formatCell(row, column) }}
+                  </span>
+                  <SkuDetailDialog :item="row.item" :panel-key="panelKey" />
                 </template>
                 <template v-else>{{ formatCell(row, column) }}</template>
               </div>
@@ -582,6 +589,16 @@ onBeforeUnmount(() => {
 .sales-vtable__cell--product,
 .sales-vtable__head-cell--product {
   justify-content: flex-start;
+}
+
+.sales-vtable__cell--color {
+  gap: 2px;
+}
+
+.sales-vtable__color {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
 }
 
 .sales-vtable__row--body:hover .sales-vtable__cell {
