@@ -456,7 +456,7 @@ async function confirmConfig() {
   const conflictCount = distribution.value?.conflictCount ?? 0
   if (conflictCount > 0) {
     const samples = (distribution.value?.conflictSamples ?? [])
-      .map((item) => `${item.skuId} ${item.product}/${item.color}`)
+      .map((item) => `${item.product}/${item.color}`)
       .join('、')
     const proceed = await ElMessageBox.confirm(
       `有 ${conflictCount} 个 SKU 命中多条规则（如：${samples}），将按规则列表中靠前的一条处理。是否仍然保存？`,
@@ -509,6 +509,22 @@ async function restoreDefaults() {
 function downloadConfig() {
   exportConfigFile(configDraft.value)
   ElMessage.success('配置文件已导出，可覆盖 src/stocking/config.json')
+}
+
+// 备货策略四列：不显示"缺省"，直接把简短原因写进格子，悬停看完整说明。
+function formatStockCell(row, value) {
+  if (row.strategyAvailable) return formatQuantity(value)
+  return row.isProductGroup ? '子行缺省' : row.strategyIssueShort
+}
+
+function formatFactorCell(row) {
+  // 品名父行不展示系数（与改动前一致），只在子行缺失时给出提示。
+  if (row.isProductGroup) return row.strategyAvailable ? '' : '子行缺省'
+  return row.strategyAvailable ? formatFactors(row) : row.strategyIssueShort
+}
+
+function strategyCellTitle(row) {
+  return row.strategyAvailable ? '' : row.strategyIssue
 }
 
 // —— 备货详情表格 ——
@@ -1106,21 +1122,34 @@ function handleRowClick(row) {
         <ElTableColumn label="备货策略" align="center">
           <ElTableColumn label="红线库存" align="center">
             <template #default="{ row }">
-              {{ formatQuantity(row.redLineStock) }}
+              <span
+                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
+                :title="strategyCellTitle(row)"
+              >{{ formatStockCell(row, row.redLineStock) }}</span>
             </template>
           </ElTableColumn>
           <ElTableColumn label="正常库存" align="center">
-            <template #default="{ row }">{{ formatQuantity(row.normalStock) }}</template>
+            <template #default="{ row }">
+              <span
+                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
+                :title="strategyCellTitle(row)"
+              >{{ formatStockCell(row, row.normalStock) }}</span>
+            </template>
           </ElTableColumn>
           <ElTableColumn label="峰值库存" align="center">
-            <template #default="{ row }">{{ formatQuantity(row.peakStock) }}</template>
+            <template #default="{ row }">
+              <span
+                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
+                :title="strategyCellTitle(row)"
+              >{{ formatStockCell(row, row.peakStock) }}</span>
+            </template>
           </ElTableColumn>
           <ElTableColumn label="系数" align="center">
             <template #default="{ row }">
               <span
-                v-if="!row.isProductGroup"
-                :title="row.strategyAvailable ? '红线 / 正常 / 峰值' : row.strategyIssue"
-              >{{ formatFactors(row) }}</span>
+                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
+                :title="strategyCellTitle(row)"
+              >{{ formatFactorCell(row) }}</span>
             </template>
           </ElTableColumn>
         </ElTableColumn>
@@ -1547,15 +1576,18 @@ function handleRowClick(row) {
   white-space: nowrap;
 }
 
+.config-strategy-issue {
+  color: var(--industrial-danger);
+  font-size: 11px;
+}
+
 .config-pager {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
   margin-top: 10px;
-}
-
-.config-pager-info {
+}.config-pager-info {
   color: var(--industrial-muted);
   font-size: 12px;
 }

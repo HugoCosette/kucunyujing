@@ -70,6 +70,16 @@ function summarizeGrades(rule, grades) {
     .join('')
 }
 
+// 逐因子的等级明细：详情弹窗按配置里的因子顺序一格一格展示（有几个因子就几格）。
+function summarizeGradeDetails(rule, grades, item) {
+  return Object.keys(rule.grades).map((field) => ({
+    field,
+    label: getFieldMeta(field)?.label ?? field,
+    grade: grades[field] ?? UNGRADED,
+    value: item[field] ?? null,
+  }))
+}
+
 function evaluateUnmatched(tierName = '') {
   return {
     ruleId: '',
@@ -78,6 +88,7 @@ function evaluateUnmatched(tierName = '') {
     tierName,
     grades: {},
     gradeSummary: '',
+    gradeDetails: [],
     conflict: false,
     coefficients: null,
   }
@@ -120,6 +131,7 @@ export function createEvaluator(config) {
       tierName: tier?.name ?? '',
       grades,
       gradeSummary: summarizeGrades(rule, grades),
+      gradeDetails: summarizeGradeDetails(rule, grades, item),
       conflict,
       // 系数直接跟随命中的档位返回，视图不再按 id 二次查找。
       coefficients: tier?.coefficients ?? null,
@@ -141,6 +153,7 @@ export function evaluateItem(item, evaluator) {
     tierId: result.tierId,
     tierName: result.tierName,
     gradeSummary: result.gradeSummary,
+    gradeDetails: result.gradeDetails,
     ruleConflict: result.conflict,
     stockingCoefficients: result.coefficients,
   }

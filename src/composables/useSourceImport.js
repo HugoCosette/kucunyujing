@@ -1,7 +1,7 @@
 import { ref, shallowRef } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useInventoryStore } from '@/stores/inventory'
-import { applyImportedInventory } from '@/utils/inventoryApply'
+import { applySourceImport } from '@/utils/applySourceImport'
 import { parseInventorySheet } from '@/utils/inventoryImport'
 import { attachSalesToInventory, parseSalesSheet } from '@/utils/salesImport'
 import { analyzeSourceSheet, describeMissingColumns } from '@/utils/sourceImport'
@@ -10,12 +10,14 @@ import { readWorkbookRows } from '@/utils/xlsxSheet'
 const MAX_FILE_SIZE = 50 * 1024 * 1024
 
 // 唯一导入流程：总表与销售表必须同时选中，两个文件都按“唯一标识”关联到同一个 SKU。
+// 分表清洗导入（useSplitImport）清洗出总表与销售表后，同样从这里打开预览并确认。
 export function useSourceImport({ panelKey, onApplied }) {
   const inventoryStore = useInventoryStore(panelKey)
   const fileInputRef = ref(null)
   const dialogVisible = ref(false)
   // 导入结果含上万条 SKU 的映射表，用 shallowRef 避免深响应式包装。
   const summary = shallowRef(null)
+
 
   function trigger() {
     const input = fileInputRef.value
@@ -101,6 +103,12 @@ export function useSourceImport({ panelKey, onApplied }) {
     summary.value = null
   }
 
+  // 由分表清洗导入调用：清洗结果已是总表 + 销售表，直接进入同一个确认弹窗。
+  function openSummary(nextSummary) {
+    summary.value = nextSummary
+    dialogVisible.value = true
+  }
+
   function confirm() {
     const current = summary.value
     if (!current?.inventory || !current?.sales) {
@@ -108,21 +116,20 @@ export function useSourceImport({ panelKey, onApplied }) {
       return
     }
 
-    const { inventory, sales } = current
-    applyImportedInventory(inventoryStore, inventory.items, {
-      salesBySku: sales.merge.bySku,
-    })
-    inventoryStore.salesSheet = {
-      fileName: sales.fileName,
-      sheetName: sales.sheetName,
-      months: sales.months,
-      metricFields: sales.metricFields,
-      bySku: sales.merge.bySku,
-    }
+    applySourceImport(inventoryStore, current)
 
     onApplied?.(current)
     cancel()
   }
 
-  return { fileInputRef, dialogVisible, summary, trigger, handleFilesChange, cancel, confirm }
+  return {
+    fileInputRef,
+    dialogVisible,
+    summary,
+    trigger,
+    handleFilesChange,
+    openSummary,
+    cancel,
+    confirm,
+  }
 }

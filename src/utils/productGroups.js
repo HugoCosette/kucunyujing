@@ -48,6 +48,7 @@ function createProductSummary(rows) {
       summary.weeklyUsage === 0 ? null : summary.warehouseStock / summary.weeklyUsage,
     strategyAvailable,
     strategyIssue: '',
+    strategyIssueShort: '',
     urgencyText: '',
     urgencyTone: '',
   }

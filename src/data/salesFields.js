@@ -10,7 +10,6 @@ export const SALES_MONTH_FIELDS = Array.from({ length: 12 }, (_, index) => ({
 }))
 
 export const SALES_TABLE_COLUMNS = [
-  { key: 'skuId', label: '唯一标识' },
   { key: 'product', label: '品名' },
   { key: 'color', label: '颜色' },
   ...HEAT_FACTOR_FIELDS.map(({ field, label }) => ({ key: field, label })),
