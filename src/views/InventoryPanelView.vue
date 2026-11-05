@@ -42,7 +42,7 @@ const props = defineProps({
 })
 
 const inventoryStore = useInventoryStore(props.panelKey)
-// 备货配置全应用唯一：模式判定、热度分档与系数都按这份配置计算。
+// 备货配置全应用唯一：模式判定、评分分档与系数都按这份配置计算。
 const stockingStore = useStockingConfigStore()
 const stockingEvaluator = computed(() => createEvaluator(stockingStore.config))
 const inventoryItems = inventoryStore.inventoryItems
@@ -152,7 +152,7 @@ const itemById = computed(() => {
 })
 
 function buildLeafRow(item) {
-  // 模式 / 热度档 / 系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
+  // 模式 / 评分档 / 系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
   const row = calculateInventoryRow(evaluateItem(item, stockingEvaluator.value))
   return {
     ...row,
@@ -164,7 +164,7 @@ function buildLeafRow(item) {
 const inventoryLeafRows = shallowRef([])
 const leafRowIndexById = new Map()
 
-// 模式 / 热度档筛选项取当前数据里实际出现的名称，配置改动后自动跟随。
+// 模式 / 评分档筛选项取当前数据里实际出现的名称，配置改动后自动跟随。
 const ruleOptions = computed(() =>
   [...new Set(inventoryLeafRows.value.map((row) => row.ruleName).filter(Boolean))].sort(
     (first, second) => productCollator.compare(first, second),
@@ -232,7 +232,7 @@ function refreshLeafRows(ids) {
 rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
-// 备货配置（模式 / 热度档 / 系数）修改后，整表按新配置重算。
+// 备货配置（模式 / 评分档 / 系数）修改后，整表按新配置重算。
 watch(() => stockingStore.config, rebuildLeafRows)
 
 // 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
@@ -413,7 +413,7 @@ const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
 const TABLE_COLUMNS = [
   { key: 'rule', label: '模式', width: 96, group: '信息' },
-  { key: 'tier', label: '热度', width: 84, group: '信息' },
+  { key: 'tier', label: '评分档', width: 84, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
   { key: 'color', label: '颜色', width: 132, group: '商品' },
   { key: 'urgency', label: '预警', width: 44, group: '商品' },
@@ -816,7 +816,7 @@ function createExcelCell(value, reference, styleIndex = 0) {
 
 function exportInventoryToExcel() {
   const columnGroups = [
-    { label: '信息', columns: ['唯一标识', '模式', '热度', '等级', '色彩'] },
+    { label: '信息', columns: ['唯一标识', '模式', '评分档', '等级', '色彩'] },
     { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
     { label: '出口', columns: ['欠货', '周消耗'] },
@@ -1187,8 +1187,8 @@ function commitProduct(currentProduct) {
           multiple
           collapse-tags
           clearable
-          placeholder="按热度筛选"
-          aria-label="按热度筛选"
+          placeholder="按评分档筛选"
+          aria-label="按评分档筛选"
         >
           <ElOption v-for="name in tierOptions" :key="name" :label="name" :value="name" />
         </ElSelect>

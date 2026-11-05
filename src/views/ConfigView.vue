@@ -58,7 +58,7 @@ const examplePanel = isExamplePanel(props.panelKey)
 const configLabel = getPanelConfigLabel(props.panelKey)
 const panelDescription = examplePanel
   ? '示例配置：与主面板共用同一份备货配置，仅供对照演示。'
-  : '维护模式、热度打分与备货系数；修改会写回 src/stocking/config.json。'
+  : '维护模式、评分与备货系数；修改会写回 src/stocking/config.json。'
 
 // —— 配置草稿 ——
 const configDraft = ref(normalizeConfig(stockingStore.config))
@@ -364,7 +364,7 @@ function removeRuleFactor(index) {
   activeRule.value.factors.splice(index, 1)
 }
 
-// —— 热度因子与评分标准 ——
+// —— 评分因子与评分标准 ——
 function addGradeField(field) {
   const rule = activeRule.value
   if (!rule || rule.grades[field]) return
@@ -379,7 +379,7 @@ function removeGradeField(field) {
   delete rule.grades[field]
 }
 
-// —— 热度档 ——
+// —— 评分档 ——
 function nextTierName(rule) {
   const used = new Set(rule.tiers.filter((tier) => !tier.isDefault).map((tier) => tier.name))
   for (let index = 0; index < 26; index += 1) {
@@ -707,7 +707,7 @@ function handleRowClick(row) {
         <div class="rule-config-heading">
           <h2 id="rule-config-title">模式与系数配置</h2>
           <span class="rule-config-hint">
-            模式之间互相独立：一个 SKU 只能命中一条模式，都不命中时归「默认模式」；模式内按热度因子打 S/A/B/C，达到档位条件即为该热度档。
+            模式之间互相独立：一个 SKU 只能命中一条模式，都不命中时归「默认模式」；模式内按评分因子打 S/A/B/C，达到档位条件即为该评分档。
           </span>
         </div>
 
@@ -837,7 +837,7 @@ function handleRowClick(row) {
 
           <div class="rule-block">
             <div class="rule-block__heading">
-              <h3>② 热度因子与评分标准</h3>
+              <h3>② 评分因子与评分标准</h3>
               <span class="rule-block__hint">
                 满足最高等级即取该等级；未达 C 阈值、缺值或未配置阈值记 Z
               </span>
@@ -875,19 +875,19 @@ function handleRowClick(row) {
                   text
                   type="danger"
                   class="rule-row-remove"
-                  aria-label="移除热度因子"
+                  aria-label="移除评分因子"
                   @click="removeGradeField(field)"
                 >
                   <ElIcon><Delete /></ElIcon>
                 </ElButton>
               </div>
             </div>
-            <p v-else class="rule-block__empty">尚未启用热度因子，所有 SKU 将记为 Z。</p>
+            <p v-else class="rule-block__empty">尚未启用评分因子，所有 SKU 将记为 Z。</p>
           </div>
 
           <div class="rule-block">
             <div class="rule-block__heading">
-              <h3>③ 热度档与系数</h3>
+              <h3>③ 评分档与系数</h3>
               <span class="rule-block__hint">
                 按顺序取第一个满足条件的档位，默认档固定兜底；系数单位为周
               </span>
@@ -1096,7 +1096,7 @@ function handleRowClick(row) {
               <span v-if="!row.isProductGroup" class="config-heat-text">{{ row.ruleName }}</span>
             </template>
           </ElTableColumn>
-          <ElTableColumn label="热度" align="center">
+          <ElTableColumn label="评分档" align="center">
             <template #default="{ row }">
               <span v-if="!row.isProductGroup" class="config-heat-text">{{ row.tierName }}</span>
             </template>
@@ -1106,7 +1106,7 @@ function handleRowClick(row) {
               <span
                 v-if="!row.isProductGroup"
                 class="config-heat-text"
-                title="各热度因子等级"
+                title="各评分因子等级"
               >{{ row.gradeSummary || '--' }}</span>
             </template>
           </ElTableColumn>

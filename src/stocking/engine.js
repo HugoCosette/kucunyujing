@@ -142,7 +142,7 @@ export function createEvaluator(config) {
 }
 
 // 计算时取值用：先抄一份再评估，绝不写回 store 里的原始行。
-// 模式与热度档只在渲染时现算，配置一改所有视图立刻一致，不会残留已删除模式的旧名称。
+// 模式与评分档只在渲染时现算，配置一改所有视图立刻一致，不会残留已删除模式的旧名称。
 // 系数由评估结果直接带出，避免“再按 id 查一次”时两次归一化不一致导致整条模式取不到系数。
 export function evaluateItem(item, evaluator) {
   const result = evaluator.evaluate(item)

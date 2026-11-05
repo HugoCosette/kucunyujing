@@ -32,6 +32,7 @@ const HEADER_ALIASES = new Map([
   ['色彩类别', 'category'],
   ...QUANTITY_FIELDS.map((entry) => [entry.label, entry.field]),
   // 以下列已不参与总表导入，只用于统计并提示。
+  ['评分档', 'stockingType'],
   ['热度', 'stockingType'],
   ['备货类型', 'stockingType'],
   ['备货分类', 'stockingType'],

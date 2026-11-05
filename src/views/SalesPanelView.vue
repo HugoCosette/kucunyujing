@@ -92,7 +92,7 @@ function rebuildRows() {
       const cells = buildSalesCells(item, bySku?.get(item.skuId))
       return {
         id: item.id,
-        // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算模式 / 热度 / 因子等级。
+        // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算模式 / 评分档 / 因子等级。
         item,
         cells,
         // 预存小写索引，搜索时只做 includes。

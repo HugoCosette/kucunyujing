@@ -6,7 +6,7 @@ import {
 import { SALES_MONTH_FIELDS } from '@/data/salesFields'
 import { normalizeProductName, normalizeSkuId } from './inventory'
 
-// 销售表提供动销指标（热度因子的唯一来源）与 1-12 月条数/重量，统一按唯一标识匹配总表。
+// 销售表提供动销指标（评分因子的唯一来源）与 1-12 月条数/重量，统一按唯一标识匹配总表。
 const PRODUCT_HEADERS = new Set(['品名', '产品名称'])
 const COLOR_HEADERS = new Set(['颜色', '色号'])
 const SKU_ID_HEADERS = new Set([SKU_ID_LABEL, '唯一编码'])
@@ -104,7 +104,7 @@ function parseQuantity(raw, label, rowNumber, errors) {
   return number
 }
 
-// 解析销售表：月份列与动销指标列都可缺省，缺列时该指标记为空（热度判为 Z）。
+// 解析销售表：月份列与动销指标列都可缺省，缺列时该指标记为空（评分判为 Z）。
 export function parseSalesSheet(rows) {
   const header = locateHeader(rows)
   if (!header) {

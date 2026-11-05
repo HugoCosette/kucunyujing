@@ -15,5 +15,5 @@ export const QUANTITY_FIELDS = [
   { field: 'totalOutbound', label: '总出库数量' },
 ]
 
-// 动销指标：由销售表提供，是热度因子最常用的 4 个字段。
+// 动销指标：由销售表提供，是评分因子最常用的 4 个字段。
 export const HEAT_FACTOR_FIELDS = HEAT_METRIC_FIELDS

@@ -1,8 +1,8 @@
-// 备货系数由 stocking 模块按「模式 × 热度档 × 色彩」给出，这里只负责库存与预警计算。
+// 备货系数由 stocking 模块按「模式 × 评分档 × 色彩」给出，这里只负责库存与预警计算。
 export function calculateInventoryRow(item) {
   const coefficientSet = item.stockingCoefficients ?? null
   const weeklyUsage = Number.isFinite(item.weeklyUsage) ? item.weeklyUsage : 0
-  // 兜底只解决“归到哪条模式、哪个热度档”，还要能按色彩类别取到三档系数、且周消耗大于 0。
+  // 兜底只解决“归到哪条模式、哪个评分档”，还要能按色彩类别取到三档系数、且周消耗大于 0。
   const ruleFactors = coefficientSet?.[item.category] ?? null
 
   let strategyIssue = ''
@@ -12,7 +12,7 @@ export function calculateInventoryRow(item) {
     strategyIssueShort = '未命中档位'
   } else if (!ruleFactors) {
     if (item.category) {
-      strategyIssue = `该热度档未配置「${item.category}」系数`
+      strategyIssue = `该评分档未配置「${item.category}」系数`
       strategyIssueShort = `缺${item.category}系数`
     } else {
       strategyIssue = '色彩未填写，无法确定取黑白还是彩色系数'
