@@ -1,8 +1,24 @@
-export function calculateInventoryRow(item, stockingRules) {
-  const ruleFactors = stockingRules[item.stockingType]?.[item.category]
-  const strategyAvailable = Boolean(
-    ruleFactors && Object.values(ruleFactors).every(Number.isFinite),
-  )
+// 备货系数由 stocking 模块按「规则 × 热度档 × 色彩」给出，这里只负责库存与预警计算。
+export function calculateInventoryRow(item) {
+  const coefficientSet = item.stockingCoefficients ?? null
+  const weeklyUsage = Number.isFinite(item.weeklyUsage) ? item.weeklyUsage : 0
+  // 兜底只解决“归到哪条规则、哪个热度档”，还要能按色彩类别取到三档系数、且周消耗大于 0。
+  const ruleFactors = coefficientSet?.[item.category] ?? null
+
+  let strategyIssue = ''
+  if (!coefficientSet) {
+    strategyIssue = '未命中任何规则档位'
+  } else if (!ruleFactors) {
+    strategyIssue = item.category
+      ? `该热度档未配置「${item.category}」系数`
+      : '色彩未填写，无法确定取黑白还是彩色系数'
+  } else if (!Object.values(ruleFactors).every(Number.isFinite)) {
+    strategyIssue = '红线 / 正常 / 峰值系数未填写完整'
+  } else if (weeklyUsage <= 0) {
+    strategyIssue = '周消耗为 0，备货库存无法计算'
+  }
+
+  const strategyAvailable = strategyIssue === ''
   const factors = strategyAvailable
     ? ruleFactors
     : { redLine: null, normal: null, peak: null }
@@ -16,9 +32,9 @@ export function calculateInventoryRow(item, stockingRules) {
   const theoreticalStock = item.warehouseStock + inTransitStock
   // 预计库存是评估层：事实层叠加“已采纳的需安排”，供使用者评估补货后结果。
   const projectedStock = theoreticalStock + planned
-  const redLineStock = strategyAvailable ? item.weeklyUsage * factors.redLine : null
-  const normalStock = strategyAvailable ? item.weeklyUsage * factors.normal : null
-  const peakStock = strategyAvailable ? item.weeklyUsage * factors.peak : null
+  const redLineStock = strategyAvailable ? weeklyUsage * factors.redLine : null
+  const normalStock = strategyAvailable ? weeklyUsage * factors.normal : null
+  const peakStock = strategyAvailable ? weeklyUsage * factors.peak : null
   const shortage = strategyAvailable ? normalStock - projectedStock : null
   const urgency = getUrgency(projectedStock, redLineStock, normalStock, peakStock)
 
@@ -37,9 +53,9 @@ export function calculateInventoryRow(item, stockingRules) {
     shortage,
     shortageRate:
       !strategyAvailable || normalStock === 0 ? null : (shortage / normalStock) * 100,
-    stockSalesRatio:
-      item.weeklyUsage === 0 ? null : item.warehouseStock / item.weeklyUsage,
+    stockSalesRatio: weeklyUsage === 0 ? null : item.warehouseStock / weeklyUsage,
     strategyAvailable,
+    strategyIssue,
     urgencyText: urgency.text,
     urgencyTone: urgency.tone,
   }
@@ -88,4 +104,9 @@ export function formatProductEditorValue(product) {
 
 export function normalizeProductName(product) {
   return product.replace(/\s+/g, '').trim()
+}
+
+// 唯一标识是总表与销售表唯一的关联键；缺失时按空串处理，导入阶段已拦截。
+export function normalizeSkuId(value) {
+  return String(value ?? '').trim()
 }

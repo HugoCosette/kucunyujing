@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-05T01:37:57.166Z",
+  "rules": [
+    {
+      "id": "rule-1",
+      "name": "规则1",
+      "isDefault": false,
+      "factors": [
+        {
+          "field": "monthlyAvgCount",
+          "operator": "gte",
+          "value": 500
+        }
+      ],
+      "grades": {
+        "monthlyAvgCount": {
+          "S": 120,
+          "A": 60,
+          "B": 30,
+          "C": 0
+        },
+        "totalOrders": {
+          "S": 120,
+          "A": 60,
+          "B": 30,
+          "C": 0
+        },
+        "activeMonths": {
+          "S": 12,
+          "A": 8,
+          "B": 3,
+          "C": 0
+        },
+        "activeCustomers": {
+          "S": 30,
+          "A": 20,
+          "B": 10,
+          "C": 0
+        }
+      },
+      "tiers": [
+        {
+          "id": "rule-1-tier-hot-a",
+          "name": "热销3S",
+          "isDefault": false,
+          "conditions": [
+            {
+              "grade": "S",
+              "operator": "gte",
+              "count": 3
+            }
+          ],
+          "coefficients": {
+            "黑白": {
+              "redLine": 3,
+              "normal": 5,
+              "peak": 8
+            },
+            "彩色": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            }
+          }
+        },
+        {
+          "id": "rule-1-tier-mw1z9gs1",
+          "name": "热销2S",
+          "isDefault": false,
+          "conditions": [
+            {
+              "grade": "S",
+              "operator": "gte",
+              "count": 2
+            }
+          ],
+          "coefficients": {
+            "黑白": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            },
+            "彩色": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            }
+          }
+        },
+        {
+          "id": "rule-1-tier-mw1zcbv5",
+          "name": "热销1S",
+          "isDefault": false,
+          "conditions": [
+            {
+              "grade": "S",
+              "operator": "gte",
+              "count": 1
+            }
+          ],
+          "coefficients": {
+            "黑白": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            },
+            "彩色": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            }
+          }
+        },
+        {
+          "id": "rule-1-tier-default",
+          "name": "默认档",
+          "isDefault": true,
+          "conditions": [],
+          "coefficients": {
+            "黑白": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            },
+            "彩色": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "rule-default",
+      "name": "兜底规则",
+      "isDefault": true,
+      "factors": [],
+      "grades": {
+        "monthlyAvgCount": {
+          "S": 120,
+          "A": 90,
+          "B": 30,
+          "C": 1
+        }
+      },
+      "tiers": [
+        {
+          "id": "rule-default-tier-default",
+          "name": "兜底档",
+          "isDefault": true,
+          "conditions": [],
+          "coefficients": {
+            "黑白": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            },
+            "彩色": {
+              "redLine": 2,
+              "normal": 4,
+              "peak": 6
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

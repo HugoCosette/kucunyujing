@@ -1,6 +1,6 @@
 import { formatQuantity } from './inventory'
 
-// 品名父行求和的数值字段：主面板与全面板的 SPU 汇总共用同一组口径。
+// 品名父行求和的数值字段：主面板的 SPU 汇总口径。
 export const PRODUCT_SUMMARY_FIELDS = [
   'planned',
   'producing',
@@ -47,6 +47,7 @@ function createProductSummary(rows) {
     stockSalesRatio:
       summary.weeklyUsage === 0 ? null : summary.warehouseStock / summary.weeklyUsage,
     strategyAvailable,
+    strategyIssue: '',
     urgencyText: '',
     urgencyTone: '',
   }
@@ -64,14 +65,8 @@ export function toQuantityValue(value) {
 }
 
 // 单元格是否可参与数量汇总：空/占位或数字都接受，文本列会被排除。
-export function isQuantityCell(value) {
-  const text = String(value ?? '').trim()
-  if (EMPTY_QUANTITY_TOKENS.has(text.toLowerCase())) return true
-  return toQuantityValue(value) !== null
-}
-
-// 全面板 SPU 汇总：按品名把同一品名的行聚成一个父行，父行只填品名与数量列合计，
-// 其余列（色彩、颜色、热度、动销指标等）留空，与主面板父行的展示口径一致。
+// 销售表 SPU 汇总：按品名把同一品名的行聚成一个父行，父行只填品名与数量列合计，
+// 颜色等文本列留空，与主面板父行的展示口径一致。
 export function groupTableRowsByProduct(rows, { productIndex, quantityIndexes, columnCount }) {
   const groupsByProduct = new Map()
   const groups = []
@@ -132,7 +127,11 @@ export function groupRowsByProduct(rows) {
       product: children[0].product,
       color: '',
       category: '',
-      stockingType: '',
+      skuId: '',
+      ruleName: '',
+      tierName: '',
+      gradeSummary: '',
+      ruleConflict: false,
       isProductGroup: true,
       children,
     })

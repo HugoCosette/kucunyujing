@@ -6,10 +6,10 @@ export const MAIN_PANEL = {
   label: '主面板',
   path: '/',
   routeName: 'home',
-  // 全面板：只读展示主面板导入 Excel 的全部数据，与主面板共用同一份 store。
-  allLabel: '全面板',
-  allPath: '/all',
-  allRouteName: 'allData',
+  // 销售表：只读展示主面板 SKU 的动销指标，并叠加本页“导入销售表”的 1-12 月条数与重量。
+  allLabel: '销售表',
+  allPath: '/sales',
+  allRouteName: 'sales',
   configLabel: '配置信息',
   configPath: '/config',
   configRouteName: 'config',
@@ -31,7 +31,7 @@ export const inventoryPanels = [MAIN_PANEL, EXAMPLE_PANEL]
 
 function toNavEntries(panel) {
   const entries = [{ key: panel.key, label: panel.label, path: panel.path }]
-  // 只有声明了 allPath 的面板才提供“全面板”入口（目前仅主面板）。
+  // 只有声明了 allPath 的面板才提供“销售表”入口（目前仅主面板）。
   if (panel.allPath) {
     entries.push({ key: `${panel.key}-all`, label: panel.allLabel, path: panel.allPath })
   }
