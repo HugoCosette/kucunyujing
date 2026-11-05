@@ -94,7 +94,7 @@ function evaluateUnmatched(tierName = '') {
   }
 }
 
-// 建一次评估器跑全部 SKU：规则无顺序语义，命中多条视为冲突，运行时取靠前一条给出确定结果。
+// 建一次评估器跑全部 SKU：模式无顺序语义，命中多条视为冲突，运行时取靠前一条给出确定结果。
 export function createEvaluator(config) {
   const normalized = normalizeConfig(config)
   const candidateRules = normalized.rules.filter(
@@ -142,8 +142,8 @@ export function createEvaluator(config) {
 }
 
 // 计算时取值用：先抄一份再评估，绝不写回 store 里的原始行。
-// 规则与热度档只在渲染时现算，配置一改所有视图立刻一致，不会残留已删除规则的旧名称。
-// 系数由评估结果直接带出，避免“再按 id 查一次”时两次归一化不一致导致整条规则取不到系数。
+// 模式与热度档只在渲染时现算，配置一改所有视图立刻一致，不会残留已删除模式的旧名称。
+// 系数由评估结果直接带出，避免“再按 id 查一次”时两次归一化不一致导致整条模式取不到系数。
 export function evaluateItem(item, evaluator) {
   const result = evaluator.evaluate(item)
   return {
@@ -159,7 +159,7 @@ export function evaluateItem(item, evaluator) {
   }
 }
 
-// 配置预览/校验用：用当前数据实跑一遍，给出规则与档位的分布及冲突清单。
+// 配置预览/校验用：用当前数据实跑一遍，给出模式与档位的分布及冲突清单。
 export function summarizeEvaluation(items, config) {
   const evaluator = createEvaluator(config)
   const ruleCounts = new Map()

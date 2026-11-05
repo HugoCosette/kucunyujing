@@ -1,14 +1,14 @@
-// 备货系数由 stocking 模块按「规则 × 热度档 × 色彩」给出，这里只负责库存与预警计算。
+// 备货系数由 stocking 模块按「模式 × 热度档 × 色彩」给出，这里只负责库存与预警计算。
 export function calculateInventoryRow(item) {
   const coefficientSet = item.stockingCoefficients ?? null
   const weeklyUsage = Number.isFinite(item.weeklyUsage) ? item.weeklyUsage : 0
-  // 兜底只解决“归到哪条规则、哪个热度档”，还要能按色彩类别取到三档系数、且周消耗大于 0。
+  // 兜底只解决“归到哪条模式、哪个热度档”，还要能按色彩类别取到三档系数、且周消耗大于 0。
   const ruleFactors = coefficientSet?.[item.category] ?? null
 
   let strategyIssue = ''
   let strategyIssueShort = ''
   if (!coefficientSet) {
-    strategyIssue = '未命中任何规则档位'
+    strategyIssue = '未命中任何模式档位'
     strategyIssueShort = '未命中档位'
   } else if (!ruleFactors) {
     if (item.category) {
@@ -72,7 +72,7 @@ export function calculateInventoryRow(item) {
 
 function getUrgency(theoreticalStock, redLineStock, normalStock, peakStock) {
   if (redLineStock === null || normalStock === null || peakStock === null) {
-    return { text: '规则缺省', tone: 'unavailable' }
+    return { text: '模式缺省', tone: 'unavailable' }
   }
 
   if (theoreticalStock < redLineStock) {

@@ -8,8 +8,6 @@ import {
   ElMessage,
   ElOption,
   ElSelect,
-  ElTable,
-  ElTableColumn,
 } from 'element-plus'
 import { zipSync } from 'fflate'
 // 系数由 store 维护，便于配置页修改后全局生效。
@@ -18,6 +16,8 @@ import PanelNavigation from '@/components/PanelNavigation.vue'
 import ImportSourcesDialog from '@/components/ImportSourcesDialog.vue'
 import ImportSplitTablesDialog from '@/components/ImportSplitTablesDialog.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
+import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
+import VirtualList from '@/components/VirtualList.vue'
 import { useSourceImport } from '@/composables/useSourceImport'
 import { useSplitImport } from '@/composables/useSplitImport'
 import { useInventoryStore } from '@/stores/inventory'
@@ -42,7 +42,7 @@ const props = defineProps({
 })
 
 const inventoryStore = useInventoryStore(props.panelKey)
-// 备货配置全应用唯一：规则判定、热度分档与系数都按这份配置计算。
+// 备货配置全应用唯一：模式判定、热度分档与系数都按这份配置计算。
 const stockingStore = useStockingConfigStore()
 const stockingEvaluator = computed(() => createEvaluator(stockingStore.config))
 const inventoryItems = inventoryStore.inventoryItems
@@ -50,10 +50,12 @@ const purchaseList = inventoryStore.purchaseList
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
 const purchaseListRows = computed(() =>
   purchaseList.map((purchaseItem) => {
-    const item = inventoryItems.find((entry) => entry.id === purchaseItem.id)
-    return item
-      ? { ...purchaseItem, product: item.product, color: item.color }
-      : purchaseItem
+    const item = itemById.value.get(purchaseItem.id)
+    // 品名/颜色没变时复用原对象，避免清单上万条时每次打开都重新分配上万个对象。
+    if (!item || (item.product === purchaseItem.product && item.color === purchaseItem.color)) {
+      return purchaseItem
+    }
+    return { ...purchaseItem, product: item.product, color: item.color }
   }),
 )
 const productDrafts = reactive({})
@@ -66,6 +68,15 @@ const productFilter = ref('')
 const colorFilter = ref('')
 const expandingProductKeys = ref(new Set())
 const selectedRowId = ref(null)
+// SKU 详情弹窗只保留一个实例并挂在页面层级：放在虚拟滚动行里会随行卸载，
+// 遮罩还会被列表的 transform 容器裁掉。
+const skuDetailVisible = ref(false)
+const skuDetailItem = ref(null)
+
+function openSkuDetail(item) {
+  skuDetailItem.value = item
+  skuDetailVisible.value = true
+}
 
 // 导入成功提示（带 5 秒进度条）
 const importToast = reactive({ visible: false, message: '', progress: 100 })
@@ -92,6 +103,10 @@ function showImportToast(message) {
 const urgentPlanDialogVisible = ref(false)
 const urgentPlanRows = ref([])
 const purchaseListDialogVisible = ref(false)
+// 弹窗里的长列表按虚拟滚动渲染：上万个紧急 SKU / 采购条目时
+// 直接 v-for 会把主线程卡住十几秒。
+const URGENT_PLAN_ROW_HEIGHT = 48
+const PURCHASE_LIST_ROW_HEIGHT = 44
 const flyingPurchaseIcon = ref(null)
 const purchaseListPulse = ref(false)
 // 导入只对主面板开放，示例面板保持原始演示数据。
@@ -137,7 +152,7 @@ const itemById = computed(() => {
 })
 
 function buildLeafRow(item) {
-  // 规则 / 热度档 / 系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
+  // 模式 / 热度档 / 系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
   const row = calculateInventoryRow(evaluateItem(item, stockingEvaluator.value))
   return {
     ...row,
@@ -149,7 +164,7 @@ function buildLeafRow(item) {
 const inventoryLeafRows = shallowRef([])
 const leafRowIndexById = new Map()
 
-// 规则 / 热度档筛选项取当前数据里实际出现的名称，配置改动后自动跟随。
+// 模式 / 热度档筛选项取当前数据里实际出现的名称，配置改动后自动跟随。
 const ruleOptions = computed(() =>
   [...new Set(inventoryLeafRows.value.map((row) => row.ruleName).filter(Boolean))].sort(
     (first, second) => productCollator.compare(first, second),
@@ -172,6 +187,12 @@ function rebuildLeafRows() {
     const productDiff =
       (productMonthlyAvg.get(second.product) ?? 0) - (productMonthlyAvg.get(first.product) ?? 0)
     if (productDiff !== 0) return productDiff
+    // 聚合值相同时按品名排序，保证同一品名的行连续：父行按相邻行分组，
+    // 同品名一旦被拆开就会生成重复的父行标识，虚拟滚动的行 key 会互相顶替。
+    const productNameDiff = productCollator.compare(first.product, second.product)
+    if (productNameDiff !== 0) return productNameDiff
+    // 排序器把大小写、全半角视为相等，再按原串分一次，避免近似品名被交错排列。
+    if (first.product !== second.product) return first.product < second.product ? -1 : 1
     const monthlyDiff = (second.monthlyAvgCount ?? 0) - (first.monthlyAvgCount ?? 0)
     if (monthlyDiff !== 0) return monthlyDiff
     return productCollator.compare(first.color, second.color) || first.id - second.id
@@ -191,10 +212,27 @@ function refreshLeafRow(id) {
   inventoryLeafRows.value = rows
 }
 
+// 批量重算：几千行逐条调用 refreshLeafRow 会把 3 万行数组复制几千次，
+// 这里只复制一次再整体替换（行顺序不受需安排影响，无需重新排序）。
+function refreshLeafRows(ids) {
+  if (ids.length === 0) return
+
+  const rows = inventoryLeafRows.value.slice()
+  let changed = false
+  for (const id of ids) {
+    const index = leafRowIndexById.get(id)
+    const item = itemById.value.get(id)
+    if (index === undefined || !item) continue
+    rows[index] = buildLeafRow(item)
+    changed = true
+  }
+  if (changed) inventoryLeafRows.value = rows
+}
+
 rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
-// 备货配置（规则 / 热度档 / 系数）修改后，整表按新配置重算。
+// 备货配置（模式 / 热度档 / 系数）修改后，整表按新配置重算。
 watch(() => stockingStore.config, rebuildLeafRows)
 
 // 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
@@ -374,7 +412,7 @@ function toggleAllProductGroups() {
 const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
 const TABLE_COLUMNS = [
-  { key: 'rule', label: '规则', width: 96, group: '信息' },
+  { key: 'rule', label: '模式', width: 96, group: '信息' },
   { key: 'tier', label: '热度', width: 84, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
   { key: 'color', label: '颜色', width: 132, group: '商品' },
@@ -494,21 +532,45 @@ function openUrgentPlanDialog() {
 }
 
 function submitUrgentPlans() {
+  const accepted = []
   for (const planRow of urgentPlanRows.value) {
     if (planRow.additionalPlan <= 0) continue
 
     const item = itemById.value.get(planRow.id)
-    if (item) {
-      plannedUndoHistory[planRow.id] = {
+    if (item) accepted.push({ item, additionalPlan: planRow.additionalPlan })
+  }
+
+  if (accepted.length > 0) {
+    // 采购清单按 id 建一次索引：逐行 find / findIndex 会把整份清单重扫几千遍。
+    const purchaseIndexById = new Map(purchaseList.map((entry, index) => [entry.id, index]))
+    for (const { item, additionalPlan } of accepted) {
+      const purchaseIndex = purchaseIndexById.get(item.id)
+      plannedUndoHistory[item.id] = {
         previousPlanned: item.planned,
-        previousPurchaseItem: snapshotPurchaseItem(planRow.id),
+        previousPurchaseItem:
+          purchaseIndex === undefined ? null : { ...purchaseList[purchaseIndex] },
       }
-      item.planned = (item.planned ?? 0) + planRow.additionalPlan
-      delete plannedDrafts[planRow.id]
-      delete plannedPreviewTones[planRow.id]
-      refreshLeafRow(planRow.id)
-      syncPurchaseItem(item)
+      item.planned = (item.planned ?? 0) + additionalPlan
+      delete plannedDrafts[item.id]
+      delete plannedPreviewTones[item.id]
+
+      if (purchaseIndex === undefined) {
+        purchaseIndexById.set(item.id, purchaseList.length)
+        purchaseList.push({
+          id: item.id,
+          product: item.product,
+          color: item.color,
+          planned: item.planned ?? 0,
+          actualPlan: null,
+        })
+        continue
+      }
+      const purchaseItem = purchaseList[purchaseIndex]
+      purchaseItem.product = item.product
+      purchaseItem.color = item.color
+      purchaseItem.planned = item.planned ?? 0
     }
+    refreshLeafRows(accepted.map(({ item }) => item.id))
   }
 
   urgentPlanDialogVisible.value = false
@@ -546,7 +608,7 @@ function getPlannedPlaceholder(row) {
 }
 
 function getPlannedPlaceholderTitle(row) {
-  if (!row.strategyAvailable) return `备货规则缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
+  if (!row.strategyAvailable) return `备货模式缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
 
   return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存的 80% 下限；该建议不会自动采纳`}
 
@@ -754,7 +816,7 @@ function createExcelCell(value, reference, styleIndex = 0) {
 
 function exportInventoryToExcel() {
   const columnGroups = [
-    { label: '信息', columns: ['唯一标识', '规则', '热度', '等级', '色彩'] },
+    { label: '信息', columns: ['唯一标识', '模式', '热度', '等级', '色彩'] },
     { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
     { label: '出口', columns: ['欠货', '周消耗'] },
@@ -1114,8 +1176,8 @@ function commitProduct(currentProduct) {
           multiple
           collapse-tags
           clearable
-          placeholder="按规则筛选"
-          aria-label="按规则筛选"
+          placeholder="按模式筛选"
+          aria-label="按模式筛选"
         >
           <ElOption v-for="name in ruleOptions" :key="name" :label="name" :value="name" />
         </ElSelect>
@@ -1277,7 +1339,7 @@ function commitProduct(currentProduct) {
                   :class="{ 'stocking-text--conflict': row.ruleConflict }"
                   :title="
                     row.ruleConflict
-                      ? '命中多条规则，已按列表中靠前的规则处理，请收窄规则条件'
+                      ? '命中多条模式，已按列表中靠前的模式处理，请收窄模式条件'
                       : row.ruleName
                   "
                 >
@@ -1338,7 +1400,7 @@ function commitProduct(currentProduct) {
                     aria-label="颜色"
                     @update:model-value="updateValue(row.id, 'color', $event)"
                   />
-                  <SkuDetailDialog :item="row" :panel-key="panelKey" />
+                  <SkuDetailTrigger :item="row" @open="openSkuDetail" />
                 </template>
               </div>
               <div
@@ -1517,50 +1579,58 @@ function commitProduct(currentProduct) {
       width="820px"
       class="urgent-plan-dialog"
       :close-on-click-modal="false"
+      destroy-on-close
+      align-center
     >
       <p class="urgent-plan-hint">
         填写新增计划数量，提交后将累加到主表“需安排”。推荐计划数按补至绿色状态的最低数量计算。
       </p>
       <div class="urgent-plan-table" role="table" aria-label="紧急补货计划">
-        <div class="urgent-plan-header" role="row">
-          <span role="columnheader">商品信息</span>
-          <span role="columnheader">目前需安排</span>
-          <span role="columnheader">新增计划</span>
-          <span role="columnheader">推荐计划数</span>
-        </div>
-        <div
-          v-for="row in urgentPlanRows"
-          :key="row.id"
-          class="urgent-plan-row"
-          role="row"
+        <VirtualList
+          v-if="urgentPlanRows.length > 0"
+          :items="urgentPlanRows"
+          :item-height="URGENT_PLAN_ROW_HEIGHT"
+          class="urgent-plan-list"
         >
-          <div class="urgent-plan-product" role="cell">
-            <strong>{{ row.product }}</strong>
-            <span>{{ row.color }}</span>
-          </div>
-          <span role="cell">{{ formatQuantity(row.currentPlanned) }}</span>
-          <div role="cell">
-            <ElInputNumber
-              v-model="row.additionalPlan"
-              :min="0"
-              :precision="0"
-              :controls="false"
-              size="small"
-              class="urgent-plan-input"
-              :aria-label="`${row.product} ${row.color} 新增计划`"
-            />
-          </div>
-          <div class="urgent-plan-recommendation" role="cell">
-            <strong>{{ formatQuantity(row.recommendedPlan) }}</strong>
-            <ElButton
-              text
-              type="primary"
-              @click="row.additionalPlan = row.recommendedPlan"
-            >
-              采用
-            </ElButton>
-          </div>
-        </div>
+          <template #header>
+            <div class="urgent-plan-header" role="row">
+              <span role="columnheader">商品信息</span>
+              <span role="columnheader">目前需安排</span>
+              <span role="columnheader">新增计划</span>
+              <span role="columnheader">推荐计划数</span>
+            </div>
+          </template>
+          <template #default="{ item: row }">
+            <div class="urgent-plan-row" role="row">
+              <div class="urgent-plan-product" role="cell">
+                <strong>{{ row.product }}</strong>
+                <span>{{ row.color }}</span>
+              </div>
+              <span role="cell">{{ formatQuantity(row.currentPlanned) }}</span>
+              <div role="cell">
+                <ElInputNumber
+                  v-model="row.additionalPlan"
+                  :min="0"
+                  :precision="0"
+                  :controls="false"
+                  size="small"
+                  class="urgent-plan-input"
+                  :aria-label="`${row.product} ${row.color} 新增计划`"
+                />
+              </div>
+              <div class="urgent-plan-recommendation" role="cell">
+                <strong>{{ formatQuantity(row.recommendedPlan) }}</strong>
+                <ElButton
+                  text
+                  type="primary"
+                  @click="row.additionalPlan = row.recommendedPlan"
+                >
+                  采用
+                </ElButton>
+              </div>
+            </div>
+          </template>
+        </VirtualList>
         <div v-if="urgentPlanRows.length === 0" class="urgent-plan-empty">
           当前没有紧急补货商品
         </div>
@@ -1606,38 +1676,53 @@ function commitProduct(currentProduct) {
       width="680px"
       class="purchase-list-dialog"
       :close-on-click-modal="false"
+      destroy-on-close
+      align-center
     >
       <p class="purchase-list-hint">
         已采纳的需安排会加入清单；同一商品颜色只保留一条。实际计划仅作采购记录，不影响库存计算。
       </p>
-      <ElTable
-        :data="purchaseListRows"
-        row-key="id"
-        border
-        table-layout="fixed"
-        class="purchase-list-table"
-        empty-text="暂无已采纳的采购计划"
-      >
-        <ElTableColumn prop="product" label="品名" min-width="190" />
-        <ElTableColumn prop="color" label="颜色" width="110" align="center" />
-        <ElTableColumn prop="planned" label="需安排" width="120" align="center">
-          <template #default="{ row }">{{ formatQuantity(row.planned) }}</template>
-        </ElTableColumn>
-        <ElTableColumn label="实际计划" width="170" align="center">
-          <template #default="{ row }">
-            <ElInputNumber
-              :model-value="row.actualPlan"
-              :min="0"
-              :precision="0"
-              :controls="false"
-              size="small"
-              class="purchase-list-actual-input"
-              :aria-label="`${row.product} ${row.color} 实际计划`"
-              @update:model-value="updatePurchaseActualPlan(row.id, $event)"
-            />
+      <div class="purchase-list-table" role="table" aria-label="本次采购清单">
+        <VirtualList
+          v-if="purchaseListRows.length > 0"
+          :items="purchaseListRows"
+          :item-height="PURCHASE_LIST_ROW_HEIGHT"
+          class="purchase-list-rows"
+        >
+          <template #header>
+            <div class="purchase-list-header" role="row">
+              <span role="columnheader">品名</span>
+              <span role="columnheader">颜色</span>
+              <span role="columnheader">需安排</span>
+              <span role="columnheader">实际计划</span>
+            </div>
           </template>
-        </ElTableColumn>
-      </ElTable>
+          <template #default="{ item: row }">
+            <div class="purchase-list-row" role="row">
+              <span class="purchase-list-product" role="cell" :title="row.product">
+                {{ row.product }}
+              </span>
+              <span role="cell">{{ row.color }}</span>
+              <span role="cell">{{ formatQuantity(row.planned) }}</span>
+              <span role="cell">
+                <ElInputNumber
+                  :model-value="row.actualPlan"
+                  :min="0"
+                  :precision="0"
+                  :controls="false"
+                  size="small"
+                  class="purchase-list-actual-input"
+                  :aria-label="`${row.product} ${row.color} 实际计划`"
+                  @update:model-value="updatePurchaseActualPlan(row.id, $event)"
+                />
+              </span>
+            </div>
+          </template>
+        </VirtualList>
+        <div v-if="purchaseListRows.length === 0" class="purchase-list-empty">
+          暂无已采纳的采购计划
+        </div>
+      </div>
       <template #footer>
         <div class="dialog-footer">
           <ElButton @click="purchaseListDialogVisible = false">关闭</ElButton>
@@ -1651,6 +1736,12 @@ function commitProduct(currentProduct) {
         </div>
       </template>
     </ElDialog>
+
+    <SkuDetailDialog
+      v-model:visible="skuDetailVisible"
+      :item="skuDetailItem"
+      :panel-key="panelKey"
+    />
   </main>
 </template>
 
@@ -1920,7 +2011,7 @@ function commitProduct(currentProduct) {
   gap: 8px;
 }
 
-:global(.urgent-plan-dialog) {
+:global(.el-dialog.urgent-plan-dialog) {
   --el-color-primary: var(--industrial-primary);
   --el-dialog-bg-color: var(--industrial-surface);
   --el-text-color-primary: var(--industrial-text);
@@ -1928,9 +2019,14 @@ function commitProduct(currentProduct) {
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
   --el-fill-color-blank: var(--industrial-surface);
+  /* 窄屏 / 分屏时收窄，弹窗不超出视口 */
+  width: min(820px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
 }
 
-:global(.purchase-list-dialog) {
+:global(.el-dialog.purchase-list-dialog) {
   --el-color-primary: var(--industrial-primary);
   --el-dialog-bg-color: var(--industrial-surface);
   --el-text-color-primary: var(--industrial-text);
@@ -1938,6 +2034,17 @@ function commitProduct(currentProduct) {
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
   --el-fill-color-blank: var(--industrial-surface);
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+
+/* 内容高于视口时只让正文滚动，标题栏与按钮始终可见 */
+:global(.el-dialog.urgent-plan-dialog .el-dialog__body),
+:global(.el-dialog.purchase-list-dialog .el-dialog__body) {
+  min-height: 0;
+  overflow: auto;
 }
 
 .purchase-list-hint {
@@ -1948,18 +2055,58 @@ function commitProduct(currentProduct) {
 }
 
 .purchase-list-table {
-  width: 100%;
-  --el-table-border-color: var(--industrial-grid);
-  --el-table-header-bg-color: transparent;
-  --el-table-tr-bg-color: var(--industrial-surface);
-  --el-table-row-hover-bg-color: #edf1f3;
-  --el-bg-color: var(--industrial-surface);
-  --el-fill-color-blank: var(--industrial-surface);
+  display: flex;
+  flex-direction: column;
+  /* 清单可能上万条：只渲染视口内的行，容器限高避免顶穿弹窗 */
+  max-height: min(55vh, 480px);
+  overflow: hidden;
   color: var(--industrial-text);
+  border: 1px solid var(--industrial-grid);
+  border-radius: 4px;
+}
+
+.purchase-list-header,
+.purchase-list-row {
+  display: grid;
+  grid-template-columns:
+    minmax(150px, 1.6fr)
+    minmax(80px, 1fr)
+    minmax(80px, 1fr)
+    minmax(120px, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  text-align: center;
+}
+
+.purchase-list-header {
+  min-height: 48px;
+  color: var(--industrial-text);
+  background: var(--industrial-header);
+  font-weight: 600;
+}
+
+.purchase-list-row {
+  height: 100%;
+  border-top: 1px solid var(--industrial-grid-light);
+  font-size: 13px;
+}
+
+.purchase-list-product {
+  overflow: hidden;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.purchase-list-empty {
+  padding: 28px 12px;
+  color: var(--industrial-muted);
+  text-align: center;
 }
 
 .purchase-list-actual-input {
-  width: 130px;
+  width: 120px;
 }
 
 .urgent-plan-hint {
@@ -1970,8 +2117,11 @@ function commitProduct(currentProduct) {
 }
 
 .urgent-plan-table {
+  display: flex;
+  flex-direction: column;
+  /* 紧急 SKU 可能上万条：只渲染视口内的行 */
   max-height: min(55vh, 480px);
-  overflow: auto;
+  overflow: hidden;
   border: 1px solid var(--industrial-grid);
   border-radius: 4px;
 }
@@ -1988,15 +2138,13 @@ function commitProduct(currentProduct) {
 }
 
 .urgent-plan-header {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   color: var(--industrial-text);
   background: var(--industrial-header);
   font-weight: 600;
 }
 
 .urgent-plan-row {
+  height: 100%;
   border-top: 1px solid var(--industrial-grid-light);
   color: var(--industrial-text);
 }
@@ -2006,7 +2154,14 @@ function commitProduct(currentProduct) {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   text-align: left;
+}
+
+.urgent-plan-product strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .urgent-plan-product span {

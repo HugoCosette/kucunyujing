@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElDialog } from 'element-plus'
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
@@ -16,14 +16,24 @@ const props = defineProps({
     type: String,
     default: DEFAULT_PANEL_KEY,
   },
+  // 受控显隐：弹窗统一挂在页面层级，由表格行的入口按钮驱动。
+  visible: {
+    type: Boolean,
+    default: false,
+  },
 })
+
+const emit = defineEmits(['update:visible'])
 
 const inventoryStore = useInventoryStore(props.panelKey)
 const stockingStore = useStockingConfigStore()
 
-const visible = ref(false)
+const dialogVisible = computed({
+  get: () => props.visible,
+  set: (value) => emit('update:visible', value),
+})
 
-// 规则 / 热度档 / 因子等级全部按当前配置现算，与主面板、配置页同一套口径。
+// 模式 / 热度档 / 因子等级全部按当前配置现算，与主面板、配置页同一套口径。
 const evaluated = computed(() =>
   props.item ? evaluateItem(props.item, createEvaluator(stockingStore.config)) : null,
 )
@@ -189,7 +199,7 @@ async function handleOpened() {
 }
 
 // 弹窗打开期间销售表才导入完成时，补渲染一次。
-watch([visible, hasSalesData], ([isVisible, hasData]) => {
+watch([dialogVisible, hasSalesData], ([isVisible, hasData]) => {
   if (!isVisible) return
   if (!hasData) {
     disposeChart()
@@ -201,28 +211,18 @@ watch([visible, hasSalesData], ([isVisible, hasData]) => {
 function handleClosed() {
   disposeChart()
 }
+
+// 切换面板或路由导致组件直接卸载时，关闭事件不会触发，需要自行释放图表实例。
+onBeforeUnmount(disposeChart)
 </script>
 
 <template>
-  <button
-    v-if="item && !item.isProductGroup"
-    type="button"
-    class="sku-detail-trigger"
-    title="查看配置信息与月度销量"
-    :aria-label="`查看 ${item.product} ${item.color} 的配置信息与月度销量`"
-    @click.stop="visible = true"
-  >
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.3" />
-      <path d="M8 7.2v4.1" stroke="currentColor" stroke-linecap="round" stroke-width="1.5" />
-      <circle cx="8" cy="4.9" r="0.95" fill="currentColor" />
-    </svg>
-  </button>
-
   <ElDialog
-    v-model="visible"
+    v-model="dialogVisible"
     class="sku-detail-dialog"
     width="620px"
+    append-to-body
+    align-center
     @opened="handleOpened"
     @closed="handleClosed"
   >
@@ -236,8 +236,8 @@ function handleClosed() {
     <div v-if="item" class="sku-detail">
       <div class="sku-detail__meta">
         <div class="sku-detail__meta-item">
-          <span class="sku-detail__label">规则</span>
-          <span class="sku-detail__value">{{ evaluated?.ruleName || '未命中规则' }}</span>
+          <span class="sku-detail__label">模式</span>
+          <span class="sku-detail__value">{{ evaluated?.ruleName || '未命中模式' }}</span>
         </div>
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">热度</span>
@@ -272,7 +272,7 @@ function handleClosed() {
           <span class="sku-factor__value">{{ formatFactorValue(detail) }}</span>
         </div>
       </div>
-      <div v-else class="sku-detail__empty">当前规则没有配置热度因子</div>
+      <div v-else class="sku-detail__empty">当前模式没有配置热度因子</div>
 
       <h4 class="sku-detail__section">
         月度销量
@@ -293,41 +293,7 @@ function handleClosed() {
 </template>
 
 <style scoped>
-.sku-detail-trigger {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  color: var(--industrial-muted);
-  background: transparent;
-  border: 0;
-  border-radius: 50%;
-  cursor: pointer;
-  transition:
-    color 120ms ease,
-    background 120ms ease;
-}
-
-.sku-detail-trigger:hover {
-  color: var(--industrial-primary);
-  background: rgba(63, 113, 141, 0.16);
-}
-
-.sku-detail-trigger:focus-visible {
-  outline: 2px solid var(--industrial-primary);
-  outline-offset: 1px;
-}
-
-.sku-detail-trigger svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-}
-
-:global(.sku-detail-dialog) {
+:global(.el-dialog.sku-detail-dialog) {
   --el-color-primary: var(--industrial-primary);
   --el-dialog-bg-color: var(--industrial-surface);
   --el-text-color-primary: var(--industrial-text);
@@ -335,6 +301,17 @@ function handleClosed() {
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
   --el-fill-color-blank: var(--industrial-surface);
+  /* 窄屏 / 分屏时收窄宽度，弹窗始终留在视口内 */
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+
+/* 内容高于视口时只让正文滚动，标题栏与关闭按钮始终可见 */
+:global(.sku-detail-dialog .el-dialog__body) {
+  min-height: 0;
+  overflow: auto;
 }
 
 .sku-detail__header {

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vu
 import { ElButton, ElInput } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
+import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 import { SALES_MONTH_FIELDS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
@@ -91,7 +92,7 @@ function rebuildRows() {
       const cells = buildSalesCells(item, bySku?.get(item.skuId))
       return {
         id: item.id,
-        // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算规则 / 热度 / 因子等级。
+        // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算模式 / 热度 / 因子等级。
         item,
         cells,
         // 预存小写索引，搜索时只做 includes。
@@ -121,6 +122,15 @@ const searchKeyword = ref('')
 const appliedKeyword = ref('')
 // 品名父行默认全部展开，只记录被收起（折叠）的品名。
 const collapsedProductIds = ref(new Set())
+// SKU 详情弹窗挂在页面层级，行内只放触发按钮：弹窗放在虚拟行里会随行卸载，
+// 遮罩也会被列表的 transform 容器裁掉。
+const skuDetailVisible = ref(false)
+const skuDetailItem = ref(null)
+
+function openSkuDetail(item) {
+  skuDetailItem.value = item
+  skuDetailVisible.value = true
+}
 let searchDebounceTimer = 0
 
 function applySearch() {
@@ -393,7 +403,7 @@ onBeforeUnmount(() => {
                   <span class="sales-vtable__color" :title="formatCell(row, column)">
                     {{ formatCell(row, column) }}
                   </span>
-                  <SkuDetailDialog :item="row.item" :panel-key="panelKey" />
+                  <SkuDetailTrigger :item="row.item" @open="openSkuDetail" />
                 </template>
                 <template v-else>{{ formatCell(row, column) }}</template>
               </div>
@@ -406,6 +416,12 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <SkuDetailDialog
+      v-model:visible="skuDetailVisible"
+      :item="skuDetailItem"
+      :panel-key="panelKey"
+    />
   </main>
 </template>
 
