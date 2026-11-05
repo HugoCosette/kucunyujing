@@ -33,10 +33,9 @@ jobs:
       # 这里把入口页复制过去，交给 vue-router 接管当前路径。
       - run: cp dist/index.html dist/404.html
 
+      # Pages 必须先由仓库管理员在 Settings → Pages 里把 Source 设为「GitHub Actions」，
+      # 默认 GITHUB_TOKEN 没有创建 Pages 站点的权限，无法自动开启。
       - uses: actions/configure-pages@v5
-        with:
-          # 首次运行时若仓库还没开启 Pages，自动按「GitHub Actions」源开启，省掉手动点设置。
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
