@@ -15,6 +15,8 @@ import { zipSync } from 'fflate'
 // 系数由 store 维护，便于配置页修改后全局生效。
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import PanelNavigation from '@/components/PanelNavigation.vue'
+import ImportSourcesDialog from '@/components/ImportSourcesDialog.vue'
+import { useSourceImport } from '@/composables/useSourceImport'
 import { useInventoryStore } from '@/stores/inventory'
 import { groupRowsByProduct } from '@/utils/productGroups'
 import {
@@ -25,16 +27,9 @@ import {
   formatRatio,
   normalizeProductName,
 } from '@/utils/inventory'
-import { QUANTITY_FIELDS } from '@/data/quantityFields'
-import { toCoefficientMap } from '@/data/heatRules'
-import { applyHeatSpecsToItems, resolveHeatLabel } from '@/utils/heatRules'
-import {
-  IMPORT_TEMPLATE_COLUMNS,
-  IMPORT_TEMPLATE_SAMPLE_ROWS,
-  parseInventorySheet,
-  readSheetTable,
-} from '@/utils/inventoryImport'
-import { readWorkbookRows } from '@/utils/xlsxSheet'
+import { useStockingConfigStore } from '@/stores/stocking'
+import { createEvaluator, evaluateItem } from '@/stocking'
+import { IMPORT_TEMPLATE_COLUMNS, IMPORT_TEMPLATE_SAMPLE_ROWS } from '@/utils/inventoryImport'
 
 const props = defineProps({
   panelKey: {
@@ -44,6 +39,9 @@ const props = defineProps({
 })
 
 const inventoryStore = useInventoryStore(props.panelKey)
+// 备货配置全应用唯一：规则判定、热度分档与系数都按这份配置计算。
+const stockingStore = useStockingConfigStore()
+const stockingEvaluator = computed(() => createEvaluator(stockingStore.config))
 const inventoryItems = inventoryStore.inventoryItems
 const purchaseList = inventoryStore.purchaseList
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
@@ -59,6 +57,8 @@ const productDrafts = reactive({})
 const plannedDrafts = reactive({})
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const selectedWarningTones = ref([])
+const selectedRuleNames = ref([])
+const selectedTierNames = ref([])
 const productFilter = ref('')
 const colorFilter = ref('')
 const expandingProductKeys = ref(new Set())
@@ -91,12 +91,19 @@ const urgentPlanRows = ref([])
 const purchaseListDialogVisible = ref(false)
 const flyingPurchaseIcon = ref(null)
 const purchaseListPulse = ref(false)
-const importFileInputRef = ref(null)
-const importDialogVisible = ref(false)
-const importSummary = ref(null)
-const importFileName = ref('')
 // 导入只对主面板开放，示例面板保持原始演示数据。
 const canImportExcel = computed(() => props.panelKey === DEFAULT_PANEL_KEY)
+
+// 主面板与销售表共用同一条导入流程：一次可选总表 + 销售表，按表头识别，顺序不限。
+const {
+  fileInputRef: importFileInputRef,
+  dialogVisible: importDialogVisible,
+  summary: importSummary,
+  trigger: triggerImportExcel,
+  handleFilesChange: handleImportFileChange,
+  cancel: cancelImport,
+  confirm: confirmImport,
+} = useSourceImport({ panelKey: props.panelKey, onApplied: handleSourcesImported })
 let purchaseFlyTimer = 0
 let purchasePulseTimer = 0
 
@@ -109,8 +116,9 @@ const itemById = computed(() => {
   return map
 })
 
-function buildLeafRow(item, coefficientMap) {
-  const row = calculateInventoryRow(item, coefficientMap)
+function buildLeafRow(item) {
+  // 规则 / 热度档 / 系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
+  const row = calculateInventoryRow(evaluateItem(item, stockingEvaluator.value))
   return {
     ...row,
     searchProduct: row.product.toLocaleLowerCase('zh-CN'),
@@ -121,9 +129,20 @@ function buildLeafRow(item, coefficientMap) {
 const inventoryLeafRows = shallowRef([])
 const leafRowIndexById = new Map()
 
+// 规则 / 热度档筛选项取当前数据里实际出现的名称，配置改动后自动跟随。
+const ruleOptions = computed(() =>
+  [...new Set(inventoryLeafRows.value.map((row) => row.ruleName).filter(Boolean))].sort(
+    (first, second) => productCollator.compare(first, second),
+  ),
+)
+const tierOptions = computed(() =>
+  [...new Set(inventoryLeafRows.value.map((row) => row.tierName).filter(Boolean))].sort(
+    (first, second) => productCollator.compare(first, second),
+  ),
+)
+
 function rebuildLeafRows() {
-  const coefficientMap = toCoefficientMap(inventoryStore.heatSpecs)
-  const rows = inventoryItems.map((item) => buildLeafRow(item, coefficientMap))
+  const rows = inventoryItems.map((item) => buildLeafRow(item))
   // 按品名聚合月均条数，品名按聚合值降序排列；同品名内按月均条数降序，再按颜色。
   const productMonthlyAvg = new Map()
   for (const row of rows) {
@@ -148,15 +167,15 @@ function refreshLeafRow(id) {
   if (index === undefined || !item) return
 
   const rows = inventoryLeafRows.value.slice()
-  rows[index] = buildLeafRow(item, toCoefficientMap(inventoryStore.heatSpecs))
+  rows[index] = buildLeafRow(item)
   inventoryLeafRows.value = rows
 }
 
 rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
-// 系数配置修改后，整表按新系数重算。
-watch(() => inventoryStore.heatSpecs, rebuildLeafRows, { deep: true })
+// 备货配置（规则 / 热度档 / 系数）修改后，整表按新配置重算。
+watch(() => stockingStore.config, rebuildLeafRows)
 
 // 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
 const plannedPreviewTones = reactive({})
@@ -168,8 +187,10 @@ function refreshPlannedPreviewTone(item) {
   }
 
   plannedPreviewTones[item.id] = calculateInventoryRow(
-    { ...item, planned: plannedDrafts[item.id] ?? 0 },
-    toCoefficientMap(inventoryStore.heatSpecs),
+    evaluateItem(
+      { ...item, planned: plannedDrafts[item.id] ?? 0 },
+      stockingEvaluator.value,
+    ),
   ).urgencyTone
 }
 
@@ -197,7 +218,9 @@ const hasActiveFilters = computed(
   () =>
     productFilter.value.trim() !== '' ||
     colorFilter.value.trim() !== '' ||
-    selectedWarningTones.value.length > 0,
+    selectedWarningTones.value.length > 0 ||
+    selectedRuleNames.value.length > 0 ||
+    selectedTierNames.value.length > 0,
 )
 
 // 关键词筛选输入防抖，避免大表逐键全量过滤。
@@ -226,14 +249,22 @@ const filteredInventoryLeafRows = computed(() => {
   const product = appliedProductFilter.value
   const color = appliedColorFilter.value
   const tones = selectedWarningTones.value
-  if (!product && !color && tones.length === 0) return inventoryLeafRows.value
+  const rules = selectedRuleNames.value
+  const tiers = selectedTierNames.value
+  if (!product && !color && tones.length === 0 && rules.length === 0 && tiers.length === 0) {
+    return inventoryLeafRows.value
+  }
 
   const toneSet = tones.length > 0 ? new Set(tones) : null
+  const ruleSet = rules.length > 0 ? new Set(rules) : null
+  const tierSet = tiers.length > 0 ? new Set(tiers) : null
   return inventoryLeafRows.value.filter(
     (row) =>
       (!product || row.searchProduct.includes(product)) &&
       (!color || row.searchColor.includes(color)) &&
-      (!toneSet || toneSet.has(row.urgencyTone)),
+      (!toneSet || toneSet.has(row.urgencyTone)) &&
+      (!ruleSet || ruleSet.has(row.ruleName)) &&
+      (!tierSet || tierSet.has(row.tierName)),
   )
 })
 const inventoryRows = computed(() => groupRowsByProduct(filteredInventoryLeafRows.value))
@@ -242,6 +273,8 @@ function resetFilters() {
   productFilter.value = ''
   colorFilter.value = ''
   selectedWarningTones.value = []
+  selectedRuleNames.value = []
+  selectedTierNames.value = []
 }
 
 function toggleWarningFilter(key) {
@@ -321,6 +354,9 @@ function toggleAllProductGroups() {
 const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
 const TABLE_COLUMNS = [
+  { key: 'skuId', label: '唯一标识', width: 110, group: '信息' },
+  { key: 'rule', label: '规则', width: 96, group: '信息' },
+  { key: 'tier', label: '热度', width: 84, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
   { key: 'color', label: '颜色', width: 132, group: '商品' },
   { key: 'urgency', label: '预警', width: 44, group: '商品' },
@@ -491,10 +527,9 @@ function getPlannedPlaceholder(row) {
 }
 
 function getPlannedPlaceholderTitle(row) {
-  if (!row.strategyAvailable) return '备货规则缺省，无法计算建议需安排量'
+  if (!row.strategyAvailable) return `备货规则缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
 
-  return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存的 80% 下限；该建议不会自动采纳`
-}
+  return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存的 80% 下限；该建议不会自动采纳`}
 
 function updatePlannedDraft(id, value) {
   if (Reflect.has(plannedUndoHistory, id)) return
@@ -665,10 +700,6 @@ function updateValue(id, field, value) {
     const item = itemById.value.get(id)
     if (!item) return
     item[field] = value
-    // 热度因子的手动修改也即时参与热度判定，避免派生字段与当前数据脱节。
-    if (QUANTITY_FIELDS.some((entry) => entry.field === field)) {
-      item.stockingType = resolveHeatLabel(item, inventoryStore.heatSpecs)
-    }
     refreshLeafRow(id)
   }
 }
@@ -704,7 +735,7 @@ function createExcelCell(value, reference, styleIndex = 0) {
 
 function exportInventoryToExcel() {
   const columnGroups = [
-    { label: '信息', columns: ['热度', '色彩'] },
+    { label: '信息', columns: ['唯一标识', '规则', '热度', '等级', '色彩'] },
     { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
     { label: '出口', columns: ['欠货', '周消耗'] },
@@ -727,7 +758,10 @@ function exportInventoryToExcel() {
 
   const headers = columnGroups.flatMap(({ columns }) => columns)
   const data = inventoryLeafRows.value.map((row) => [
-    row.stockingType,
+    row.skuId,
+    row.ruleName,
+    row.tierName,
+    row.gradeSummary,
     row.category,
     row.product,
     row.color,
@@ -769,10 +803,13 @@ function exportInventoryToExcel() {
         `${getExcelColumnName(s.c)}${s.r + 1}:${getExcelColumnName(e.c)}${e.r + 1}`,
     )
     .join(' ')
-  const columnWidths = [10, 10, 18, 12, 14, 12, 12, 12, 10, 10, 10, 12, 12, 12, 12, 12, 12, 12, 10, 12, 12, 12]
-    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
+  const columnWidths = headers
+    .map((label, index) => {
+      const width = label === '品名' ? 20 : label === '颜色' ? 14 : 12
+      return `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`
+    })
     .join('')
-  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${columnWidths}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A2:U${rows.length}"/><mergeCells count="${merges.length}">${mergeReferences
+  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${columnWidths}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A2:${getExcelColumnName(headers.length - 1)}${rows.length}"/><mergeCells count="${merges.length}">${mergeReferences
     .split(' ')
     .filter(Boolean)
     .map((ref) => `<mergeCell ref="${ref}"/>`)
@@ -874,152 +911,32 @@ function exportPurchaseListToExcel() {
   }
 }
 
-function skuKey(product, color) {
-  return `${normalizeProductName(product ?? '')}\u0000${String(color ?? '').trim()}`
-}
-
-function triggerImportExcel() {
-  const input = importFileInputRef.value
-  if (!input) return
-  input.value = ''
-  input.click()
-}
-
-async function handleImportFileChange(event) {
-  const input = event.target
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
-
-  if (!/\.xlsx$/i.test(file.name)) {
-    ElMessage.error('仅支持 .xlsx 格式的 Excel 文件')
-    return
-  }
-  if (file.size > 20 * 1024 * 1024) {
-    ElMessage.error('文件超过 20MB，请拆分后再导入')
-    return
-  }
-
-  try {
-    const { sheetName, rows } = readWorkbookRows(await file.arrayBuffer())
-    const { items, errors, blankRows, ignoredPlannedRows, ignoredHeatRows } =
-      parseInventorySheet(rows)
-    // 同一份行数据再读一遍全量表格，供全面板展示 Excel 的全部列与全部数据行。
-    const sheet = readSheetTable(rows)
-
-    importFileName.value = file.name
-    importSummary.value = {
-      sheetName,
-      sheet,
-      items,
-      errors,
-      blankRows,
-      ignoredPlannedRows,
-      ignoredHeatRows,
-    }
-    importDialogVisible.value = true
-  } catch (error) {
-    console.error('Failed to read inventory workbook', error)
-    ElMessage.error(`Excel 读取失败：${error instanceof Error ? error.message : '未知错误'}`)
-  }
-}
-
-function cancelImport() {
-  importDialogVisible.value = false
-  importSummary.value = null
-  importFileName.value = ''
-}
-
-// 整表替换：库存数据以 Excel 为准，需安排、撤销记录与采购清单按品名+颜色保留。
-function applyImportedItems(importedItems) {
-  const previousByKey = new Map()
-  for (const item of inventoryItems) {
-    previousByKey.set(skuKey(item.product, item.color), item)
-  }
-
-  const idByPreviousId = new Map()
-  const nextItems = importedItems.map((entry, index) => {
-    const id = index + 1
-    const previous = previousByKey.get(skuKey(entry.product, entry.color))
-    if (previous) idByPreviousId.set(previous.id, id)
-
-    return {
-      id,
-      product: entry.product,
-      color: entry.color,
-      category: entry.category,
-      planned: previous?.planned ?? null,
-      producing: entry.producing,
-      backorder: entry.backorder,
-      weeklyUsage: entry.weeklyUsage,
-      warehouseStock: entry.warehouseStock,
-      inTransitStock: entry.inTransitStock,
-      turnoverIn: entry.turnoverIn,
-      // 动销指标参与热度配置，导入后随行保留。
-      monthlyAvgCount: entry.monthlyAvgCount,
-      totalOrders: entry.totalOrders,
-      activeMonths: entry.activeMonths,
-      activeCustomers: entry.activeCustomers,
-    }
-  })
-
-  // 热度由当前热度配置决定，导入文件中的“热度”列不再参与。
-  applyHeatSpecsToItems(nextItems, inventoryStore.heatSpecs)
-
-  // 撤销快照按新 id 重建，避免新旧 id 相同或互换时互相覆盖。
-  const nextUndoHistory = new Map()
-  for (const [previousId, id] of idByPreviousId) {
-    const undo = plannedUndoHistory[previousId]
-    if (undo) nextUndoHistory.set(id, undo)
-  }
-  for (const key of Object.keys(plannedUndoHistory)) delete plannedUndoHistory[key]
-  for (const [id, undo] of nextUndoHistory) plannedUndoHistory[id] = undo
-
-  const nextItemById = new Map(nextItems.map((item) => [item.id, item]))
-  const nextPurchaseList = []
-  for (const purchaseItem of purchaseList) {
-    const nextId = idByPreviousId.get(purchaseItem.id)
-    const item = nextId === undefined ? null : nextItemById.get(nextId)
-    if (!item) continue
-
-    nextPurchaseList.push({
-      ...purchaseItem,
-      id: nextId,
-      product: item.product,
-      color: item.color,
-      planned: item.planned ?? 0,
-    })
-  }
-
-  inventoryItems.splice(0, inventoryItems.length, ...nextItems)
-  purchaseList.splice(0, purchaseList.length, ...nextPurchaseList)
-
+// 导入成功后清空需安排/品名草稿并重建表格；总表与销售表的写入已在 useSourceImport 内完成。
+function handleSourcesImported(summary) {
   for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
   for (const key of Object.keys(plannedPreviewTones)) delete plannedPreviewTones[key]
   for (const key of Object.keys(productDrafts)) delete productDrafts[key]
 
-  // 整表替换属于结构性变化，重建排序与单行缓存。
   rebuildLeafRows()
   selectedRowId.value = null
-}
 
-function confirmImport() {
-  const summary = importSummary.value
-  if (!summary) return
-
-  applyImportedItems(summary.items)
-  // 全面板展示的是本次 Excel 的原始表格（全部列、全部数据行）。
-  inventoryStore.importedSheet = { sheetName: summary.sheetName, ...summary.sheet }
-  const skippedRows = summary.errors.length + summary.blankRows
-  const spuCount = new Set(summary.items.map((item) => item.product)).size
-  const skuCount = new Set(summary.items.map((item) => `${item.product}\u0000${item.color}`)).size
-  const importedMessage = `成功导入 ${summary.items.length} 行数据，含 ${spuCount} 个SPU，${skuCount} 个SKU`
-  showImportToast(
-    skippedRows > 0
-      ? `${importedMessage}，跳过 ${skippedRows} 行`
-      : importedMessage,
-  )
-  cancelImport()
+  const messages = []
+  if (summary.inventory) {
+    const { items, errors, blankRows } = summary.inventory
+    const spuCount = new Set(items.map((item) => item.product)).size
+    const skippedRows = errors.length + blankRows
+    messages.push(
+      `总表 ${items.length} 行（${spuCount} 个SPU）${skippedRows > 0 ? `，跳过 ${skippedRows} 行` : ''}`,
+    )
+  }
+  if (summary.sales) {
+    const { merge, errors, blankRows } = summary.sales
+    const skippedRows = merge.unmatched + errors.length + blankRows
+    messages.push(
+      `销售表 ${merge.matched} 个SKU${skippedRows > 0 ? `，跳过 ${skippedRows} 行` : ''}`,
+    )
+  }
+  showImportToast(`成功导入：${messages.join('；')}`)
 }
 
 function buildSimpleWorkbook({ sheetName, rows, columnWidths }) {
@@ -1172,6 +1089,28 @@ function commitProduct(currentProduct) {
           aria-label="按颜色筛选"
           clearable
         />
+        <ElSelect
+          v-model="selectedRuleNames"
+          class="text-filter"
+          multiple
+          collapse-tags
+          clearable
+          placeholder="按规则筛选"
+          aria-label="按规则筛选"
+        >
+          <ElOption v-for="name in ruleOptions" :key="name" :label="name" :value="name" />
+        </ElSelect>
+        <ElSelect
+          v-model="selectedTierNames"
+          class="text-filter"
+          multiple
+          collapse-tags
+          clearable
+          placeholder="按热度筛选"
+          aria-label="按热度筛选"
+        >
+          <ElOption v-for="name in tierOptions" :key="name" :label="name" :value="name" />
+        </ElSelect>
         <div class="warning-filters" role="group" aria-label="按预警状态筛选">
           <button
             v-for="filter in warningFilters"
@@ -1213,7 +1152,11 @@ function commitProduct(currentProduct) {
             保存Excel
           </ElButton>
           <template v-if="canImportExcel">
-            <ElButton class="import-excel-button" @click="triggerImportExcel">
+            <ElButton
+              class="import-excel-button"
+              title="可一次选择总表与销售表两个文件"
+              @click="triggerImportExcel"
+            >
               导入Excel
             </ElButton>
             <ElButton class="import-template-button" @click="downloadImportTemplate">
@@ -1223,6 +1166,7 @@ function commitProduct(currentProduct) {
               ref="importFileInputRef"
               class="import-file-input"
               type="file"
+              multiple
               accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               @change="handleImportFileChange"
             />
@@ -1300,6 +1244,38 @@ function commitProduct(currentProduct) {
               }"
               @click="handleRowClick(row)"
             >
+              <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
+                <span
+                  v-if="!row.isProductGroup"
+                  class="stocking-text"
+                  :title="row.skuId ? `唯一标识：${row.skuId}` : ''"
+                >
+                  {{ row.skuId }}
+                </span>
+              </div>
+              <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
+                <span
+                  v-if="!row.isProductGroup && row.ruleName"
+                  class="stocking-text"
+                  :class="{ 'stocking-text--conflict': row.ruleConflict }"
+                  :title="
+                    row.ruleConflict
+                      ? '命中多条规则，已按列表中靠前的规则处理，请收窄规则条件'
+                      : row.ruleName
+                  "
+                >
+                  {{ row.ruleName }}
+                </span>
+              </div>
+              <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
+                <span
+                  v-if="!row.isProductGroup && row.tierName"
+                  class="stocking-text"
+                  :title="`等级明细：${row.gradeSummary || '--'}`"
+                >
+                  {{ row.tierName }}
+                </span>
+              </div>
               <div
                 class="inventory-vtable__cell inventory-vtable__cell--product"
                 @click.stop="handleProductCellClick(row)"
@@ -1354,7 +1330,7 @@ function commitProduct(currentProduct) {
                   v-if="!row.isProductGroup"
                   class="urgency-indicator"
                   :class="`urgency-indicator--${row.urgencyTone}`"
-                  :title="row.urgencyText"
+                  :title="row.strategyIssue || row.urgencyText"
                   :aria-label="`紧急状态：${row.urgencyText}`"
                 />
               </div>
@@ -1587,59 +1563,12 @@ function commitProduct(currentProduct) {
       </template>
     </ElDialog>
 
-    <ElDialog
+    <ImportSourcesDialog
       v-model="importDialogVisible"
-      title="导入 Excel"
-      width="640px"
-      class="import-excel-dialog"
-      :close-on-click-modal="false"
-      @closed="cancelImport"
-    >
-      <template v-if="importSummary">
-        <ul class="import-summary">
-          <li>文件：{{ importFileName }}</li>
-          <li>工作表：{{ importSummary.sheetName }}</li>
-          <li>有效数据：{{ importSummary.items.length }} 行</li>
-          <li>
-            Excel 全量：{{ importSummary.sheet.columns.length }} 列 /
-            {{ importSummary.sheet.rows.length }} 行（全面板展示）
-          </li>
-          <li v-if="importSummary.errors.length">
-            跳过：{{ importSummary.errors.length }} 行（数据有误）
-          </li>
-          <li v-if="importSummary.blankRows">忽略空行：{{ importSummary.blankRows }} 行</li>
-          <li v-if="importSummary.ignoredPlannedRows">
-            忽略“需安排”列：{{ importSummary.ignoredPlannedRows }} 行有值，需安排以面板内采纳结果为准
-          </li>
-          <li v-if="importSummary.ignoredHeatRows">
-            忽略“热度”列：{{ importSummary.ignoredHeatRows }} 行有值，热度按配置规则计算
-          </li>
-        </ul>
-        <div v-if="importSummary.errors.length" class="import-errors">
-          <p class="import-errors-title">以下行不会导入，请修正后重新导入：</p>
-          <ul>
-            <li v-for="error in importSummary.errors" :key="`${error.row}-${error.message}`">
-              第 {{ error.row }} 行：{{ error.message }}
-            </li>
-          </ul>
-        </div>
-        <p class="import-hint">
-          确认后用 Excel 数据替换主面板全部库存行；需安排、撤销记录和本次采购清单按“品名+颜色”保留。理论库存、预警、缺口量、缺口率、库销比仍由系统计算。全面板会展示该 Excel 的全部列与全部数据行。
-        </p>
-      </template>
-      <template #footer>
-        <div class="dialog-footer">
-          <ElButton @click="cancelImport">取消</ElButton>
-          <ElButton
-            type="primary"
-            :disabled="!importSummary || importSummary.items.length === 0"
-            @click="confirmImport"
-          >
-            确认导入
-          </ElButton>
-        </div>
-      </template>
-    </ElDialog>
+      :summary="importSummary"
+      @confirm="confirmImport"
+      @cancel="cancelImport"
+    />
 
     <ElDialog
       v-model="purchaseListDialogVisible"
@@ -1931,45 +1860,6 @@ function commitProduct(currentProduct) {
   display: none;
 }
 
-.import-summary {
-  margin: 0 0 10px;
-  padding-left: 18px;
-  color: var(--industrial-text);
-  font-size: 13px;
-  line-height: 1.7;
-}
-
-.import-errors {
-  max-height: 220px;
-  margin-bottom: 10px;
-  padding: 8px 10px;
-  overflow: auto;
-  border: 1px solid #e6c9c4;
-  background: #fdf3f1;
-}
-
-.import-errors-title {
-  margin: 0 0 6px;
-  color: var(--industrial-danger);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.import-errors ul {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--industrial-text);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.import-hint {
-  margin: 0;
-  color: var(--industrial-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
 .purchase-list-button {
   --el-button-text-color: var(--industrial-primary);
   --el-button-bg-color: #e5edf1;
@@ -2211,6 +2101,24 @@ function commitProduct(currentProduct) {
   gap: 2px;
   padding-left: 6px;
   overflow: visible;
+}
+
+.inventory-vtable__cell--stocking {
+  padding: 0 4px;
+  overflow: hidden;
+}
+
+.stocking-text {
+  overflow: hidden;
+  color: var(--industrial-text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stocking-text--conflict {
+  color: var(--industrial-out-of-stock, #b44242);
+  text-decoration: underline dotted;
 }
 
 .inventory-vtable__row--body.product-color-row > .inventory-vtable__cell--product {

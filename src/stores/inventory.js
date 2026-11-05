@@ -1,39 +1,34 @@
-import { ref } from 'vue'
+import { ref, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
 import { initialInventoryItems } from '@/data/inventoryItems'
-import { createDefaultHeatSpecs } from '@/data/heatRules'
 import { DEFAULT_PANEL_KEY, inventoryPanels } from '@/data/panels'
-import { applyHeatSpecsToItems } from '@/utils/heatRules'
 
-// 演示数据没有动销指标，按周消耗折算出一组稳定数值，
-// 让热度配置（月均条数 / 动销客户等）在未导入 Excel 时也能展示分档；导入后以 Excel 为准。
-function withDemoSalesMetrics(item) {
+// 演示数据缺少唯一标识、总出库数量与动销指标：按周消耗折算一组稳定数值，
+// 让规则判定与热度分档在未导入 Excel 时同样可见；导入后一律以 Excel 为准。
+function withDemoSourceFields(item) {
   return {
     ...item,
+    skuId: item.skuId ?? `DEMO-${String(item.id).padStart(3, '0')}`,
+    totalOutbound: item.totalOutbound ?? 0,
     monthlyAvgCount: item.monthlyAvgCount ?? Math.round(item.weeklyUsage * 4.3),
     totalOrders: item.totalOrders ?? Math.round(item.weeklyUsage * 12),
     activeMonths:
       item.activeMonths ?? (item.weeklyUsage >= 900 ? 12 : item.weeklyUsage >= 500 ? 9 : 6),
-    activeCustomers: item.activeCustomers ?? Math.max(1, Math.round(item.weeklyUsage / 100)),
+    activeCustomers:
+      item.activeCustomers ?? Math.max(1, Math.round(item.weeklyUsage / 100)),
   }
 }
 
-function createInventoryState(panelKey) {
-  const inventoryItems = ref(initialInventoryItems.map(withDemoSalesMetrics))
+function createInventoryState() {
+  const inventoryItems = ref(initialInventoryItems.map(withDemoSourceFields))
   const purchaseList = ref([])
   const plannedUndoHistory = ref({})
-  // 热度规格同时承载因子条件与备货系数，新增规格时两者一起扩展。
-  const heatSpecs = ref(createDefaultHeatSpecs())
-  // 导入 Excel 的原始表格（全部列 + 全部非空行），供全面板只读展示；未导入时为 null。
-  const importedSheet = ref(null)
+  // 销售表：在“销售表”面板导入的 1-12 月条数与重量，按唯一标识叠加到主面板行上。
+  // 数据可达数万 SKU，用 shallowRef 保存整体替换的对象，不做逐行深度响应式。
+  const salesSheet = shallowRef(null)
 
-  // 主面板的热度不再取自种子数据，统一按默认规格计算；
-  // 示例面板保留原热度，仅作对照演示。
-  if (panelKey === DEFAULT_PANEL_KEY) {
-    applyHeatSpecsToItems(inventoryItems.value, heatSpecs.value)
-  }
-
-  return { inventoryItems, purchaseList, plannedUndoHistory, heatSpecs, importedSheet }
+  // 规则 / 热度档 / 系数在视图计算时按当前配置现算，store 只保存导入的原始数据。
+  return { inventoryItems, purchaseList, plannedUndoHistory, salesSheet }
 }
 
 // 每个面板一份独立状态：main 为主面板，example 为示例面板。

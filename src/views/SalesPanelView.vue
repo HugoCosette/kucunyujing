@@ -1,13 +1,14 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { ElInput, ElButton } from 'element-plus'
+import { ElButton, ElInput } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
+import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
+import { SALES_MONTH_FIELDS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
 import { useInventoryStore } from '@/stores/inventory'
-import { groupTableRowsByProduct, toQuantityValue, isQuantityCell } from '@/utils/productGroups'
-import { resolveInventoryField } from '@/utils/inventoryImport'
+import { groupTableRowsByProduct } from '@/utils/productGroups'
 
-// 全面板只读：导入后展示 Excel 原始表格；未导入时按同样形态展示默认数据的全部字段。
+// 销售表：品名、颜色与 4 个动销指标取主面板数据，1-12 月条数与重量由“导入销售表”叠加进来。
 const props = defineProps({
   panelKey: {
     type: String,
@@ -17,121 +18,105 @@ const props = defineProps({
 
 const inventoryStore = useInventoryStore(props.panelKey)
 const inventoryItems = inventoryStore.inventoryItems
-const importedSheet = computed(() => inventoryStore.importedSheet)
-const rawMode = computed(() => Boolean(importedSheet.value?.columns?.length))
+const salesSheet = computed(() => inventoryStore.salesSheet)
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 
-// 默认数据的全部字段：与导入模板同序，末尾补面板维护的需安排与计算出的热度。
-const DEFAULT_SHEET_COLUMNS = [
-  { key: 'product', label: '品名' },
-  { key: 'color', label: '颜色' },
-  { key: 'stockingType', label: '热度' },
-  { key: 'category', label: '色彩' },
-  { key: 'producing', label: '生产中' },
-  { key: 'backorder', label: '欠货' },
-  { key: 'weeklyUsage', label: '周消耗' },
-  { key: 'warehouseStock', label: '在仓库存' },
-  { key: 'inTransitStock', label: '在途库存' },
-  { key: 'turnoverIn', label: '周转入' },
-  { key: 'monthlyAvgCount', label: '月均条数' },
-  { key: 'totalOrders', label: '订单总数' },
-  { key: 'activeMonths', label: '动销月份' },
-  { key: 'activeCustomers', label: '动销客户' },
-  { key: 'planned', label: '需安排' },
-]
+const SKU_ID_INDEX = 0
+const PRODUCT_INDEX = 1
+const MONTH_START_INDEX = SALES_TABLE_COLUMNS.findIndex((column) => column.month === 1)
+const MONTH_COLUMN_WIDTH = 92
+const tableColumns = SALES_TABLE_COLUMNS.map((column, index) => ({
+  ...column,
+  index,
+  width:
+    index === SKU_ID_INDEX
+      ? 120
+      : index === PRODUCT_INDEX
+        ? 170
+        : index === 2
+          ? 130
+          : column.month
+            ? MONTH_COLUMN_WIDTH
+            : 96,
+}))
+// 唯一标识、品名、颜色之后全部是数值列，参与品名父行求和。
+const quantityColumnIndexes = tableColumns
+  .map((column) => column.index)
+  .filter((index) => index > 2)
 
 function toCellValue(value) {
   return value === null || value === undefined ? '' : value
 }
 
-// 3 万行量级：一次性构建普通对象数组（shallowRef），不做逐行深度响应式。
-const defaultTableRows = shallowRef([])
+function buildSalesCells(item, sales) {
+  const cells = [
+    item.skuId,
+    item.product,
+    item.color,
+    // 4 个动销指标保留主面板导入值，销售表文件里的同名列不参与。
+    ...HEAT_FACTOR_FIELDS.map(({ field }) => toCellValue(item[field])),
+  ]
+  for (const { index } of SALES_MONTH_FIELDS) {
+    cells.push(toCellValue(sales?.counts[index] ?? null), toCellValue(sales?.weights[index] ?? null))
+  }
+  return cells
+}
 
-function rebuildDefaultRows() {
-  const fields = DEFAULT_SHEET_COLUMNS.map((column) => column.key)
+// 3 万行量级：一次性构建普通对象数组（shallowRef），不做逐行深度响应式。
+const tableRows = shallowRef([])
+
+function rebuildRows() {
+  const bySku = salesSheet.value?.bySku ?? null
+  // 品名按聚合月均条数排序，与主面板一致：高动销品名在前，且同一品名不被拆散。
   const productMonthlyAvg = new Map()
   for (const item of inventoryItems) {
-    productMonthlyAvg.set(item.product, (productMonthlyAvg.get(item.product) ?? 0) + (item.monthlyAvgCount ?? 0))
+    productMonthlyAvg.set(
+      item.product,
+      (productMonthlyAvg.get(item.product) ?? 0) + (item.monthlyAvgCount ?? 0),
+    )
   }
-  defaultTableRows.value = [...inventoryItems]
+
+  tableRows.value = [...inventoryItems]
     .sort((first, second) => {
       const productDiff =
-        (productMonthlyAvg.get(second.product) ?? 0) - (productMonthlyAvg.get(first.product) ?? 0)
+        (productMonthlyAvg.get(second.product) ?? 0) -
+        (productMonthlyAvg.get(first.product) ?? 0)
       if (productDiff !== 0) return productDiff
+      // 聚合值相同时按品名排序，保证同一品名的行连续，父行不会被拆成多段。
+      const productNameDiff = productCollator.compare(first.product, second.product)
+      if (productNameDiff !== 0) return productNameDiff
       const monthlyDiff = (second.monthlyAvgCount ?? 0) - (first.monthlyAvgCount ?? 0)
       if (monthlyDiff !== 0) return monthlyDiff
       return productCollator.compare(first.color, second.color) || first.id - second.id
     })
     .map((item) => {
-      const cells = fields.map((field) => toCellValue(item[field]))
-      // 预存小写索引，搜索时只做 includes。
+      const cells = buildSalesCells(item, bySku?.get(item.skuId))
       return {
         id: item.id,
         cells,
+        // 预存小写索引，搜索时只做 includes。
         searchText: cells.join('\u0000').toLocaleLowerCase('zh-CN'),
       }
     })
 }
 
-rebuildDefaultRows()
-// 行数变化（导入）与热度配置变化需要重建；数值编辑由路由切换后的重新挂载兜底。
-watch(() => inventoryItems.length, rebuildDefaultRows)
-watch(() => inventoryStore.heatSpecs, rebuildDefaultRows, { deep: true })
+rebuildRows()
+// 主面板导入会替换全部库存行，销售表导入会替换叠加数据，两种情况都重建。
+watch(() => inventoryItems.length, rebuildRows)
+watch(salesSheet, rebuildRows)
 
-// 原始表格行：导入 Excel 的全部列与全部数据行。
-const rawTableRows = shallowRef([])
-
-function rebuildRawRows() {
-  const sheet = importedSheet.value
-  if (!sheet?.columns?.length) {
-    rawTableRows.value = []
-    return
+// 当前主面板中命中销售表的 SKU 数：主面板重新导入后可能与导入时不同，按实际匹配展示。
+const matchedSkuCount = computed(() => {
+  const bySku = salesSheet.value?.bySku
+  if (!bySku) return 0
+  let matched = 0
+  for (const item of inventoryItems) {
+    if (bySku.has(item.skuId)) matched += 1
   }
-  const columnCount = sheet.columns.length
-  // 找品名列与月均条数列，用于导入后的默认排序（按品名聚合月均条数降序）。
-  const productIndex = sheet.columns.findIndex(
-    (column) => resolveInventoryField(column.label) === 'product',
-  )
-  const monthlyIndex = sheet.columns.findIndex(
-    (column) => resolveInventoryField(column.label) === 'monthlyAvgCount',
-  )
-  const rows = sheet.rows.map((row, index) => {
-    const cells = Array.from(
-      { length: columnCount },
-      (_, cellIndex) => row.cells[cellIndex] ?? '',
-    )
-    return {
-      id: index + 1,
-      cells,
-      searchText: cells.join('\u0000').toLocaleLowerCase('zh-CN'),
-    }
-  })
-  if (productIndex >= 0 && monthlyIndex >= 0) {
-    const productMonthlyAvg = new Map()
-    for (const row of rows) {
-      const product = String(row.cells[productIndex] ?? '').trim()
-      const monthly = Number(row.cells[monthlyIndex])
-      if (product && Number.isFinite(monthly)) {
-        productMonthlyAvg.set(product, (productMonthlyAvg.get(product) ?? 0) + monthly)
-      }
-    }
-    rows.sort((first, second) => {
-      const firstProduct = String(first.cells[productIndex] ?? '').trim()
-      const secondProduct = String(second.cells[productIndex] ?? '').trim()
-      const productDiff =
-        (productMonthlyAvg.get(secondProduct) ?? 0) - (productMonthlyAvg.get(firstProduct) ?? 0)
-      if (productDiff !== 0) return productDiff
-      const monthlyDiff = (Number(second.cells[monthlyIndex]) || 0) - (Number(first.cells[monthlyIndex]) || 0)
-      if (monthlyDiff !== 0) return monthlyDiff
-      return first.id - second.id
-    })
-  }
-  rawTableRows.value = rows
-}
+  return matched
+})
 
-rebuildRawRows()
-
-// 搜索框输入防抖，避免 3 万行逐键全量过滤。
+// 搜索框输入防抖，避免逐键全量过滤。
 const searchKeyword = ref('')
 const appliedKeyword = ref('')
 // 品名父行默认全部展开，只记录被收起（折叠）的品名。
@@ -152,21 +137,9 @@ watch(searchKeyword, () => {
   searchDebounceTimer = window.setTimeout(applySearch, 250)
 })
 
-// 重新导入后清空搜索并回到顶部，避免停留在旧表格的滚动位置。
-watch(importedSheet, () => {
-  rebuildRawRows()
-  searchKeyword.value = ''
-  appliedKeyword.value = ''
-  collapsedProductIds.value = new Set()
-  tableScrollTop.value = 0
-  if (tableScrollRef.value) tableScrollRef.value.scrollTop = 0
-})
-
-const activeRows = computed(() => (rawMode.value ? rawTableRows.value : defaultTableRows.value))
-
 const filteredLeafRows = computed(() => {
   const keyword = appliedKeyword.value
-  const rows = activeRows.value
+  const rows = tableRows.value
   if (!keyword) return rows
   return rows.filter((row) => row.searchText.includes(keyword))
 })
@@ -175,75 +148,23 @@ const filteredLeafRows = computed(() => {
 const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
 
-// 两种模式都是原始列，按表头文字估算列宽：长表头不截断，短表头不占宽。
-function estimateColumnWidth(label) {
-  return Math.min(240, Math.max(84, label.length * 14 + 24))
-}
-
-const defaultColumns = DEFAULT_SHEET_COLUMNS.map((column, index) => ({
-  key: column.key,
-  label: column.label,
-  width: estimateColumnWidth(column.label),
-  format: 'raw',
-  index,
-  field: column.key,
-}))
-
-const rawColumns = computed(() =>
-  (importedSheet.value?.columns ?? []).map((column, index) => ({
-    key: column.key,
-    label: column.label,
-    width: estimateColumnWidth(column.label),
-    format: 'raw',
-    index,
-    field: resolveInventoryField(column.label),
-  })),
-)
-
-const tableColumns = computed(() => (rawMode.value ? rawColumns.value : defaultColumns))
 // 各列按自身宽度分摊剩余空间，宽屏铺满、窄屏横向滚动，右侧不留空白列。
 const tableGridTemplate = computed(() =>
-  tableColumns.value
-    .map((column) => `minmax(${column.width}px, ${column.width}fr)`)
-    .join(' '),
+  tableColumns.map((column) => `minmax(${column.width}px, ${column.width}fr)`).join(' '),
 )
 const tableTotalWidth = computed(() =>
-  tableColumns.value.reduce((total, column) => total + column.width, 0),
+  tableColumns.reduce((total, column) => total + column.width, 0),
 )
 
-// —— 品名（SPU）汇总：与主面板一致，父行在前、同品名的颜色行折叠在其下 ——
-const productColumnIndex = computed(() =>
-  tableColumns.value.findIndex((column) => column.field === 'product'),
+// 品名（SPU）汇总：父行在前，同品名的颜色行折叠在其下。
+const productGroups = computed(() =>
+  groupTableRowsByProduct(filteredLeafRows.value, {
+    productIndex: PRODUCT_INDEX,
+    quantityIndexes: quantityColumnIndexes,
+    columnCount: tableColumns.length,
+  }),
 )
-const quantityColumnIndexes = computed(() => {
-  const rows = activeRows.value
-  return tableColumns.value
-    .filter((column) => {
-      // 已知文本列不参与汇总
-      if (['category', 'product', 'color', 'stockingType'].includes(column.field)) return false
-      if (['色彩', '品名', '颜色', '热度'].includes(column.label)) return false
-      // 该列所有非空值都必须是数字（或空/占位），且至少有一个数字
-      let hasNumber = false
-      for (const row of rows) {
-        if (!isQuantityCell(row.cells[column.index])) return false
-        if (toQuantityValue(row.cells[column.index]) !== null) hasNumber = true
-      }
-      return hasNumber
-    })
-    .map((column) => column.index)
-})
 
-const productGroups = computed(() => {
-  const productIndex = productColumnIndex.value
-  if (productIndex < 0) return []
-  return groupTableRowsByProduct(filteredLeafRows.value, {
-    productIndex,
-    quantityIndexes: quantityColumnIndexes.value,
-    columnCount: tableColumns.value.length,
-  })
-})
-
-// 默认全部展开，只记录被收起（折叠）的品名。
 function toggleProductGroup(row) {
   const next = new Set(collapsedProductIds.value)
   if (next.has(row.id)) next.delete(row.id)
@@ -255,15 +176,11 @@ function toggleAllProductGroups() {
   const groupIds = productGroups.value
     .filter((group) => group.isProductGroup)
     .map((group) => group.id)
-  if (collapsedProductIds.value.size > 0) {
-    collapsedProductIds.value = new Set()
-  } else {
-    collapsedProductIds.value = new Set(groupIds)
-  }
+  collapsedProductIds.value =
+    collapsedProductIds.value.size > 0 ? new Set() : new Set(groupIds)
 }
 
 const visibleRows = computed(() => {
-  if (productColumnIndex.value < 0) return filteredLeafRows.value
   const collapsed = collapsedProductIds.value
   const rows = []
   for (const group of productGroups.value) {
@@ -318,12 +235,21 @@ const filteredRowCount = computed(() => filteredLeafRows.value.length)
 const filteredProductCount = computed(
   () => productGroups.value.filter((row) => row.isProductGroup).length,
 )
-const totalRowCount = computed(() => activeRows.value.length)
+const totalRowCount = computed(() => tableRows.value.length)
 const filteredRowCountText = computed(() => filteredRowCount.value.toLocaleString('zh-CN'))
 const filteredProductCountText = computed(() =>
   filteredProductCount.value.toLocaleString('zh-CN'),
 )
 const totalRowCountText = computed(() => totalRowCount.value.toLocaleString('zh-CN'))
+const monthRangeText = computed(() => {
+  const months = salesSheet.value?.months ?? []
+  if (!months.length) return ''
+  return months.length > 1 ? `${months[0]}-${months[months.length - 1]}月` : `${months[0]}月`
+})
+// 销售表带动销指标列时以它为准，否则沿用总表（或上一次）的值。
+const metricSourceText = computed(() =>
+  salesSheet.value?.metricFields?.length ? '动销指标取自销售表' : '动销指标沿用总表',
+)
 
 function formatCell(row, column) {
   return String(row.cells?.[column.index] ?? '')
@@ -349,59 +275,59 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="all-data-page">
+  <main class="sales-page">
     <div class="page-sticky-header">
       <PanelNavigation />
-      <div class="all-data-toolbar">
-        <h1 class="all-data-title">全部数据</h1>
+      <div class="sales-toolbar">
+        <h1 class="sales-title">销售表</h1>
         <ElInput
           v-model="searchKeyword"
-          class="all-data-search"
+          class="sales-search"
           placeholder="搜索全部列"
           aria-label="搜索全部列"
           clearable
         />
-        <ElButton
-          class="all-data-toggle-groups"
-          size="small"
-          @click="toggleAllProductGroups"
-        >
+        <ElButton class="sales-toggle-groups" size="small" @click="toggleAllProductGroups">
           {{ collapsedProductIds.size > 0 ? '全部展开' : '全部收起' }}
         </ElButton>
-        <span class="all-data-count">
+        <span class="sales-count">
           共 {{ filteredRowCountText }} 行 · {{ filteredProductCountText }} 个品名
         </span>
-        <span v-if="filteredRowCount !== totalRowCount" class="all-data-total">
+        <span v-if="filteredRowCount !== totalRowCount" class="sales-total">
           总计 {{ totalRowCountText }} 行
         </span>
-        <span v-if="rawMode" class="all-data-hint">
-          工作表“{{ importedSheet.sheetName }}”：Excel 全部 {{ tableColumns.length }}
-          列原样只读展示，并按品名汇总
+        <span v-if="salesSheet" class="sales-hint">
+          已叠加销售表“{{ salesSheet.fileName }}”：工作表“{{ salesSheet.sheetName }}”{{
+            monthRangeText
+          }} · 当前匹配 {{ matchedSkuCount.toLocaleString('zh-CN') }} 个SKU；{{ metricSourceText }}
         </span>
-        <span v-else class="all-data-hint">
-          默认数据：未导入 Excel，按全部 {{ tableColumns.length }} 个字段只读展示，并按品名汇总
+        <span v-else class="sales-hint">
+          未导入销售表：请在主面板一次性导入“总表 + 销售表”，动销指标与 1-12 月数据都来自销售表
         </span>
       </div>
     </div>
 
     <div
       ref="tableScrollRef"
-      class="all-data-vtable"
+      class="sales-vtable"
       role="table"
-      aria-label="全部库存数据"
+      aria-label="销售表数据"
       @scroll.passive="handleTableScroll"
     >
-      <div class="all-data-vtable__canvas" :style="{ width: `max(100%, ${tableTotalWidth}px)` }">
-        <div class="all-data-vtable__head">
+      <div class="sales-vtable__canvas" :style="{ width: `max(100%, ${tableTotalWidth}px)` }">
+        <div class="sales-vtable__head">
           <div
-            class="all-data-vtable__row all-data-vtable__row--header"
+            class="sales-vtable__row sales-vtable__row--header"
             :style="{ gridTemplateColumns: tableGridTemplate }"
           >
             <div
               v-for="column in tableColumns"
               :key="column.key"
-              class="all-data-vtable__head-cell"
-              :class="{ 'all-data-vtable__cell--divider': column.field === 'monthlyAvgCount' }"
+              class="sales-vtable__head-cell"
+              :class="{
+                'sales-vtable__cell--divider': column.index === MONTH_START_INDEX,
+                'sales-vtable__head-cell--product': column.index === PRODUCT_INDEX,
+              }"
               role="columnheader"
               :title="column.label"
             >
@@ -410,20 +336,18 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="all-data-vtable__body" :style="{ height: `${tableBodyHeight}px` }">
+        <div class="sales-vtable__body" :style="{ height: `${tableBodyHeight}px` }">
           <div
-            class="all-data-vtable__rows"
+            class="sales-vtable__rows"
             :style="{ transform: `translateY(${tableVirtualRows.offset}px)` }"
           >
             <div
               v-for="row in tableVirtualRows.rows"
               :key="row.id"
-              class="all-data-vtable__row all-data-vtable__row--body"
-              :class="{ 'all-data-vtable__row--group': row.isProductGroup }"
+              class="sales-vtable__row sales-vtable__row--body"
+              :class="{ 'sales-vtable__row--group': row.isProductGroup }"
               role="row"
-              :aria-expanded="
-                row.isProductGroup ? !collapsedProductIds.has(row.id) : undefined
-              "
+              :aria-expanded="row.isProductGroup ? !collapsedProductIds.has(row.id) : undefined"
               :style="{
                 height: `${TABLE_ROW_HEIGHT}px`,
                 gridTemplateColumns: tableGridTemplate,
@@ -433,16 +357,19 @@ onBeforeUnmount(() => {
               <div
                 v-for="column in tableColumns"
                 :key="column.key"
-                class="all-data-vtable__cell"
-                :class="{ 'all-data-vtable__cell--divider': column.field === 'monthlyAvgCount' }"
+                class="sales-vtable__cell"
+                :class="{
+                  'sales-vtable__cell--divider': column.index === MONTH_START_INDEX,
+                  'sales-vtable__cell--product': column.index === PRODUCT_INDEX,
+                }"
                 :title="formatCell(row, column)"
                 role="cell"
               >
-                <template v-if="row.isProductGroup && column.index === productColumnIndex">
+                <template v-if="row.isProductGroup && column.index === PRODUCT_INDEX">
                   <span
-                    class="all-data-vtable__caret"
+                    class="sales-vtable__caret"
                     :class="{
-                      'all-data-vtable__caret--expanded': !collapsedProductIds.has(row.id),
+                      'sales-vtable__caret--expanded': !collapsedProductIds.has(row.id),
                     }"
                     aria-hidden="true"
                   >
@@ -457,7 +384,7 @@ onBeforeUnmount(() => {
                       />
                     </svg>
                   </span>
-                  <span class="all-data-vtable__product" :title="row.product">
+                  <span class="sales-vtable__product" :title="row.product">
                     {{ row.product }}
                   </span>
                 </template>
@@ -467,8 +394,8 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="tableVirtualRows.total === 0" class="all-data-vtable__empty">
-          {{ appliedKeyword ? '没有匹配的数据' : '暂无数据，请先在主面板导入 Excel' }}
+        <div v-if="tableVirtualRows.total === 0" class="sales-vtable__empty">
+          {{ appliedKeyword ? '没有匹配的数据' : '暂无数据，请先在主面板导入总表与销售表' }}
         </div>
       </div>
     </div>
@@ -476,7 +403,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.all-data-page {
+.sales-page {
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -496,7 +423,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 12px -10px rgba(34, 57, 69, 0.45);
 }
 
-.all-data-toolbar {
+.sales-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -504,33 +431,37 @@ onBeforeUnmount(() => {
   padding: 0 0 8px;
 }
 
-.all-data-title {
+.sales-title {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
 }
 
-.all-data-search {
+.sales-search {
   width: 210px;
 }
 
-.all-data-count {
+.sales-file-input {
+  display: none;
+}
+
+.sales-count {
   color: var(--industrial-primary);
   font-size: 13px;
   font-weight: 600;
 }
 
-.all-data-total {
+.sales-total {
   color: var(--industrial-muted);
   font-size: 12px;
 }
 
-.all-data-hint {
+.sales-hint {
   color: var(--industrial-muted);
   font-size: 12px;
 }
 
-.all-data-vtable {
+.sales-vtable {
   --vtable-border: var(--industrial-grid);
   position: relative;
   flex: 1;
@@ -543,25 +474,25 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.all-data-vtable__canvas {
+.sales-vtable__canvas {
   position: relative;
   min-width: 100%;
 }
 
-.all-data-vtable__head {
+.sales-vtable__head {
   position: sticky;
   top: 0;
   z-index: 3;
   background: var(--industrial-header);
 }
 
-.all-data-vtable__row {
+.sales-vtable__row {
   display: grid;
   align-items: stretch;
   border-bottom: 1px solid var(--industrial-grid);
 }
 
-.all-data-vtable__head-cell {
+.sales-vtable__head-cell {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -576,38 +507,38 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 
-.all-data-vtable__row > :last-child {
+.sales-vtable__row > :last-child {
   border-right: 0;
 }
 
-.all-data-vtable__body {
+.sales-vtable__body {
   position: relative;
 }
 
-.all-data-vtable__rows {
+.sales-vtable__rows {
   position: absolute;
   top: 0;
   right: 0;
   left: 0;
 }
 
-.all-data-vtable__row--body {
+.sales-vtable__row--body {
   background: var(--industrial-surface);
 }
 
-/* 周转入与月均条数之间的粗竖线分隔 */
-.all-data-vtable__head-cell.all-data-vtable__cell--divider,
-.all-data-vtable__cell.all-data-vtable__cell--divider {
+/* 动销指标与销售月份之间的粗竖线分隔 */
+.sales-vtable__head-cell.sales-vtable__cell--divider,
+.sales-vtable__cell.sales-vtable__cell--divider {
   border-left: 2px solid var(--industrial-text);
 }
 
-.all-data-vtable__row--group {
+.sales-vtable__row--group {
   background: var(--industrial-header);
   font-weight: 600;
   cursor: pointer;
 }
 
-.all-data-vtable__caret {
+.sales-vtable__caret {
   display: inline-flex;
   flex: 0 0 14px;
   align-items: center;
@@ -618,16 +549,16 @@ onBeforeUnmount(() => {
   transition: transform 120ms ease;
 }
 
-.all-data-vtable__caret--expanded {
+.sales-vtable__caret--expanded {
   transform: rotate(90deg);
 }
 
-.all-data-vtable__caret svg {
+.sales-vtable__caret svg {
   width: 12px;
   height: 12px;
 }
 
-.all-data-vtable__product {
+.sales-vtable__product {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -635,7 +566,7 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 
-.all-data-vtable__cell {
+.sales-vtable__cell {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -648,20 +579,25 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 
-.all-data-vtable__row--body:hover .all-data-vtable__cell {
+.sales-vtable__cell--product,
+.sales-vtable__head-cell--product {
+  justify-content: flex-start;
+}
+
+.sales-vtable__row--body:hover .sales-vtable__cell {
   box-shadow:
     inset 0 2px rgba(63, 113, 141, 0.58),
     inset 0 -2px rgba(63, 113, 141, 0.58);
 }
 
-.all-data-vtable__empty {
+.sales-vtable__empty {
   padding: 40px 0;
   color: var(--industrial-muted);
   font-size: 13px;
   text-align: center;
 }
 
-.all-data-vtable {
+.sales-vtable {
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
   --el-bg-color: var(--industrial-surface);

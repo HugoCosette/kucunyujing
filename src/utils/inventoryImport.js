@@ -1,50 +1,45 @@
-import { HEAT_FACTOR_FIELDS, QUANTITY_FIELDS } from '@/data/quantityFields'
-import { normalizeProductName } from './inventory.js'
+import {
+  HEAT_FACTOR_FIELDS,
+  QUANTITY_FIELDS,
+  SKU_ID_FIELD,
+  SKU_ID_LABEL,
+} from '@/data/quantityFields'
+import { getFieldMeta } from '@/stocking/fields'
+import { normalizeProductName, normalizeSkuId } from './inventory.js'
 
-// 导入模板列：主面板基本面信息 + 计算所需输入项 + 热度配置的动销指标。
-// 热度由“热度配置”规则计算，不再作为导入列。
+// 总表模板列：SKU 关联键 + 基本面信息 + 备货计算所需的全部数量列。
 export const IMPORT_TEMPLATE_COLUMNS = [
+  SKU_ID_LABEL,
   '色彩',
   '品名',
   '颜色',
-  '生产中',
-  '欠货',
-  '周消耗',
-  '在仓库存',
-  '在途库存',
-  '周转入',
-  ...HEAT_FACTOR_FIELDS.map((entry) => entry.label),
+  ...QUANTITY_FIELDS.map((entry) => entry.label),
 ]
 
 export const IMPORT_TEMPLATE_SAMPLE_ROWS = [
-  ['黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0, 4120, 14520, 12, 9],
-  ['彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0, 4980, 11800, 12, 6],
+  ['NO-0001', '黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0, 12000],
+  ['NO-0002', '彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0, 8600],
 ]
 
 const HEADER_ALIASES = new Map([
+  [SKU_ID_LABEL, SKU_ID_FIELD],
+  ['唯一编码', SKU_ID_FIELD],
   ['品名', 'product'],
   ['产品名称', 'product'],
   ['颜色', 'color'],
   ['色号', 'color'],
-  // 旧模板的热度列仅用于统计被忽略的行数，不参与导入。
-  ['热度', 'stockingType'],
-  // 兼容旧模板 / 旧导出文件的表头写法。
-  ['备货类型', 'stockingType'],
-  ['备货分类', 'stockingType'],
   ['色彩', 'category'],
   ['色彩类别', 'category'],
-  ['生产中', 'producing'],
-  ['欠货', 'backorder'],
-  ['周消耗', 'weeklyUsage'],
-  ['在仓库存', 'warehouseStock'],
-  ['在途库存', 'inTransitStock'],
-  ['周转入', 'turnoverIn'],
-  ...HEAT_FACTOR_FIELDS.map((entry) => [entry.label, entry.field]),
-  // 仅用于识别并提示被忽略的列，不参与导入。
+  ...QUANTITY_FIELDS.map((entry) => [entry.label, entry.field]),
+  // 以下列已不参与总表导入，只用于统计并提示。
+  ['热度', 'stockingType'],
+  ['备货类型', 'stockingType'],
+  ['备货分类', 'stockingType'],
   ['需安排', 'planned'],
+  ...HEAT_FACTOR_FIELDS.map((entry) => [entry.label, entry.field]),
 ])
 
-const CATEGORIES = ['黑白', '彩色']
+const CATEGORIES = getFieldMeta('category').options
 const EMPTY_QUANTITY_TOKENS = new Set(['', '--', '-', '—', '缺省', 'null'])
 const HEADER_SCAN_ROWS = 10
 
@@ -52,11 +47,6 @@ function normalizeHeader(value) {
   return String(value ?? '')
     .replace(/[\s\u3000]+/g, '')
     .replace(/[*＊]/g, '')
-}
-
-// 表头文字 → 库存字段名，全面板据此判断哪些列可做 SPU 汇总。
-export function resolveInventoryField(label) {
-  return HEADER_ALIASES.get(normalizeHeader(label)) ?? ''
 }
 
 function isRowEmpty(cells) {
@@ -89,7 +79,7 @@ function parseEnum(raw, allowed, label, rowNumber, errors) {
   return ''
 }
 
-// 兼容导出文件的两行分组表头：定位到包含“品名”“颜色”的那一行作为表头。
+// 兼容导出文件的两行分组表头：定位到包含“唯一标识”“品名”“颜色”的那一行作为表头。
 function locateHeader(rows) {
   for (let index = 0; index < Math.min(rows.length, HEADER_SCAN_ROWS); index += 1) {
     const columnMap = new Map()
@@ -97,7 +87,7 @@ function locateHeader(rows) {
       const field = HEADER_ALIASES.get(normalizeHeader(cell))
       if (field && !columnMap.has(field)) columnMap.set(field, cellIndex)
     })
-    if (columnMap.has('product') && columnMap.has('color')) {
+    if (columnMap.has(SKU_ID_FIELD) && columnMap.has('product') && columnMap.has('color')) {
       return { headerIndex: index, columnMap }
     }
   }
@@ -108,16 +98,20 @@ function locateHeader(rows) {
 export function parseInventorySheet(rows) {
   const header = locateHeader(rows)
   if (!header) {
-    throw new Error('未找到表头：Excel 中需要包含“品名”和“颜色”两列')
+    throw new Error(
+      '未找到表头：Excel 中需要包含“唯一标识”“品名”“颜色”三列',
+    )
   }
 
   const { headerIndex, columnMap } = header
   const items = []
   const errors = []
-  const seenKeys = new Map()
+  const seenSkuIds = new Map()
+  const seenNames = new Map()
   let blankRows = 0
   let ignoredPlannedRows = 0
   let ignoredHeatRows = 0
+  let ignoredMetricRows = 0
 
   for (const row of rows.slice(headerIndex + 1)) {
     const readCell = (field) => {
@@ -132,27 +126,45 @@ export function parseInventorySheet(rows) {
 
     if (String(readCell('planned') ?? '').trim() !== '') ignoredPlannedRows += 1
     if (String(readCell('stockingType') ?? '').trim() !== '') ignoredHeatRows += 1
+    if (HEAT_FACTOR_FIELDS.some(({ field }) => String(readCell(field) ?? '').trim() !== '')) {
+      ignoredMetricRows += 1
+    }
 
+    const skuId = normalizeSkuId(readCell(SKU_ID_FIELD))
     const product = normalizeProductName(String(readCell('product') ?? ''))
     const color = String(readCell('color') ?? '').trim()
+
+    if (!skuId) {
+      errors.push({ row: row.rowNumber, message: '唯一标识为空' })
+      continue
+    }
     if (!product || !color) {
       errors.push({ row: row.rowNumber, message: '品名或颜色为空' })
       continue
     }
 
-    const rowKey = `${product}\u0000${color}`
-    const duplicatedRow = seenKeys.get(rowKey)
-    if (duplicatedRow !== undefined) {
+    const duplicatedSku = seenSkuIds.get(skuId)
+    if (duplicatedSku !== undefined) {
       errors.push({
         row: row.rowNumber,
-        message: `品名+颜色与第 ${duplicatedRow} 行重复`,
+        message: `唯一标识与第 ${duplicatedSku} 行重复：${skuId}`,
+      })
+      continue
+    }
+
+    const nameKey = `${product}\u0000${color}`
+    const duplicatedName = seenNames.get(nameKey)
+    if (duplicatedName !== undefined) {
+      errors.push({
+        row: row.rowNumber,
+        message: `品名+颜色与第 ${duplicatedName} 行重复`,
       })
       continue
     }
 
     const rowErrors = []
     const quantities = {}
-    for (const { field, label } of [...QUANTITY_FIELDS, ...HEAT_FACTOR_FIELDS]) {
+    for (const { field, label } of QUANTITY_FIELDS) {
       quantities[field] = parseQuantity(readCell(field), label, row.rowNumber, rowErrors)
     }
     const category = parseEnum(
@@ -168,8 +180,9 @@ export function parseInventorySheet(rows) {
       continue
     }
 
-    seenKeys.set(rowKey, row.rowNumber)
-    items.push({ product, color, category, ...quantities })
+    seenSkuIds.set(skuId, row.rowNumber)
+    seenNames.set(nameKey, row.rowNumber)
+    items.push({ skuId, product, color, category, ...quantities })
   }
 
   if (!items.length) {
@@ -178,41 +191,12 @@ export function parseInventorySheet(rows) {
     )
   }
 
-  return { items, errors, blankRows, ignoredPlannedRows, ignoredHeatRows }
-}
-
-// 全面板展示用：不做字段映射与校验，完整保留表头以下的所有非空行与全部列。
-// 主面板仍按 parseInventorySheet 的特定字段导入，两者共用同一份行数据。
-export function readSheetTable(rows) {
-  const header = locateHeader(rows)
-  if (!header) {
-    throw new Error('未找到表头：Excel 中需要包含“品名”和“颜色”两列')
+  return {
+    items,
+    errors,
+    blankRows,
+    ignoredPlannedRows,
+    ignoredHeatRows,
+    ignoredMetricRows,
   }
-
-  const { headerIndex } = header
-  const headerCells = rows[headerIndex].cells
-  const dataRows = rows.slice(headerIndex + 1).filter((row) => !isRowEmpty(row.cells))
-  // 部分文件会残留无内容的格式单元格，按实际有值的最后一列截断，避免出现大量空列。
-  let columnCount = 0
-  const markLastUsedColumn = (cells) => {
-    for (let index = cells.length - 1; index >= 0; index -= 1) {
-      if (String(cells[index] ?? '').trim() !== '') {
-        columnCount = Math.max(columnCount, index + 1)
-        return
-      }
-    }
-  }
-  markLastUsedColumn(headerCells)
-  for (const row of dataRows) markLastUsedColumn(row.cells)
-
-  const columns = Array.from({ length: columnCount }, (_, index) => {
-    const label = String(headerCells[index] ?? '').trim()
-    return { key: `c${index}`, label: label || `列${index + 1}` }
-  })
-  const tableRows = dataRows.map((row) => ({
-    rowNumber: row.rowNumber,
-    cells: Array.from({ length: columnCount }, (_, index) => row.cells[index] ?? ''),
-  }))
-
-  return { columns, rows: tableRows }
 }
