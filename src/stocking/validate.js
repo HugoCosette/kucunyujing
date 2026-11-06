@@ -5,7 +5,7 @@ import {
   getFieldMeta,
   operatorsFor,
 } from './fields.js'
-import { createDefaultRule, createDefaultTier } from './defaults.js'
+import { createDefaultRule, createDefaultTier, createDefaultManualMode, BUILTIN_MANUAL_MODES, BUILTIN_STRATEGIES } from './defaults.js'
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -137,29 +137,120 @@ function normalizeRule(rule, index) {
   }
 }
 
-// 归一化：补全结构、丢弃非法字段、保证默认模式与默认档固定末位。
-export function normalizeConfig(config) {
-  const source = isPlainObject(config) ? config : {}
-  const rules = (Array.isArray(source.rules) ? source.rules : []).map((rule, index) =>
+function normalizeManualMode(mode, index) {
+  const source = isPlainObject(mode) ? mode : {}
+  const behavior = source.behavior === 'slow' ? 'slow' : 'custom'
+  const id = String(source.id ?? '').trim() || nextId(`manual-${behavior}`)
+  const result = {
+    id,
+    name: String(source.name ?? '').trim() || (behavior === 'slow' ? '滞销模式' : '自定模式'),
+    behavior,
+    description: String(source.description ?? ''),
+  }
+  if (behavior === 'custom') {
+    const source2 = isPlainObject(source.defaultCoefficients) ? source.defaultCoefficients : {}
+    result.defaultCoefficients = {
+      redLine: toNumber(source2.redLine),
+      normal: toNumber(source2.normal),
+      peak: toNumber(source2.peak),
+    }
+  }
+  return result
+}
+
+// 手动策略：两种内置行为（custom / slow）必须各存在一个，其余为用户自定义的模式。
+function normalizeManualModes(modes) {
+  const list = (Array.isArray(modes) ? modes : []).map((mode, index) =>
+    normalizeManualMode(mode, index),
+  )
+  const result = [...list]
+  for (const builtin of BUILTIN_MANUAL_MODES) {
+    if (result.some((mode) => mode.behavior === builtin.behavior)) continue
+    result.push(
+      createDefaultManualMode({ ...builtin, defaultCoefficients: builtin.defaultCoefficients }),
+    )
+  }
+  return result
+}
+
+function normalizeStrategy(strategy, fallback) {
+  const source = isPlainObject(strategy) ? strategy : {}
+  const behavior = source.behavior === 'manual' ? 'manual' : 'auto'
+  const base = behavior === 'manual' ? BUILTIN_STRATEGIES[1] : BUILTIN_STRATEGIES[0]
+  return {
+    id: String(source.id ?? '').trim() || base.id,
+    name: String(source.name ?? '').trim() || base.name,
+    behavior,
+    modes:
+      behavior === 'manual'
+        ? normalizeManualModes(source.modes)
+        : normalizeAutoModes(source.modes ?? fallback ?? []),
+  }
+}
+
+function normalizeAutoModes(modes) {
+  const rules = (Array.isArray(modes) ? modes : []).map((rule, index) =>
     normalizeRule(rule, index),
   )
   const normalRules = rules.filter((rule) => !rule.isDefault)
   const defaultRule =
     rules.find((rule) => rule.isDefault) ?? createDefaultRule({ id: 'rule-default' })
 
+  return [
+    ...normalRules,
+    {
+      ...defaultRule,
+      isDefault: true,
+      tiers: normalizeTiers(defaultRule.tiers, defaultRule.id),
+    },
+  ]
+}
+
+// 归一化：补全结构、丢弃非法字段、保证默认模式与默认档固定末位。
+// 兼容 v1（只有 rules）：自动迁移成「自动策略」里的模式，结果统一为 v2。
+export function normalizeConfig(config) {
+  const source = isPlainObject(config) ? config : {}
+  const legacyRules = Array.isArray(source.rules) ? source.rules : null
+  const rawStrategies = Array.isArray(source.strategies) ? source.strategies : []
+
+  const autoSource =
+    rawStrategies.find((strategy) => strategy?.behavior !== 'manual') ?? null
+  const manualSource =
+    rawStrategies.find((strategy) => strategy?.behavior === 'manual') ?? null
+
   return {
-    version: toNumber(source.version, 1) ?? 1,
+    version: 2,
     updatedAt:
       typeof source.updatedAt === 'string' ? source.updatedAt : new Date().toISOString(),
-    rules: [
-      ...normalRules,
-      {
-        ...defaultRule,
-        isDefault: true,
-        tiers: normalizeTiers(defaultRule.tiers, defaultRule.id),
-      },
+    strategies: [
+      normalizeStrategy(autoSource, legacyRules ?? []),
+      normalizeStrategy(manualSource, []),
     ],
   }
+}
+
+export function getAutoStrategy(config) {
+  const normalized = normalizeConfig(config)
+  return normalized.strategies.find((strategy) => strategy.behavior === 'auto') ?? null
+}
+
+export function getManualStrategy(config) {
+  const normalized = normalizeConfig(config)
+  return normalized.strategies.find((strategy) => strategy.behavior === 'manual') ?? null
+}
+
+// 自动策略下的模式列表（v1 的 rules）。
+export function getAutoModes(config) {
+  return getAutoStrategy(config)?.modes ?? []
+}
+
+// 手动策略下的模式列表。
+export function getManualModes(config) {
+  return getManualStrategy(config)?.modes ?? []
+}
+
+export function findManualMode(config, modeId) {
+  return getManualModes(config).find((mode) => mode.id === modeId) ?? null
 }
 
 function validateGrades(rule, errors, warnings) {
@@ -313,8 +404,10 @@ export function validateConfig(config) {
   const errors = []
   const warnings = []
   const names = new Set()
+  const autoModes = normalized.strategies.find((s) => s.behavior === 'auto')?.modes ?? []
+  const manualModes = normalized.strategies.find((s) => s.behavior === 'manual')?.modes ?? []
 
-  normalized.rules.forEach((rule) => {
+  autoModes.forEach((rule) => {
     if (!rule.name) {
       errors.push({ message: '模式名称不能为空' })
     } else if (names.has(rule.name)) {
@@ -330,7 +423,32 @@ export function validateConfig(config) {
     validateTiers(rule, errors, warnings)
   })
 
-  detectRuleOverlap(normalized.rules).forEach(({ a, b }) => {
+  const manualNames = new Set()
+  manualModes.forEach((mode) => {
+    if (!mode.name) {
+      errors.push({ message: '手动模式名称不能为空' })
+    } else if (manualNames.has(mode.name) || names.has(mode.name)) {
+      errors.push({ message: `手动模式名称「${mode.name}」重复` })
+    }
+    manualNames.add(mode.name)
+
+    if (mode.behavior === 'custom') {
+      const values = [
+        mode.defaultCoefficients?.redLine,
+        mode.defaultCoefficients?.normal,
+        mode.defaultCoefficients?.peak,
+      ]
+      if (!values.every((value) => Number.isFinite(value))) {
+        errors.push({ message: `${mode.name}：默认系数请填写完整` })
+      } else if (values.some((value) => value < 0)) {
+        errors.push({ message: `${mode.name}：默认系数不能为负数` })
+      } else if (!(values[0] <= values[1] && values[1] <= values[2])) {
+        errors.push({ message: `${mode.name}：默认系数需满足 红线 ≤ 正常 ≤ 峰值` })
+      }
+    }
+  })
+
+  detectRuleOverlap(autoModes).forEach(({ a, b }) => {
     warnings.push({
       message: `模式「${a}」与「${b}」的因子区间可能重叠，同一 SKU 会命中多条模式，请收窄条件`,
     })

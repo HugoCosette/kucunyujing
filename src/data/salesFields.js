@@ -7,14 +7,17 @@ export const SALES_MONTH_FIELDS = Array.from({ length: 12 }, (_, index) => ({
   index,
   countLabel: `${index + 1}月条数`,
   weightLabel: `${index + 1}月重量`,
+  orderLabel: `${index + 1}月订单数`,
 }))
 
 export const SALES_TABLE_COLUMNS = [
   { key: 'product', label: '品名' },
   { key: 'color', label: '颜色' },
   ...HEAT_FACTOR_FIELDS.map(({ field, label }) => ({ key: field, label })),
-  ...SALES_MONTH_FIELDS.flatMap(({ month, countLabel, weightLabel }) => [
+  ...SALES_MONTH_FIELDS.flatMap(({ month, countLabel, weightLabel, orderLabel }) => [
     { key: `month${month}Count`, label: countLabel, month, kind: 'count' },
     { key: `month${month}Weight`, label: weightLabel, month, kind: 'weight' },
+    // 每月第三列：该月订单数
+    { key: `month${month}Orders`, label: orderLabel, month, kind: 'order' },
   ]),
 ]

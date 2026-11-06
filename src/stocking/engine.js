@@ -1,5 +1,5 @@
 import { GRADES, UNGRADED, getFieldMeta } from './fields.js'
-import { normalizeConfig } from './validate.js'
+import { getAutoModes, getManualModes, normalizeConfig } from './validate.js'
 
 function matchesFactor(item, factor) {
   const meta = getFieldMeta(factor.field)
@@ -91,21 +91,71 @@ function evaluateUnmatched(tierName = '') {
     gradeDetails: [],
     conflict: false,
     coefficients: null,
+    strategy: 'auto',
+    modeId: '',
+    modeName: '',
+    manualBehavior: '',
+    slow: false,
+    manualCoefficients: null,
+  }
+}
+
+function toOverrideMap(overrides) {
+  if (overrides instanceof Map) return overrides
+  if (overrides && typeof overrides === 'object') return new Map(Object.entries(overrides))
+  return new Map()
+}
+
+// 手动策略的结果：不跑模式匹配、不算评分因子，直接给出模式与系数。
+function evaluateManual(item, mode, override) {
+  const behavior = mode.behavior === 'slow' ? 'slow' : 'custom'
+  const coefficients =
+    behavior === 'custom' ? override.coefficients ?? mode.defaultCoefficients ?? null : null
+  const category = String(item?.category ?? '').trim()
+
+  return {
+    ruleId: mode.id,
+    ruleName: mode.name,
+    tierId: '',
+    tierName: '',
+    grades: {},
+    gradeSummary: '',
+    gradeDetails: [],
+    conflict: false,
+    // 手动模式只有一个 SKU 一个色彩，直接按当前色彩挂上系数。
+    coefficients: coefficients && category ? { [category]: coefficients } : null,
+    strategy: 'manual',
+    modeId: mode.id,
+    modeName: mode.name,
+    manualBehavior: behavior,
+    slow: behavior === 'slow',
+    manualCoefficients: coefficients,
   }
 }
 
 // 建一次评估器跑全部 SKU：模式无顺序语义，命中多条视为冲突，运行时取靠前一条给出确定结果。
-export function createEvaluator(config) {
+// options.manualOverrides 为手动清单（skuId → { modeId, coefficients }），命中则短路，不参与自动判定。
+export function createEvaluator(config, options = {}) {
   const normalized = normalizeConfig(config)
-  const candidateRules = normalized.rules.filter(
+  const manualModesById = new Map(
+    getManualModes(normalized).map((mode) => [mode.id, mode]),
+  )
+  const autoModes = getAutoModes(normalized)
+  const candidateRules = autoModes.filter(
     (rule) => !rule.isDefault && rule.factors.length > 0,
   )
   const defaultRule =
-    normalized.rules.find((rule) => rule.isDefault) ??
-    normalized.rules[normalized.rules.length - 1] ??
-    null
+    autoModes.find((rule) => rule.isDefault) ?? autoModes[autoModes.length - 1] ?? null
+  const overrides = toOverrideMap(options.manualOverrides)
 
   function evaluate(item) {
+    const skuId = String(item?.skuId ?? '').trim()
+    const override = skuId ? overrides.get(skuId) : null
+    if (override?.modeId) {
+      const mode = manualModesById.get(override.modeId)
+      if (mode) return evaluateManual(item, mode, override)
+    }
+
     let matchedRule = null
     let conflict = false
 
@@ -135,10 +185,16 @@ export function createEvaluator(config) {
       conflict,
       // 系数直接跟随命中的档位返回，视图不再按 id 二次查找。
       coefficients: tier?.coefficients ?? null,
+      strategy: 'auto',
+      modeId: rule.id,
+      modeName: rule.name,
+      manualBehavior: '',
+      slow: false,
+      manualCoefficients: null,
     }
   }
 
-  return { evaluate, rules: normalized.rules }
+  return { evaluate, rules: autoModes, config: normalized }
 }
 
 // 计算时取值用：先抄一份再评估，绝不写回 store 里的原始行。
@@ -156,12 +212,18 @@ export function evaluateItem(item, evaluator) {
     gradeDetails: result.gradeDetails,
     ruleConflict: result.conflict,
     stockingCoefficients: result.coefficients,
+    strategy: result.strategy,
+    modeId: result.modeId,
+    modeName: result.modeName,
+    manualBehavior: result.manualBehavior,
+    strategySlow: result.slow,
+    manualCoefficients: result.manualCoefficients,
   }
 }
 
 // 配置预览/校验用：用当前数据实跑一遍，给出模式与档位的分布及冲突清单。
-export function summarizeEvaluation(items, config) {
-  const evaluator = createEvaluator(config)
+export function summarizeEvaluation(items, config, options = {}) {
+  const evaluator = createEvaluator(config, options)
   const ruleCounts = new Map()
   const tierCounts = new Map()
   const conflicts = []

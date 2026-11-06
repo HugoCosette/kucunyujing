@@ -37,3 +37,7 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# 数据清洗工具：原始表与清洗结果体积大（约 65MB），只在本地保留，不入库
+tools/cleaning/data/
+tools/cleaning/output/

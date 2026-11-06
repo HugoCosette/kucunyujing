@@ -11,6 +11,7 @@ import {
   ElSelect,
   ElTable,
   ElTableColumn,
+  ElTooltip,
 } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 import PanelNavigation from '@/components/PanelNavigation.vue'
@@ -19,12 +20,16 @@ import {
   ALL_GRADES,
   COMPARE_OPERATORS,
   createDefaultCoefficients,
+  createDefaultManualMode,
   createEvaluator,
   createThresholds,
   evaluateItem,
   exportConfigFile,
+  findDanglingSkuIds,
+  getAutoStrategy,
   getFieldLabel,
   getFieldMeta,
+  getManualStrategy,
   normalizeConfig,
   summarizeEvaluation,
   validateConfig,
@@ -62,7 +67,19 @@ const panelDescription = examplePanel
 
 // —— 配置草稿 ——
 const configDraft = ref(normalizeConfig(stockingStore.config))
-const selectedRuleId = ref(configDraft.value.rules[0]?.id ?? '')
+// 策略层：自动策略（模式 → 评分档）与手动策略（手动模式 + SKU 清单）。
+// 注意：这里直接读 configDraft 的 strategies，不经过 normalizeConfig，
+// 否则每次读取都会生成新对象，v-model 绑定的输入框在失焦时会被重置。
+const activeStrategy = ref('auto')
+const autoStrategy = computed(() =>
+  configDraft.value.strategies?.find((strategy) => strategy.behavior === 'auto') ?? null,
+)
+const autoModes = computed(() => autoStrategy.value?.modes ?? [])
+const manualStrategy = computed(() =>
+  configDraft.value.strategies?.find((strategy) => strategy.behavior === 'manual') ?? null,
+)
+const manualModes = computed(() => manualStrategy.value?.modes ?? [])
+const selectedRuleId = ref(autoModes.value[0]?.id ?? '')
 // 模式删除需要二次点击确认，避免误删整条模式。
 const pendingRuleDeleteId = ref('')
 let ruleDeleteTimer = 0
@@ -74,8 +91,8 @@ const configDirty = computed(
 const validation = computed(() => validateConfig(configDraft.value))
 const activeRule = computed(
   () =>
-    configDraft.value.rules.find((rule) => rule.id === selectedRuleId.value) ??
-    configDraft.value.rules[0] ??
+    autoModes.value.find((rule) => rule.id === selectedRuleId.value) ??
+    autoModes.value[0] ??
     null,
 )
 
@@ -140,8 +157,8 @@ watch(configDraft, () => {
 function applySnapshot(json) {
   restoringDraft = true
   configDraft.value = normalizeConfig(JSON.parse(json))
-  if (!configDraft.value.rules.some((rule) => rule.id === selectedRuleId.value)) {
-    selectedRuleId.value = configDraft.value.rules[0]?.id ?? ''
+  if (!autoModes.value.some((rule) => rule.id === selectedRuleId.value)) {
+    selectedRuleId.value = autoModes.value[0]?.id ?? ''
   }
   pendingRuleDeleteId.value = ''
   draftVersion.value += 1
@@ -215,7 +232,9 @@ function scheduleDistribution() {
   if (distributionTimer) clearTimeout(distributionTimer)
   distributionTimer = window.setTimeout(() => {
     distributionTimer = 0
-    distribution.value = summarizeEvaluation(inventoryItems, configDraft.value)
+    distribution.value = summarizeEvaluation(inventoryItems, configDraft.value, {
+      manualOverrides: stockingStore.manualOverrides,
+    })
   }, 250)
 }
 
@@ -266,7 +285,7 @@ function usedGradeFields(rule) {
 // —— 模式 ——
 function addRule() {
   const used = new Set(
-    configDraft.value.rules.filter((rule) => !rule.isDefault).map((rule) => rule.name),
+    autoModes.value.filter((rule) => !rule.isDefault).map((rule) => rule.name),
   )
   let index = 1
   while (used.has(`模式${index}`)) index += 1
@@ -296,10 +315,10 @@ function addRule() {
     ],
   }
 
-  const defaultIndex = configDraft.value.rules.findIndex((entry) => entry.isDefault)
+  const defaultIndex = autoModes.value.findIndex((entry) => entry.isDefault)
   beforeStructuralChange()
-  configDraft.value.rules.splice(
-    defaultIndex < 0 ? configDraft.value.rules.length : defaultIndex,
+  autoModes.value.splice(
+    defaultIndex < 0 ? autoModes.value.length : defaultIndex,
     0,
     rule,
   )
@@ -308,13 +327,13 @@ function addRule() {
 
 function removeRule(rule) {
   if (!rule || rule.isDefault) return
-  const index = configDraft.value.rules.findIndex((entry) => entry.id === rule.id)
+  const index = autoModes.value.findIndex((entry) => entry.id === rule.id)
   if (index < 0) return
 
   beforeStructuralChange()
-  configDraft.value.rules.splice(index, 1)
+  autoModes.value.splice(index, 1)
   if (selectedRuleId.value === rule.id) {
-    selectedRuleId.value = configDraft.value.rules[0]?.id ?? ''
+    selectedRuleId.value = autoModes.value[0]?.id ?? ''
   }
 }
 
@@ -445,6 +464,102 @@ function removeTierCondition(tier, index) {
   tier.conditions.splice(index, 1)
 }
 
+// —— 手动策略：模式管理 ——
+const manualSelection = ref([])
+const itemBySkuId = computed(() => {
+  const map = new Map()
+  for (const item of inventoryItems) {
+    const key = String(item?.skuId ?? '').trim()
+    if (key) map.set(key, item)
+  }
+  return map
+})
+
+const manualRows = computed(() => {
+  const modes = new Map(manualModes.value.map((mode) => [mode.id, mode]))
+  return Object.entries(stockingStore.manual?.items ?? {})
+    .map(([skuId, entry]) => ({
+      skuId,
+      entry,
+      mode: modes.get(entry.modeId) ?? null,
+      item: itemBySkuId.value.get(skuId) ?? null,
+    }))
+    .filter((row) => row.item)
+})
+
+const danglingSkuIds = computed(() =>
+  findDanglingSkuIds(stockingStore.manual, inventoryItems),
+)
+
+// 内置的两种行为必须各保留一个，其余自定义模式可删。
+function isRequiredManualMode(mode) {
+  if (!mode) return true
+  const sameBehavior = manualModes.value.filter((entry) => entry.behavior === mode.behavior)
+  return sameBehavior.length <= 1
+}
+
+function nextManualModeName(behavior) {
+  const base = behavior === 'slow' ? '滞销模式' : '自定模式'
+  const used = new Set(manualModes.value.map((mode) => mode.name))
+  if (!used.has(base)) return base
+  let index = 2
+  while (used.has(`${base}${index}`)) index += 1
+  return `${base}${index}`
+}
+
+function addManualMode() {
+  if (!manualStrategy.value) return
+  beforeStructuralChange()
+  manualStrategy.value.modes.push(
+    createDefaultManualMode({ behavior: 'custom', name: nextManualModeName('custom') }),
+  )
+}
+
+function removeManualMode(mode) {
+  if (!manualStrategy.value || isRequiredManualMode(mode)) return
+  const index = manualStrategy.value.modes.indexOf(mode)
+  if (index < 0) return
+  beforeStructuralChange()
+  manualStrategy.value.modes.splice(index, 1)
+}
+
+// —— 手动策略：SKU 清单操作（直接写入手动清单文件，不经过配置草稿）——
+async function updateManualRowMode(row, modeId) {
+  const mode = manualModes.value.find((entry) => entry.id === modeId)
+  if (!mode) return
+  const entry = { modeId }
+  if (mode.behavior === 'custom') {
+    const source = row.entry.coefficients ?? mode.defaultCoefficients ?? {}
+    entry.coefficients = {
+      redLine: source.redLine ?? null,
+      normal: source.normal ?? null,
+      peak: source.peak ?? null,
+    }
+  }
+  await stockingStore.setManualEntry(row.skuId, entry)
+}
+
+async function updateManualRowCoefficient(row, key, value) {
+  const source = row.entry.coefficients ?? row.mode?.defaultCoefficients ?? {}
+  await stockingStore.setManualEntry(row.skuId, {
+    modeId: row.entry.modeId,
+    coefficients: { ...source, [key]: value ?? null },
+  })
+}
+
+async function clearManualRow(row) {
+  await stockingStore.setManualEntry(row.skuId, null)
+}
+
+async function clearManualSelection() {
+  await stockingStore.removeManualEntries(manualSelection.value)
+  manualSelection.value = []
+}
+
+async function clearDanglingEntries() {
+  await stockingStore.removeManualEntries(danglingSkuIds.value)
+}
+
 // —— 保存 / 重置 / 导出 ——
 async function confirmConfig() {
   const result = validateConfig(configDraft.value)
@@ -481,7 +596,7 @@ async function confirmConfig() {
 
 function discardChanges() {
   configDraft.value = normalizeConfig(stockingStore.config)
-  selectedRuleId.value = configDraft.value.rules[0]?.id ?? ''
+  selectedRuleId.value = autoModes.value[0]?.id ?? ''
   pendingRuleDeleteId.value = ''
   draftVersion.value += 1
   clearHistory()
@@ -499,7 +614,7 @@ async function restoreDefaults() {
 
   const saved = await stockingStore.restoreDefaults()
   configDraft.value = normalizeConfig(saved.config)
-  selectedRuleId.value = configDraft.value.rules[0]?.id ?? ''
+  selectedRuleId.value = autoModes.value[0]?.id ?? ''
   pendingRuleDeleteId.value = ''
   draftVersion.value += 1
   clearHistory()
@@ -707,13 +822,39 @@ function handleRowClick(row) {
         <div class="rule-config-heading">
           <h2 id="rule-config-title">模式与系数配置</h2>
           <span class="rule-config-hint">
-            模式之间互相独立：一个 SKU 只能命中一条模式，都不命中时归「默认模式」；模式内按评分因子打 S/A/B/C，达到档位条件即为该评分档。
+            先选策略：自动策略按「模式 → 评分档」算系数；手动策略由人工给指定 SKU 归类，不参与自动判定。
           </span>
         </div>
 
+        <div class="strategy-tabs" role="tablist" aria-label="策略">
+          <button
+            type="button"
+            role="tab"
+            class="strategy-tab"
+            :class="{ 'strategy-tab--active': activeStrategy === 'auto' }"
+            :aria-selected="activeStrategy === 'auto'"
+            @click="activeStrategy = 'auto'"
+          >
+            自动策略
+            <span class="strategy-tab__count">{{ autoModes.length }} 个模式</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class="strategy-tab"
+            :class="{ 'strategy-tab--active': activeStrategy === 'manual' }"
+            :aria-selected="activeStrategy === 'manual'"
+            @click="activeStrategy = 'manual'"
+          >
+            手动策略
+            <span class="strategy-tab__count">{{ manualRows.length }} 个 SKU</span>
+          </button>
+        </div>
+
+        <template v-if="activeStrategy === 'auto'">
         <div class="rule-tabs" role="tablist" aria-label="模式">
           <button
-            v-for="rule in configDraft.rules"
+            v-for="rule in autoModes"
             :key="rule.id"
             type="button"
             role="tab"
@@ -1029,23 +1170,194 @@ function handleRowClick(row) {
             </p>
           </div>
         </div>
+        </template>
+
+        <template v-else>
+          <div class="manual-config">
+            <div class="rule-block">
+              <div class="rule-block__heading">
+                <h3>① 手动模式</h3>
+                <span class="rule-block__hint">
+                  行为由系统提供（自定系数 / 滞销），名称、说明与默认系数可自行调整；内置的两种行为各保留一个。
+                </span>
+                <ElButton size="small" text class="rule-block__add" @click="addManualMode">
+                  ＋ 新增手动模式
+                </ElButton>
+              </div>
+
+              <div class="manual-mode-list">
+                <div
+                  v-for="mode in manualModes"
+                  :key="mode.id"
+                  class="manual-mode-row"
+                >
+                  <ElInput
+                    v-model="mode.name"
+                    size="small"
+                    class="manual-mode-row__name"
+                    aria-label="手动模式名称"
+                  />
+                  <span class="manual-mode-row__behavior">
+                    {{ mode.behavior === 'slow' ? '滞销' : '自定系数' }}
+                  </span>
+                  <ElInput
+                    v-model="mode.description"
+                    size="small"
+                    class="manual-mode-row__desc"
+                    placeholder="说明（可选）"
+                    aria-label="手动模式说明"
+                  />
+                  <template v-if="mode.behavior === 'custom'">
+                    <ElInputNumber
+                      v-for="coefficient in COEFFICIENT_KEYS"
+                      :key="coefficient.key"
+                      v-model="mode.defaultCoefficients[coefficient.key]"
+                      :min="0"
+                      :step="0.5"
+                      :precision="1"
+                      :controls="false"
+                      size="small"
+                      class="manual-mode-row__coefficient"
+                      :aria-label="`${mode.name}默认${coefficient.label}系数`"
+                    />
+                  </template>
+                  <ElButton
+                    size="small"
+                    text
+                    type="danger"
+                    class="rule-row-remove"
+                    :disabled="isRequiredManualMode(mode)"
+                    :title="isRequiredManualMode(mode) ? '内置行为必须保留一个' : '删除模式'"
+                    @click="removeManualMode(mode)"
+                  >
+                    <ElIcon><Delete /></ElIcon>
+                  </ElButton>
+                </div>
+              </div>
+            </div>
+
+            <div class="rule-block">
+              <div class="rule-block__heading">
+                <h3>② 手动 SKU 清单</h3>
+                <span class="rule-block__hint">
+                  在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。
+                </span>
+                <span class="manual-list__spacer" />
+                <ElButton
+                  size="small"
+                  :disabled="manualSelection.length === 0"
+                  @click="clearManualSelection"
+                >
+                  恢复自动（{{ manualSelection.length }}）
+                </ElButton>
+              </div>
+
+              <p v-if="danglingSkuIds.length" class="manual-list__dangling">
+                清单中有 {{ danglingSkuIds.length }} 个商品不在当前数据里（可能已下架或改号）。
+                <ElButton size="small" text class="rule-block__add" @click="clearDanglingEntries">
+                  一键清理
+                </ElButton>
+              </p>
+
+              <ElTable
+                v-if="manualRows.length"
+                class="manual-table"
+                :data="manualRows"
+                row-key="skuId"
+                max-height="320"
+                border
+                size="small"
+                @selection-change="(rows) => (manualSelection = rows.map((row) => row.skuId))"
+              >
+                <ElTableColumn type="selection" width="42" />
+                <ElTableColumn label="品名" min-width="140">
+                  <template #default="{ row }">
+                    <span :title="row.item.product">{{ row.item.product }}</span>
+                  </template>
+                </ElTableColumn>
+                <ElTableColumn label="颜色" min-width="120">
+                  <template #default="{ row }">{{ row.item.color }}</template>
+                </ElTableColumn>
+                <ElTableColumn label="模式" width="150">
+                  <template #default="{ row }">
+                    <ElSelect
+                      :model-value="row.entry.modeId"
+                      size="small"
+                      class="manual-table__select"
+                      @update:model-value="(value) => updateManualRowMode(row, value)"
+                    >
+                      <ElOption
+                        v-for="mode in manualModes"
+                        :key="mode.id"
+                        :label="mode.name"
+                        :value="mode.id"
+                      />
+                    </ElSelect>
+                  </template>
+                </ElTableColumn>
+                <ElTableColumn label="系数（红 / 正 / 峰）" min-width="220">
+                  <template #default="{ row }">
+                    <template v-if="row.mode?.behavior === 'custom'">
+                      <ElInputNumber
+                        v-for="coefficient in COEFFICIENT_KEYS"
+                        :key="coefficient.key"
+                        :model-value="row.entry.coefficients?.[coefficient.key] ?? null"
+                        :min="0"
+                        :step="0.5"
+                        :precision="1"
+                        :controls="false"
+                        size="small"
+                        class="manual-table__coefficient"
+                        :aria-label="`${row.item.product} ${coefficient.label}系数`"
+                        @update:model-value="(value) => updateManualRowCoefficient(row, coefficient.key, value)"
+                      />
+                    </template>
+                    <span v-else class="manual-table__slow">滞销：不参与备货</span>
+                  </template>
+                </ElTableColumn>
+                <ElTableColumn label="操作" width="96" align="center">
+                  <template #default="{ row }">
+                    <ElButton size="small" text @click="clearManualRow(row)">恢复自动</ElButton>
+                  </template>
+                </ElTableColumn>
+              </ElTable>
+              <p v-else class="rule-block__empty">
+                还没有手动 SKU。到主面板点击颜色单元格的 ⓘ 打开 SKU 弹窗，把策略切成「手动策略」即可。
+              </p>
+            </div>
+          </div>
+        </template>
 
         <div class="config-actions">
           <span class="config-dirty">{{ configDirty ? '有未保存的修改' : '' }}</span>
-          <ElButton
-            size="small"
-            :disabled="!canUndo"
-            title="撤销上一步（Ctrl+Z）"
-            @click="undo"
-          >
-            撤销
-          </ElButton>
-          <ElButton size="small" :disabled="!canRedo" title="重做（Ctrl+Shift+Z）" @click="redo">
-            重做
-          </ElButton>
-          <ElButton size="small" :disabled="!configDirty" @click="discardChanges">重置</ElButton>
-          <ElButton size="small" @click="downloadConfig">导出配置</ElButton>
-          <ElButton size="small" @click="restoreDefaults">恢复默认</ElButton>
+          <ElTooltip content="回退上一步改动（Ctrl+Z）" placement="top">
+            <span class="config-action-wrap">
+              <ElButton size="small" :disabled="!canUndo" @click="undo">撤销</ElButton>
+            </span>
+          </ElTooltip>
+          <ElTooltip content="恢复刚撤销的改动（Ctrl+Shift+Z）" placement="top">
+            <span class="config-action-wrap">
+              <ElButton size="small" :disabled="!canRedo" @click="redo">重做</ElButton>
+            </span>
+          </ElTooltip>
+          <ElTooltip content="放弃所有未保存的改动，回到上次保存的配置" placement="top">
+            <span class="config-action-wrap">
+              <ElButton size="small" :disabled="!configDirty" @click="discardChanges">
+                放弃修改
+              </ElButton>
+            </span>
+          </ElTooltip>
+          <ElTooltip content="把当前配置导出为 JSON，用于覆盖 src/stocking/config.json" placement="top">
+            <span class="config-action-wrap">
+              <ElButton size="small" @click="downloadConfig">导出配置</ElButton>
+            </span>
+          </ElTooltip>
+          <ElTooltip content="恢复为内置默认配置并立即写回配置文件" placement="top">
+            <span class="config-action-wrap">
+              <ElButton size="small" @click="restoreDefaults">恢复默认</ElButton>
+            </span>
+          </ElTooltip>
+          <span class="config-actions__spacer" />
           <ElButton size="small" type="primary" :disabled="!configDirty" @click="confirmConfig">
             确定
           </ElButton>
@@ -1238,6 +1550,102 @@ function handleRowClick(row) {
   gap: 4px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--industrial-grid-light);
+}
+
+.strategy-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--industrial-grid);
+}
+
+.strategy-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 4px;
+  color: var(--industrial-text);
+  background: var(--industrial-page);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.strategy-tab--active {
+  color: #fff;
+  background: var(--industrial-primary);
+  border-color: var(--industrial-primary);
+}
+
+.strategy-tab__count {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.08);
+  font-size: 11px;
+}
+
+.manual-config {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.manual-mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.manual-mode-row {
+  display: grid;
+  grid-template-columns: 140px 78px minmax(0, 1fr) repeat(3, 76px) 24px;
+  align-items: center;
+  gap: 6px;
+}
+
+.manual-mode-row__behavior {
+  color: var(--industrial-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.manual-mode-row__name,
+.manual-mode-row__desc,
+.manual-mode-row__coefficient {
+  width: 100%;
+}
+
+.manual-list__spacer {
+  flex: 1 1 auto;
+}
+
+.manual-list__dangling {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: 3px;
+  color: var(--industrial-text);
+  background: var(--industrial-header);
+  font-size: 12px;
+}
+
+.manual-table {
+  width: 100%;
+}
+
+.manual-table__select {
+  width: 100%;
+}
+
+.manual-table__coefficient {
+  width: 64px;
+  margin-right: 4px;
+}
+
+.manual-table__slow {
+  color: var(--industrial-muted);
+  font-size: 12px;
 }
 
 .rule-tab {
@@ -1528,15 +1936,24 @@ function handleRowClick(row) {
 .config-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid var(--industrial-grid-light);
 }
 
+/* 禁用状态的按钮不触发鼠标事件，外面包一层 span 才能让 tooltip 正常显示 */
+.config-action-wrap {
+  display: inline-flex;
+}
+
+.config-actions__spacer {
+  flex: 1 1 auto;
+}
+
 .config-dirty {
-  margin-right: auto;
+  margin-right: 4px;
   color: var(--industrial-muted);
   font-size: 12px;
 }

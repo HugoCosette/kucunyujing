@@ -7,7 +7,11 @@ export function calculateInventoryRow(item) {
 
   let strategyIssue = ''
   let strategyIssueShort = ''
-  if (!coefficientSet) {
+  const slow = Boolean(item.strategySlow)
+  if (slow) {
+    strategyIssue = '滞销模式：不参与备货排名、预警与补货建议'
+    strategyIssueShort = '滞销'
+  } else if (!coefficientSet) {
     strategyIssue = '未命中任何模式档位'
     strategyIssueShort = '未命中档位'
   } else if (!ruleFactors) {
@@ -44,7 +48,9 @@ export function calculateInventoryRow(item) {
   const normalStock = strategyAvailable ? weeklyUsage * factors.normal : null
   const peakStock = strategyAvailable ? weeklyUsage * factors.peak : null
   const shortage = strategyAvailable ? normalStock - projectedStock : null
-  const urgency = getUrgency(projectedStock, redLineStock, normalStock, peakStock)
+  const urgency = slow
+    ? { text: '滞销', tone: 'unavailable' }
+    : getUrgency(projectedStock, redLineStock, normalStock, peakStock)
 
   return {
     ...item,
@@ -61,10 +67,11 @@ export function calculateInventoryRow(item) {
     shortage,
     shortageRate:
       !strategyAvailable || normalStock === 0 ? null : (shortage / normalStock) * 100,
-    stockSalesRatio: weeklyUsage === 0 ? null : item.warehouseStock / weeklyUsage,
+    stockSalesRatio: weeklyUsage === 0 || slow ? null : item.warehouseStock / weeklyUsage,
     strategyAvailable,
     strategyIssue,
     strategyIssueShort,
+    strategySlow: slow,
     urgencyText: urgency.text,
     urgencyTone: urgency.tone,
   }
@@ -102,6 +109,7 @@ export function formatRatio(value) {
 }
 
 export function formatFactors(row) {
+  if (row.strategySlow) return '滞销'
   if (!row.strategyAvailable) return '缺省'
   return `${row.redLineFactor}/${row.normalFactor}/${row.peakFactor}`
 }

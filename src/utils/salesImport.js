@@ -13,6 +13,7 @@ const SKU_ID_HEADERS = new Set([SKU_ID_LABEL, '唯一编码'])
 const METRIC_HEADERS = new Map(HEAT_FACTOR_FIELDS.map(({ label, field }) => [label, field]))
 const MONTH_COUNT_PATTERN = /^(\d{1,2})月条数$/
 const MONTH_WEIGHT_PATTERN = /^(\d{1,2})月重量$/
+const MONTH_ORDER_PATTERN = /^(\d{1,2})月订单数$/
 const EMPTY_QUANTITY_TOKENS = new Set(['', '--', '-', '—', '缺省', 'null'])
 const HEADER_SCAN_ROWS = 10
 
@@ -34,6 +35,7 @@ function locateHeader(rows) {
     let colorIndex = -1
     const countIndexes = new Map()
     const weightIndexes = new Map()
+    const orderIndexes = new Map()
     const metricIndexes = new Map()
 
     rows[index].cells.forEach((cell, cellIndex) => {
@@ -72,6 +74,15 @@ function locateHeader(rows) {
         if (month >= 1 && month <= 12 && !weightIndexes.has(month)) {
           weightIndexes.set(month, cellIndex)
         }
+        return
+      }
+
+      const orderMatch = MONTH_ORDER_PATTERN.exec(label)
+      if (orderMatch) {
+        const month = Number(orderMatch[1])
+        if (month >= 1 && month <= 12 && !orderIndexes.has(month)) {
+          orderIndexes.set(month, cellIndex)
+        }
       }
     })
 
@@ -83,6 +94,7 @@ function locateHeader(rows) {
         colorIndex,
         countIndexes,
         weightIndexes,
+        orderIndexes,
         metricIndexes,
       }
     }
@@ -118,11 +130,13 @@ export function parseSalesSheet(rows) {
     colorIndex,
     countIndexes,
     weightIndexes,
+    orderIndexes,
     metricIndexes,
   } = header
-  const hasMonthColumns = countIndexes.size > 0 || weightIndexes.size > 0
+  const hasMonthColumns =
+    countIndexes.size > 0 || weightIndexes.size > 0 || orderIndexes.size > 0
   if (!hasMonthColumns && metricIndexes.size === 0) {
-    throw new Error('未找到销售数据列：需要“N月条数”“N月重量”或动销指标列')
+    throw new Error('未找到销售数据列：需要“N月条数”“N月重量”“N月订单数”或动销指标列')
   }
 
   const errors = []
@@ -160,6 +174,7 @@ export function parseSalesSheet(rows) {
     const rowErrors = []
     const counts = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
     const weights = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
+    const orders = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
     for (const { month, index } of SALES_MONTH_FIELDS) {
       const countColumn = countIndexes.get(month)
       if (countColumn !== undefined) {
@@ -175,6 +190,15 @@ export function parseSalesSheet(rows) {
         weights[index] = parseQuantity(
           row.cells[weightColumn],
           `${month}月重量`,
+          row.rowNumber,
+          rowErrors,
+        )
+      }
+      const orderColumn = orderIndexes.get(month)
+      if (orderColumn !== undefined) {
+        orders[index] = parseQuantity(
+          row.cells[orderColumn],
+          `${month}月订单数`,
           row.rowNumber,
           rowErrors,
         )
@@ -196,7 +220,7 @@ export function parseSalesSheet(rows) {
     }
 
     seenKeys.set(skuId, row.rowNumber)
-    parsedRows.push({ skuId, product, color, counts, weights, metrics })
+    parsedRows.push({ skuId, product, color, counts, weights, orders, metrics })
   }
 
   if (!parsedRows.length) {
@@ -206,7 +230,7 @@ export function parseSalesSheet(rows) {
   }
 
   const months = SALES_MONTH_FIELDS.map((entry) => entry.month).filter(
-    (month) => countIndexes.has(month) || weightIndexes.has(month),
+    (month) => countIndexes.has(month) || weightIndexes.has(month) || orderIndexes.has(month),
   )
   const metricFields = HEAT_FACTOR_FIELDS.map(({ field }) => field).filter((field) =>
     metricIndexes.has(field),
@@ -233,6 +257,7 @@ export function attachSalesToInventory(salesRows, inventoryItems) {
     bySku.set(row.skuId, {
       counts: row.counts,
       weights: row.weights,
+      orders: row.orders,
       metrics: row.metrics,
     })
   }
