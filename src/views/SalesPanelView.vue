@@ -56,7 +56,11 @@ function buildSalesCells(item, sales) {
     ...HEAT_FACTOR_FIELDS.map(({ field }) => toCellValue(item[field])),
   ]
   for (const { index } of SALES_MONTH_FIELDS) {
-    cells.push(toCellValue(sales?.counts[index] ?? null), toCellValue(sales?.weights[index] ?? null))
+    cells.push(
+      toCellValue(sales?.counts[index] ?? null),
+      toCellValue(sales?.weights[index] ?? null),
+      toCellValue(sales?.orders[index] ?? null),
+    )
   }
   return cells
 }

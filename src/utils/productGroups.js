@@ -25,8 +25,10 @@ function sumField(rows, field) {
     : null
 }
 
-function createProductSummary(rows) {
-  const strategyAvailable = rows.every((row) => row.strategyAvailable)
+function createProductSummary(allRows) {
+  // 滞销 SKU 不参与备货，父行汇总时直接排除，避免把"不打算备货"的量算进备货基线。
+  const rows = allRows.filter((row) => !row.strategySlow)
+  const strategyAvailable = rows.length > 0 && rows.every((row) => row.strategyAvailable)
   const summary = Object.fromEntries(
     PRODUCT_SUMMARY_FIELDS.map((field) => [field, sumField(rows, field)]),
   )
@@ -49,6 +51,7 @@ function createProductSummary(rows) {
     strategyAvailable,
     strategyIssue: '',
     strategyIssueShort: '',
+    strategySlow: rows.length === 0 && allRows.length > 0,
     urgencyText: '',
     urgencyTone: '',
   }

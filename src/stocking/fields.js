@@ -5,6 +5,7 @@ export const HEAT_METRIC_FIELDS = [
   { field: 'totalOrders', label: '订单总数' },
   { field: 'activeMonths', label: '动销月份' },
   { field: 'activeCustomers', label: '动销客户' },
+  { field: 'cumulativeCount', label: '累积条数' },
 ]
 
 // 下拉分组：销售数据置顶展开，其余字段默认折叠。
@@ -74,6 +75,7 @@ const DEFAULT_THRESHOLDS = {
   totalOrders: { S: 100, A: 50, B: 20, C: 1 },
   activeMonths: { S: 12, A: 9, B: 6, C: 1 },
   activeCustomers: { S: 10, A: 5, B: 2, C: 1 },
+  cumulativeCount: { S: 1000, A: 500, B: 100, C: 1 },
 }
 
 export function createThresholds(field) {

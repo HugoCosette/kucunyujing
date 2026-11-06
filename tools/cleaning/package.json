@@ -2,7 +2,7 @@
   "name": "mesh-clean-merge",
   "version": "1.0.0",
   "private": true,
-  "description": "网布产品资料 / 出入库明细 / 库存结存 三表清洗合并脚本",
+  "description": "网布备货Excel清洗合并脚本",
   "main": "clean-merge.js",
   "scripts": {
     "clean": "node clean-merge.js"

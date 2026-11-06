@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import {
   ElButton,
+  ElCheckbox,
   ElDialog,
   ElInput,
   ElInputNumber,
@@ -28,7 +29,6 @@ import {
   formatQuantity,
   formatRate,
   formatRatio,
-  normalizeProductName,
 } from '@/utils/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
 import { createEvaluator, evaluateItem } from '@/stocking'
@@ -44,7 +44,9 @@ const props = defineProps({
 const inventoryStore = useInventoryStore(props.panelKey)
 // 备货配置全应用唯一：模式判定、评分分档与系数都按这份配置计算。
 const stockingStore = useStockingConfigStore()
-const stockingEvaluator = computed(() => createEvaluator(stockingStore.config))
+const stockingEvaluator = computed(() =>
+  createEvaluator(stockingStore.config, { manualOverrides: stockingStore.manualOverrides }),
+)
 const inventoryItems = inventoryStore.inventoryItems
 const purchaseList = inventoryStore.purchaseList
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
@@ -58,7 +60,6 @@ const purchaseListRows = computed(() =>
     return { ...purchaseItem, product: item.product, color: item.color }
   }),
 )
-const productDrafts = reactive({})
 const plannedDrafts = reactive({})
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const selectedWarningTones = ref([])
@@ -68,6 +69,8 @@ const productFilter = ref('')
 const colorFilter = ref('')
 const expandingProductKeys = ref(new Set())
 const selectedRowId = ref(null)
+// 批量补货勾选：只记 SKU 标识集合。行会随虚拟滚动装卸，选择状态不能挂在行上。
+const selectedSkuIds = ref(new Set())
 // SKU 详情弹窗只保留一个实例并挂在页面层级：放在虚拟滚动行里会随行卸载，
 // 遮罩还会被列表的 transform 容器裁掉。
 const skuDetailVisible = ref(false)
@@ -109,6 +112,10 @@ const URGENT_PLAN_ROW_HEIGHT = 48
 const PURCHASE_LIST_ROW_HEIGHT = 44
 const flyingPurchaseIcon = ref(null)
 const purchaseListPulse = ref(false)
+// 批量确认补货：先落成可编辑的「需安排」清单，确认后覆盖写入并进入采购清单。
+const restockDialogVisible = ref(false)
+const restockRows = ref([])
+const RESTOCK_ROW_HEIGHT = 48
 // 导入只对主面板开放，示例面板保持原始演示数据。
 const canImportExcel = computed(() => props.panelKey === DEFAULT_PANEL_KEY)
 
@@ -184,6 +191,9 @@ function rebuildLeafRows() {
     productMonthlyAvg.set(row.product, (productMonthlyAvg.get(row.product) ?? 0) + (row.monthlyAvgCount ?? 0))
   }
   rows.sort((first, second) => {
+    // 滞销品不参与备货排名，统一沉到列表末尾。
+    const slowDiff = Number(Boolean(first.strategySlow)) - Number(Boolean(second.strategySlow))
+    if (slowDiff !== 0) return slowDiff
     const productDiff =
       (productMonthlyAvg.get(second.product) ?? 0) - (productMonthlyAvg.get(first.product) ?? 0)
     if (productDiff !== 0) return productDiff
@@ -234,6 +244,8 @@ rebuildLeafRows()
 watch(() => inventoryItems.length, rebuildLeafRows)
 // 备货配置（模式 / 评分档 / 系数）修改后，整表按新配置重算。
 watch(() => stockingStore.config, rebuildLeafRows)
+// 手动清单变化（策略切换、改系数、恢复自动）同样要整表重算。
+watch(() => stockingStore.manual, rebuildLeafRows)
 
 // 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
 const plannedPreviewTones = reactive({})
@@ -412,6 +424,8 @@ function toggleAllProductGroups() {
 const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
 const TABLE_COLUMNS = [
+  // 批量补货勾选列：表头是全选（作用于当前筛选结果），品名父行勾选连带其下所有 SKU。
+  { key: 'select', label: '选择', width: 44, group: '选择' },
   { key: 'rule', label: '模式', width: 96, group: '信息' },
   { key: 'tier', label: '评分档', width: 84, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
@@ -537,44 +551,60 @@ function submitUrgentPlans() {
     if (planRow.additionalPlan <= 0) continue
 
     const item = itemById.value.get(planRow.id)
-    if (item) accepted.push({ item, additionalPlan: planRow.additionalPlan })
+    if (item) {
+      // 紧急补货是「在现有需安排上追加」，批量补货是「覆盖」，这里先换算成绝对值再统一写入。
+      accepted.push({ id: item.id, planned: (item.planned ?? 0) + planRow.additionalPlan })
+    }
   }
 
-  if (accepted.length > 0) {
-    // 采购清单按 id 建一次索引：逐行 find / findIndex 会把整份清单重扫几千遍。
-    const purchaseIndexById = new Map(purchaseList.map((entry, index) => [entry.id, index]))
-    for (const { item, additionalPlan } of accepted) {
-      const purchaseIndex = purchaseIndexById.get(item.id)
-      plannedUndoHistory[item.id] = {
-        previousPlanned: item.planned,
-        previousPurchaseItem:
-          purchaseIndex === undefined ? null : { ...purchaseList[purchaseIndex] },
-      }
-      item.planned = (item.planned ?? 0) + additionalPlan
-      delete plannedDrafts[item.id]
-      delete plannedPreviewTones[item.id]
+  applyRestockPlans(accepted)
+  urgentPlanDialogVisible.value = false
+  urgentPlanRows.value = []
+}
 
-      if (purchaseIndex === undefined) {
-        purchaseIndexById.set(item.id, purchaseList.length)
-        purchaseList.push({
-          id: item.id,
-          product: item.product,
-          color: item.color,
-          planned: item.planned ?? 0,
-          actualPlan: null,
-        })
-        continue
-      }
+// 采购清单的唯一写入路径：同一 SKU 只保留一条，重复写入按覆盖处理。
+// plans 里的 planned 是「需安排」的绝对值，返回实际写入的行数。
+function applyRestockPlans(plans) {
+  const accepted = plans.filter((plan) => Number(plan.planned) > 0)
+  if (accepted.length === 0) return 0
+
+  // 采购清单按 id 建一次索引：逐行 find / findIndex 会把整份清单重扫几千遍。
+  const purchaseIndexById = new Map(purchaseList.map((entry, index) => [entry.id, index]))
+  const changedIds = []
+  for (const plan of accepted) {
+    const item = itemById.value.get(plan.id)
+    if (!item) continue
+
+    plannedUndoHistory[item.id] = {
+      previousPlanned: item.planned,
+      previousPurchaseItem:
+        purchaseIndexById.has(item.id) ? { ...purchaseList[purchaseIndexById.get(item.id)] } : null,
+    }
+    item.planned = Number(plan.planned)
+    delete plannedDrafts[item.id]
+    delete plannedPreviewTones[item.id]
+
+    const purchaseIndex = purchaseIndexById.get(item.id)
+    if (purchaseIndex === undefined) {
+      purchaseIndexById.set(item.id, purchaseList.length)
+      purchaseList.push({
+        id: item.id,
+        product: item.product,
+        color: item.color,
+        planned: item.planned ?? 0,
+        actualPlan: null,
+      })
+    } else {
       const purchaseItem = purchaseList[purchaseIndex]
       purchaseItem.product = item.product
       purchaseItem.color = item.color
       purchaseItem.planned = item.planned ?? 0
     }
-    refreshLeafRows(accepted.map(({ item }) => item.id))
+    changedIds.push(item.id)
   }
 
-  urgentPlanDialogVisible.value = false
-  urgentPlanRows.value = []
+  refreshLeafRows(changedIds)
+  return changedIds.length
 }
 
 function applyAllRecommendedPlans() {
@@ -596,19 +626,25 @@ function getPlannedDraft(row) {
 }
 
 // 需安排建议值：补到“正常库存 80% 下限”的差额（基于理论库存，采纳后叠加为预计库存）。
-function getPlannedPlaceholder(row) {
-  if (!row.strategyAvailable) return ''
-
-  const targetPlanned = Math.max(
+// 批量补货的默认数量与单行占位保持同一口径。
+function getSuggestedPlanned(row) {
+  if (!row.strategyAvailable) return row.planned ?? 0
+  return Math.max(
     row.planned ?? 0,
     0,
     Math.ceil(row.normalStock * 0.8 - row.theoreticalStock),
   )
-  return `${formatQuantity(targetPlanned)}`
+}
+
+function getPlannedPlaceholder(row) {
+  if (!row.strategyAvailable) return ''
+  return `${formatQuantity(getSuggestedPlanned(row))}`
 }
 
 function getPlannedPlaceholderTitle(row) {
-  if (!row.strategyAvailable) return `备货模式缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
+  if (!row.strategyAvailable) {
+    return `备货模式缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
+  }
 
   return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存的 80% 下限；该建议不会自动采纳`}
 
@@ -739,6 +775,121 @@ function undoPlannedAcceptance(row) {
   refreshLeafRow(row.id)
 }
 
+// —— 批量补货 ——
+// 勾选只认 SKU 标识：父行（品名）按子行全选 / 半选推导，不单独存状态。
+function isSkuSelected(id) {
+  return selectedSkuIds.value.has(id)
+}
+
+function toggleSkuSelection(id, checked) {
+  const next = new Set(selectedSkuIds.value)
+  if (checked) next.add(id)
+  else next.delete(id)
+  selectedSkuIds.value = next
+}
+
+function isGroupFullySelected(row) {
+  const children = row.children ?? []
+  return children.length > 0 && children.every((child) => selectedSkuIds.value.has(child.id))
+}
+
+function isGroupPartiallySelected(row) {
+  const children = row.children ?? []
+  let selected = 0
+  for (const child of children) {
+    if (selectedSkuIds.value.has(child.id)) selected += 1
+  }
+  return selected > 0 && selected < children.length
+}
+
+function toggleGroupSelection(row, checked) {
+  const next = new Set(selectedSkuIds.value)
+  for (const child of row.children ?? []) {
+    if (checked) next.add(child.id)
+    else next.delete(child.id)
+  }
+  selectedSkuIds.value = next
+}
+
+// 表头全选取当前筛选结果（含未展开品名下的 SKU），筛选之外的选择保持不变。
+const filteredSkuCount = computed(() => filteredInventoryLeafRows.value.length)
+const selectedFilteredCount = computed(() => {
+  let count = 0
+  for (const row of filteredInventoryLeafRows.value) {
+    if (selectedSkuIds.value.has(row.id)) count += 1
+  }
+  return count
+})
+const allFilteredSkuSelected = computed(
+  () => filteredSkuCount.value > 0 && selectedFilteredCount.value === filteredSkuCount.value,
+)
+const someFilteredSkuSelected = computed(
+  () => selectedFilteredCount.value > 0 && selectedFilteredCount.value < filteredSkuCount.value,
+)
+
+function toggleSelectAllFiltered(checked) {
+  const next = new Set(selectedSkuIds.value)
+  for (const row of filteredInventoryLeafRows.value) {
+    if (checked) next.add(row.id)
+    else next.delete(row.id)
+  }
+  selectedSkuIds.value = next
+}
+
+function clearSkuSelection() {
+  selectedSkuIds.value = new Set()
+}
+
+// 导入换表后清掉已不存在的 SKU，避免选中数把幽灵行也算进去。
+watch(
+  () => inventoryItems.length,
+  () => {
+    if (selectedSkuIds.value.size === 0) return
+    const next = new Set()
+    for (const id of selectedSkuIds.value) {
+      if (itemById.value.has(id)) next.add(id)
+    }
+    if (next.size !== selectedSkuIds.value.size) selectedSkuIds.value = next
+  },
+)
+
+function openRestockDialog() {
+  restockRows.value = inventoryLeafRows.value
+    .filter((row) => selectedSkuIds.value.has(row.id))
+    .map((row) => {
+      const suggested = getSuggestedPlanned(row)
+      return {
+        id: row.id,
+        product: row.product,
+        color: row.color,
+        strategyAvailable: row.strategyAvailable,
+        currentPlanned: row.planned ?? 0,
+        suggested,
+        planned: suggested,
+      }
+    })
+  restockDialogVisible.value = true
+}
+
+const hasRestockPlan = computed(() => restockRows.value.some((row) => Number(row.planned) > 0))
+
+function applyAllSuggestedRestock() {
+  restockRows.value.forEach((row) => {
+    row.planned = row.suggested
+  })
+}
+
+function submitRestock() {
+  const appliedCount = applyRestockPlans(restockRows.value)
+  if (appliedCount > 0) {
+    ElMessage.success(`已加入本次采购清单：${appliedCount} 个 SKU`)
+    pulsePurchaseListButton()
+  }
+  restockDialogVisible.value = false
+  restockRows.value = []
+  clearSkuSelection()
+}
+
 function getRowClassName({ row }) {
   return [
     row.isProductGroup ? 'product-group-row' : 'product-color-row',
@@ -764,24 +915,6 @@ function handleProductCellClick(row) {
   toggleProductGroup(row)
   if (!row.isProductGroup) {
     selectedRowId.value = row.id
-  }
-}
-
-function getColorInputWidth(color) {
-  const textWidth = [...color].reduce(
-    (width, character) => width + (/[^\x00-\xff]/.test(character) ? 14 : 8),
-    0,
-  )
-
-  return `${Math.min(84, Math.max(44, textWidth + 12))}px`
-}
-
-function updateValue(id, field, value) {
-  if (value !== null || field === 'planned') {
-    const item = itemById.value.get(id)
-    if (!item) return
-    item[field] = value
-    refreshLeafRow(id)
   }
 }
 
@@ -816,8 +949,7 @@ function createExcelCell(value, reference, styleIndex = 0) {
 
 function exportInventoryToExcel() {
   const columnGroups = [
-    { label: '信息', columns: ['唯一标识', '模式', '评分档', '等级', '色彩'] },
-    { label: '商品', columns: ['品名', '颜色', '预警'] },
+    { label: '信息', columns: ['唯一标识', '模式', '评分档', '等级', '色彩'] },    { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
     { label: '出口', columns: ['欠货', '周消耗'] },
     { label: '库存', columns: ['周转入', '在途库存', '在仓库存', '理论库存', '预计库存'] },
@@ -840,11 +972,10 @@ function exportInventoryToExcel() {
   const headers = columnGroups.flatMap(({ columns }) => columns)
   const data = inventoryLeafRows.value.map((row) => [
     row.skuId,
-    row.ruleName,
-    row.tierName,
-    row.gradeSummary,
-    row.category,
-    row.product,
+    row.strategy === 'manual' ? `手动·${row.ruleName}` : row.ruleName,
+    row.strategySlow ? '滞销' : row.tierName,
+    row.strategy === 'manual' ? '' : row.gradeSummary,
+    row.category,    row.product,
     row.color,
     row.urgencyText,
     row.planned,
@@ -992,11 +1123,10 @@ function exportPurchaseListToExcel() {
   }
 }
 
-// 导入成功后清空需安排/品名草稿并重建表格；总表与销售表的写入已在 useSourceImport 内完成。
+// 导入成功后清空需安排草稿并重建表格；总表与销售表的写入已在 useSourceImport 内完成。
 function handleSourcesImported(summary) {
   for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
   for (const key of Object.keys(plannedPreviewTones)) delete plannedPreviewTones[key]
-  for (const key of Object.keys(productDrafts)) delete productDrafts[key]
 
   rebuildLeafRows()
   selectedRowId.value = null
@@ -1085,34 +1215,6 @@ function downloadImportTemplate() {
     console.error('Failed to build inventory import template', error)
     ElMessage.error(`模板生成失败：${error instanceof Error ? error.message : '未知错误'}`)
   }
-}
-
-function updateProductDraft(product, value) {
-  productDrafts[product] = value
-}
-
-function commitProduct(currentProduct) {
-  const updatedProduct = productDrafts[currentProduct]
-  if (updatedProduct === undefined) return
-
-  const product = normalizeProductName(updatedProduct)
-  if (product && product !== currentProduct) {
-    const affectedIds = []
-    inventoryItems.forEach((item) => {
-      if (item.product !== currentProduct) return
-      item.product = product
-      affectedIds.push(item.id)
-    })
-    rebuildLeafRows()
-
-    const keys = new Set(expandedProductKeys.value)
-    keys.delete(`product:${currentProduct}`)
-    keys.add(`product:${product}`)
-    expandedProductKeys.value = [...keys]
-    knownProductKeys = new Set(inventoryRows.value.map((row) => row.id))
-  }
-
-  delete productDrafts[currentProduct]
 }
 
 </script>
@@ -1279,6 +1381,7 @@ function commitProduct(currentProduct) {
     <div
       ref="tableScrollRef"
       class="inventory-vtable"
+      :class="{ 'inventory-vtable--batch-bar': selectedSkuIds.size > 0 }"
       role="table"
       aria-label="库存明细"
       @scroll.passive="handleTableScroll"
@@ -1311,7 +1414,15 @@ function commitProduct(currentProduct) {
                   column.key === 'planned' || column.key === 'warehouseStock',
               }"
             >
-              {{ column.label }}
+              <ElCheckbox
+                v-if="column.key === 'select'"
+                :model-value="allFilteredSkuSelected"
+                :indeterminate="someFilteredSkuSelected"
+                :disabled="filteredSkuCount === 0"
+                aria-label="全选当前筛选结果"
+                @change="toggleSelectAllFiltered"
+              />
+              <template v-else>{{ column.label }}</template>
             </div>
           </div>
         </div>
@@ -1332,23 +1443,48 @@ function commitProduct(currentProduct) {
               }"
               @click="handleRowClick(row)"
             >
+              <div class="inventory-vtable__cell inventory-vtable__cell--select" @click.stop>
+                <ElCheckbox
+                  v-if="row.isProductGroup"
+                  :model-value="isGroupFullySelected(row)"
+                  :indeterminate="isGroupPartiallySelected(row)"
+                  :aria-label="`选择 ${row.product} 下的全部 SKU`"
+                  @change="toggleGroupSelection(row, $event)"
+                />
+                <ElCheckbox
+                  v-else
+                  :model-value="isSkuSelected(row.id)"
+                  :aria-label="`选择 ${row.product} ${row.color}`"
+                  @change="toggleSkuSelection(row.id, $event)"
+                />
+              </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
                 <span
                   v-if="!row.isProductGroup && row.ruleName"
                   class="stocking-text"
-                  :class="{ 'stocking-text--conflict': row.ruleConflict }"
+                  :class="{
+                    'stocking-text--conflict': row.ruleConflict,
+                    'stocking-text--manual': row.strategy === 'manual',
+                  }"
                   :title="
                     row.ruleConflict
                       ? '命中多条模式，已按列表中靠前的模式处理，请收窄模式条件'
-                      : row.ruleName
+                      : row.strategy === 'manual'
+                        ? `手动策略 · ${row.ruleName}`
+                        : row.ruleName
                   "
                 >
-                  {{ row.ruleName }}
+                  {{ row.strategy === 'manual' ? `手动·${row.ruleName}` : row.ruleName }}
                 </span>
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
                 <span
-                  v-if="!row.isProductGroup && row.tierName"
+                  v-if="!row.isProductGroup && row.strategySlow"
+                  class="stocking-text stocking-text--manual"
+                  title="滞销模式：不参与备货排名与预警"
+                >滞销</span>
+                <span
+                  v-else-if="!row.isProductGroup && row.tierName"
                   class="stocking-text"
                   :title="`等级明细：${row.gradeSummary || '--'}`"
                 >
@@ -1378,28 +1514,12 @@ function commitProduct(currentProduct) {
                       />
                     </svg>
                   </span>
-                  <span class="inventory-vtable__product-input" @click.stop>
-                    <ElInput
-                      :model-value="productDrafts[row.product] ?? row.product"
-                      class="product-input"
-                      aria-label="品名"
-                      @update:model-value="updateProductDraft(row.product, $event)"
-                      @blur="commitProduct(row.product)"
-                    />
-                  </span>
                 </template>
-                <span v-else class="product-name-text" :title="row.product">{{ row.product }}</span>
+                <span class="product-name-text" :title="row.product">{{ row.product }}</span>
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--color">
                 <template v-if="!row.isProductGroup">
-                  <ElInput
-                    :model-value="row.color"
-                    :style="{ width: getColorInputWidth(row.color) }"
-                    size="small"
-                    class="editable-text"
-                    aria-label="颜色"
-                    @update:model-value="updateValue(row.id, 'color', $event)"
-                  />
+                  <span class="color-name-text" :title="row.color">{{ row.color }}</span>
                   <SkuDetailTrigger :item="row" @open="openSkuDetail" />
                 </template>
               </div>
@@ -1475,84 +1595,22 @@ function commitProduct(currentProduct) {
                 </div>
               </div>
               <div class="inventory-vtable__cell">
-                <template v-if="row.isProductGroup">{{ formatQuantity(row.producing) }}</template>
-                <ElInputNumber
-                  v-else
-                  :model-value="row.producing"
-                  :min="0"
-                  :controls="false"
-                  size="small"
-                  class="editable-number"
-                  aria-label="生产中"
-                  @update:model-value="updateValue(row.id, 'producing', $event)"
-                />
+                {{ formatQuantity(row.producing) }}
               </div>
               <div class="inventory-vtable__cell">
-                <template v-if="row.isProductGroup">{{ formatQuantity(row.backorder) }}</template>
-                <ElInputNumber
-                  v-else
-                  :model-value="row.backorder"
-                  :min="0"
-                  :controls="false"
-                  size="small"
-                  class="editable-number"
-                  aria-label="欠货"
-                  @update:model-value="updateValue(row.id, 'backorder', $event)"
-                />
+                {{ formatQuantity(row.backorder) }}
               </div>
               <div class="inventory-vtable__cell">
-                <template v-if="row.isProductGroup">{{ formatQuantity(row.weeklyUsage) }}</template>
-                <ElInputNumber
-                  v-else
-                  :model-value="row.weeklyUsage"
-                  :min="0"
-                  :controls="false"
-                  size="small"
-                  class="editable-number"
-                  aria-label="周消耗"
-                  @update:model-value="updateValue(row.id, 'weeklyUsage', $event)"
-                />
+                {{ formatQuantity(row.weeklyUsage) }}
               </div>
               <div class="inventory-vtable__cell">
-                <template v-if="row.isProductGroup">{{ formatQuantity(row.turnoverIn) }}</template>
-                <ElInputNumber
-                  v-else
-                  :model-value="row.turnoverIn"
-                  :min="0"
-                  :controls="false"
-                  size="small"
-                  class="editable-number"
-                  aria-label="周转入"
-                  @update:model-value="updateValue(row.id, 'turnoverIn', $event)"
-                />
+                {{ formatQuantity(row.turnoverIn) }}
               </div>
               <div class="inventory-vtable__cell">
-                <template v-if="row.isProductGroup">
-                  {{ formatQuantity(row.inTransitStock) }}
-                </template>
-                <ElInputNumber
-                  v-else
-                  :model-value="row.inTransitStock"
-                  :min="0"
-                  :controls="false"
-                  size="small"
-                  class="editable-number"
-                  aria-label="在途库存"
-                  @update:model-value="updateValue(row.id, 'inTransitStock', $event)"
-                />
+                {{ formatQuantity(row.inTransitStock) }}
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
-                <template v-if="row.isProductGroup">{{ formatQuantity(row.warehouseStock) }}</template>
-                <ElInputNumber
-                  v-else
-                  :model-value="row.warehouseStock"
-                  :min="0"
-                  :controls="false"
-                  size="small"
-                  class="editable-number"
-                  aria-label="在仓库存"
-                  @update:model-value="updateValue(row.id, 'warehouseStock', $event)"
-                />
+                {{ formatQuantity(row.warehouseStock) }}
               </div>
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.theoreticalStock) }}
@@ -1560,17 +1618,31 @@ function commitProduct(currentProduct) {
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.projectedStock) }}
               </div>
-              <div class="inventory-vtable__cell">{{ formatQuantity(row.shortage) }}</div>
               <div class="inventory-vtable__cell">
-                {{ formatRate(row.shortageRate, row.strategyAvailable) }}
+                {{ row.strategySlow ? '—' : formatQuantity(row.shortage) }}
               </div>
-              <div class="inventory-vtable__cell">{{ formatRatio(row.stockSalesRatio) }}</div>
+              <div class="inventory-vtable__cell">
+                {{ row.strategySlow ? '—' : formatRate(row.shortageRate, row.strategyAvailable) }}
+              </div>
+              <div class="inventory-vtable__cell">
+                {{ row.strategySlow ? '—' : formatRatio(row.stockSalesRatio) }}
+              </div>
             </div>
           </div>
         </div>
 
         <div v-if="tableVirtualRows.total === 0" class="inventory-vtable__empty">暂无数据</div>
       </div>
+    </div>
+
+    <div v-if="selectedSkuIds.size > 0" class="batch-restock-bar" role="region" aria-label="批量补货">
+      <span class="batch-restock-count">
+        已选 <strong>{{ selectedSkuIds.size }}</strong> 个 SKU
+      </span>
+      <ElButton text class="batch-restock-clear" @click="clearSkuSelection">清空</ElButton>
+      <ElButton type="primary" class="batch-restock-confirm" @click="openRestockDialog">
+        确认补货
+      </ElButton>
     </div>
 
     <ElDialog
@@ -1647,6 +1719,84 @@ function commitProduct(currentProduct) {
           </ElButton>
           <ElButton type="primary" :disabled="!hasUrgentPlan" @click="submitUrgentPlans">
             确认提交
+          </ElButton>
+        </div>
+      </template>
+    </ElDialog>
+
+    <ElDialog
+      v-model="restockDialogVisible"
+      title="确认补货"
+      width="820px"
+      class="restock-dialog"
+      :close-on-click-modal="false"
+      destroy-on-close
+      align-center
+    >
+      <p class="restock-hint">
+        默认填入与主表一致的建议需安排量；确认后按填写数量覆盖“需安排”，并写入本次采购清单（同一 SKU 只保留一条）。
+      </p>
+      <div class="restock-table" role="table" aria-label="确认补货">
+        <VirtualList
+          v-if="restockRows.length > 0"
+          :items="restockRows"
+          :item-height="RESTOCK_ROW_HEIGHT"
+          class="restock-list"
+        >
+          <template #header>
+            <div class="restock-header" role="row">
+              <span role="columnheader">商品信息</span>
+              <span role="columnheader">当前需安排</span>
+              <span role="columnheader">补货数量</span>
+              <span role="columnheader">建议量</span>
+            </div>
+          </template>
+          <template #default="{ item: row }">
+            <div class="restock-row" role="row">
+              <div class="restock-product" role="cell">
+                <strong>{{ row.product }}</strong>
+                <span>{{ row.color }}</span>
+              </div>
+              <span role="cell">{{ formatQuantity(row.currentPlanned) }}</span>
+              <div role="cell">
+                <ElInputNumber
+                  v-model="row.planned"
+                  :min="0"
+                  :precision="0"
+                  :controls="false"
+                  size="small"
+                  class="restock-input"
+                  :aria-label="`${row.product} ${row.color} 补货数量`"
+                />
+              </div>
+              <div class="restock-suggestion" role="cell">
+                <strong>{{ row.strategyAvailable ? formatQuantity(row.suggested) : '缺省' }}</strong>
+                <ElButton
+                  text
+                  type="primary"
+                  :disabled="!row.strategyAvailable"
+                  @click="row.planned = row.suggested"
+                >
+                  采用
+                </ElButton>
+              </div>
+            </div>
+          </template>
+        </VirtualList>
+        <div v-if="restockRows.length === 0" class="restock-empty">尚未选择 SKU</div>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <ElButton @click="restockDialogVisible = false">取消</ElButton>
+          <ElButton
+            class="apply-all-button"
+            :disabled="restockRows.length === 0"
+            @click="applyAllSuggestedRestock"
+          >
+            全部采用
+          </ElButton>
+          <ElButton type="primary" :disabled="!hasRestockPlan" @click="submitRestock">
+            确认补货
           </ElButton>
         </div>
       </template>
@@ -2042,7 +2192,8 @@ function commitProduct(currentProduct) {
 
 /* 内容高于视口时只让正文滚动，标题栏与按钮始终可见 */
 :global(.el-dialog.urgent-plan-dialog .el-dialog__body),
-:global(.el-dialog.purchase-list-dialog .el-dialog__body) {
+:global(.el-dialog.purchase-list-dialog .el-dialog__body),
+:global(.el-dialog.restock-dialog .el-dialog__body) {
   min-height: 0;
   overflow: auto;
 }
@@ -2186,6 +2337,131 @@ function commitProduct(currentProduct) {
   text-align: center;
 }
 
+:global(.el-dialog.restock-dialog) {
+  --el-color-primary: var(--industrial-primary);
+  --el-dialog-bg-color: var(--industrial-surface);
+  --el-text-color-primary: var(--industrial-text);
+  --el-text-color-regular: var(--industrial-text);
+  --el-border-color: var(--industrial-grid);
+  --el-border-color-light: var(--industrial-grid-light);
+  --el-fill-color-blank: var(--industrial-surface);
+  /* 窄屏 / 分屏时收窄，弹窗不超出视口 */
+  width: min(820px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+
+.restock-hint {
+  margin: 0 0 14px;
+  color: var(--industrial-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.restock-table {
+  display: flex;
+  flex-direction: column;
+  /* 可能一次补货上千个 SKU：只渲染视口内的行 */
+  max-height: min(55vh, 480px);
+  overflow: hidden;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 4px;
+}
+
+.restock-header,
+.restock-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.5fr) repeat(3, minmax(120px, 1fr));
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 6px 12px;
+  text-align: center;
+}
+
+.restock-header {
+  color: var(--industrial-text);
+  background: var(--industrial-header);
+  font-weight: 600;
+}
+
+.restock-row {
+  height: 100%;
+  border-top: 1px solid var(--industrial-grid-light);
+  color: var(--industrial-text);
+}
+
+.restock-product {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  text-align: left;
+}
+
+.restock-product strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.restock-product span {
+  color: var(--industrial-muted);
+}
+
+.restock-input {
+  width: 100%;
+}
+
+.restock-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--industrial-primary);
+}
+
+.restock-empty {
+  padding: 28px 12px;
+  color: var(--industrial-muted);
+  text-align: center;
+}
+
+/* 批量补货浮动操作条：选中即出现，不占表格布局 */
+.batch-restock-bar {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px 6px 18px;
+  transform: translateX(-50%);
+  color: var(--industrial-text);
+  border: 1px solid var(--industrial-grid);
+  border-radius: 999px;
+  background: var(--industrial-surface);
+  box-shadow: 0 6px 20px rgba(34, 57, 69, 0.22);
+}
+
+.batch-restock-count {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.batch-restock-count strong {
+  color: var(--industrial-primary);
+  font-size: 15px;
+}
+
+.batch-restock-clear,
+.batch-restock-confirm {
+  border-radius: 999px;
+}
+
 .inventory-vtable {
   --vtable-border: var(--industrial-grid);
   position: relative;
@@ -2197,6 +2473,11 @@ function commitProduct(currentProduct) {
   background: var(--industrial-surface);
   color: var(--industrial-text);
   font-size: 13px;
+}
+
+/* 底部浮动条会压住最后几行，给滚动区补上同等高度的余量 */
+.inventory-vtable--batch-bar {
+  padding-bottom: 64px;
 }
 
 .inventory-vtable__canvas {
@@ -2298,6 +2579,10 @@ function commitProduct(currentProduct) {
   overflow: hidden;
 }
 
+.inventory-vtable__cell--select {
+  padding: 0;
+}
+
 .stocking-text {
   overflow: hidden;
   color: var(--industrial-text);
@@ -2309,6 +2594,10 @@ function commitProduct(currentProduct) {
 .stocking-text--conflict {
   color: var(--industrial-out-of-stock, #b44242);
   text-decoration: underline dotted;
+}
+
+.stocking-text--manual {
+  color: var(--industrial-primary);
 }
 
 .inventory-vtable__row--body.product-color-row > .inventory-vtable__cell--product {
@@ -2333,12 +2622,6 @@ function commitProduct(currentProduct) {
 .inventory-vtable__caret svg {
   width: 12px;
   height: 12px;
-}
-
-.inventory-vtable__product-input {
-  display: flex;
-  flex: 1;
-  min-width: 0;
 }
 
 .inventory-vtable__empty {
@@ -2429,7 +2712,6 @@ function commitProduct(currentProduct) {
 }
 
 .inventory-vtable :deep(.editable-number .el-input__inner),
-.inventory-vtable :deep(.editable-text .el-input__inner),
 .inventory-vtable :deep(.editable-select .el-select__selected-item) {
   color: var(--industrial-text);
 }
@@ -2438,41 +2720,8 @@ function commitProduct(currentProduct) {
   text-align: center;
 }
 
-.inventory-vtable :deep(.editable-text .el-input__wrapper) {
-  padding: 0 3px;
-  background: transparent;
-  box-shadow: none;
-}
-
-.inventory-vtable :deep(.editable-text .el-input__inner) {
-  text-align: center;
-}
-
-.inventory-vtable :deep(.product-input) {
-  width: 100%;
-  /* 用右侧留白抵消左侧展开图标，使父行品名与子行品名同样居中 */
-  max-width: calc(100% - 29px);
-  margin-right: 14px;
-}
-
-.inventory-vtable :deep(.product-input .el-input__wrapper) {
-  padding: 0 2px;
-  background: transparent;
-  box-shadow: none;
-}
-
-.inventory-vtable :deep(.product-input .el-input__inner) {
-  text-align: center;
-  color: inherit;
-  text-overflow: clip;
-}
-
-.inventory-vtable :deep(.product-input .el-input__wrapper.is-focus) {
-  border-color: var(--industrial-primary);
-  box-shadow: 0 0 0 1px rgba(63, 113, 141, 0.24);
-}
-
-.inventory-vtable :deep(.product-name-text) {
+.inventory-vtable :deep(.product-name-text),
+.inventory-vtable :deep(.color-name-text) {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -2481,8 +2730,13 @@ function commitProduct(currentProduct) {
   white-space: nowrap;
 }
 
-.inventory-vtable :deep(.editable-text .el-input__inner) {
-  text-overflow: clip;
+/* 用右侧留白抵消左侧展开图标，使父行品名与子行品名同样居中 */
+.inventory-vtable :deep(.product-group-row .product-name-text) {
+  margin-right: 14px;
+}
+
+.inventory-vtable :deep(.color-name-text) {
+  flex: 0 1 auto;
 }
 
 .inventory-vtable :deep(.editable-select) {

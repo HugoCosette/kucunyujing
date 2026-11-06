@@ -3,13 +3,18 @@
 ## 只在主面板开发
 
 - 需求迭代目标只有 **主面板** `/`、**销售表** `/sales` 与 **配置信息** `/config`。新的功能、数据结构、交互和样式调整都在这三处进行。
-- 销售表是主面板动销指标（月均条数 / 订单总数 / 动销月份 / 动销客户）的来源：主面板与销售表的两个导入入口都支持一次选择总表 + 销售表，销售表自带的 4 个指标会写回主面板并重算评分，本页再按“品名 + 颜色”叠加 1-12 月条数与重量。整表按“品名汇总父行 + 颜色子行”展示并支持全部列关键词搜索。
+- 销售表是主面板动销指标（月均条数 / 订单总数 / 动销月份 / 动销客户 / 累积条数）的来源：主面板与销售表的两个导入入口都支持一次选择总表 + 销售表，销售表自带的 5 个指标会写回主面板并重算评分，本页再按“品名 + 颜色”叠加 1-12 月的条数、重量与订单数（每月三列：条数 / 重量 / 订单数）。整表按“品名汇总父行 + 颜色子行”展示并支持全部列关键词搜索。
+- 清洗口径里 `月均条数 = 累积条数 ÷ 动销月份`、`周消耗 = 月均条数 ÷ 4`；改这两个口径会直接改变备货红线/正常/峰值，改完要提醒用户重新校准系数。
 - 顶部导航左侧为主面板组，右侧为示例数据组。
 - 主面板与示例面板共用 `src/views/InventoryPanelView.vue`，配置页与示例配置共用 `src/views/ConfigView.vue`；销售表是独立视图 `src/views/SalesPanelView.vue`，改动时以主面板行为为准。
 - 导入只有一个流程，且入口只在主面板：`src/composables/useSourceImport.js`（读文件、识别角色、写 store）+ `src/components/ImportSourcesDialog.vue`（预览/确认），必须同时选中总表 + 销售表；文件角色识别在 `src/utils/sourceImport.js`，总表解析 `inventoryImport.js`，销售表解析 `salesImport.js`，写回主面板行在 `inventoryApply.js`、`applySourceImport.js`。总表与销售表按「唯一标识」关联。
-- 「导入分表」是同一流程的另一个入口：`src/components/ImportSplitTablesDialog.vue` + `src/composables/useSplitImport.js` 选 5 张分表（产品资料 / 出入库明细 / 库存结存表 / 欠货 / 生产排单），`src/utils/cleanMerge.js` 在 Worker（`src/workers/cleanMergeWorker.js`）里按 `数据清洗/clean-merge.js` 的口径清洗出总表 + 销售表，再由 `src/utils/splitTableImport.js` 复用 `inventoryImport.js` / `salesImport.js` 解析，最后进入同一个 `ImportSourcesDialog` 确认。改清洗口径时两处脚本要一起改。
-- 备货模式（模式 / 评分档 / 系数）全部在自包含模块 `src/stocking/`：`config.json` 是唯一配置来源，`engine.js` 负责判定，`validate.js` 负责校验，`persistence.js` 负责读写（开发态由 `vite.config.js` 的 `stockingConfigFilePlugin` 写回源文件）。「配置信息」与「示例配置」共用同一份配置。
+- 「导入分表」是同一流程的另一个入口：`src/components/ImportSplitTablesDialog.vue` + `src/composables/useSplitImport.js` 选 5 张分表（产品资料 / 出入库明细 / 库存结存表 / 欠货 / 生产排单），`src/utils/cleanMerge.js` 在 Worker（`src/workers/cleanMergeWorker.js`）里调用共享引擎 `src/cleaning/engine.js` 清洗出总表 + 销售表，再由 `src/utils/splitTableImport.js` 复用 `inventoryImport.js` / `salesImport.js` 解析，最后进入同一个 `ImportSourcesDialog` 确认。
+- 清洗口径只有一份：`tools/cleaning/engine.mjs`（配置 / 唯一标识 / 汇总 / 关联 / 宽松合并）。网页经 `src/cleaning/engine.js` 一行转发引用它（`export * from '../../tools/cleaning/engine.mjs'`），`src/utils/cleanMerge.js` 是浏览器适配器（fflate 流式读表）；命令行脚本 `tools/cleaning/clean-merge.js` 直接 `import('./engine.mjs')`（SheetJS 读表 → 写 `output/*.xlsx`）。**改清洗逻辑只改 `engine.mjs`**。该目录是网页构建的一部分，不要删除或改名；真要挪位置，同步改 `src/cleaning/engine.js` 那一行。
+- 备货模式（模式 / 评分档 / 系数）全部在自包含模块 `src/stocking/`：`config.json` 是唯一配置来源（v2 的 `strategies[]`，含自动策略与手动策略），`engine.js` 负责判定，`validate.js` 负责校验与 v1→v2 迁移，`persistence.js` 负责读写（开发态由 `vite.config.js` 的 `stockingConfigFilePlugin` 写回源文件）。「配置信息」与「示例配置」共用同一份配置。
+- 手动策略的 SKU 归属单独存 `src/stocking/manualSkus.json`（唯一标识 → `{ modeId, coefficients }`，`src/stocking/manual.js` 负责读写），**不写进 config.json，也不写进 SKU 行**：它是"人对商品的长期决定"，跨导入与刷新保留。评估器 `createEvaluator(config, { manualOverrides })` 命中即短路，不跑模式匹配。新增行为（behavior）才需要改代码，模式实例由生产人员自配。
 - SKU 配置信息弹窗为 `src/components/SkuDetailDialog.vue`，主面板与销售表共用：它同时渲染颜色单元格里的 ⓘ 按钮和弹窗，展示模式 / 评分档 / 系数、逐因子等级方块（`evaluateItem` 返回的 `gradeDetails`）以及用 ECharts 画的 1-12 月条数与重量图。两处只需传 `:item` 与 `:panel-key`，不要再各写一份。
+- 批量补货在主面板一屏内完成：表格首列复选框（`selectedSkuIds` 只存 SKU 标识，品名父行按子行全选 / 半选推导，表头全选作用于当前筛选结果）→ 底部浮动条 → 确认弹窗（默认数量取 `getSuggestedPlanned`，即补至正常库存 80% 下限）→ 统一经 `applyRestockPlans` **覆盖**写入「需安排」并进「本次采购清单」（同一 SKU 一条）。紧急补货弹窗也走这条写入路径，它先在调用处把「追加」换算成绝对需安排量。
+- 主面板表格里**只有「需安排」可编辑**（另有采购清单的「实际计划」与两个补货弹窗的数量）。品名、颜色、生产中、欠货、周消耗、周转入、在途库存、在仓库存都是导入值，一律以纯文本只读展示，不要再改回 `ElInput` / `ElInputNumber`；导入后要改数据请重新导入或去源表修正。
 
 ## 示例数据区：请勿修改
 

@@ -16,13 +16,26 @@ export {
 } from './fields.js'
 
 export {
+  BUILTIN_MANUAL_MODES,
+  BUILTIN_STRATEGIES,
+  MANUAL_BEHAVIORS,
   createDefaultCoefficients,
   createDefaultConfig,
+  createDefaultManualMode,
   createDefaultRule,
   createDefaultTier,
 } from './defaults.js'
 
-export { detectRuleOverlap, normalizeConfig, validateConfig } from './validate.js'
+export {
+  detectRuleOverlap,
+  findManualMode,
+  getAutoModes,
+  getAutoStrategy,
+  getManualModes,
+  getManualStrategy,
+  normalizeConfig,
+  validateConfig,
+} from './validate.js'
 
 export {
   createEvaluator,
@@ -41,3 +54,15 @@ export {
   saveConfig,
   setConfigRuntime,
 } from './persistence.js'
+
+export {
+  MANUAL_FILE_NAME,
+  MANUAL_SAVE_ENDPOINT,
+  MANUAL_STORAGE_KEY,
+  exportManualFile,
+  findDanglingSkuIds,
+  loadManualSkus,
+  normalizeManualSkus,
+  saveManualSkus,
+  setManualRuntime,
+} from './manual.js'

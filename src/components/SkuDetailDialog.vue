@@ -1,10 +1,19 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { ElDialog } from 'element-plus'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import {
+  ElButton,
+  ElDialog,
+  ElInputNumber,
+  ElMessage,
+  ElOption,
+  ElRadioButton,
+  ElRadioGroup,
+  ElSelect,
+} from 'element-plus'
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
-import { createEvaluator, evaluateItem } from '@/stocking'
+import { createEvaluator, evaluateItem, getManualModes } from '@/stocking'
 
 const props = defineProps({
   // 传主面板行或原始 SKU 行都行：评估只读取因子字段，不依赖派生值。
@@ -35,19 +44,134 @@ const dialogVisible = computed({
 
 // 模式 / 评分档 / 因子等级全部按当前配置现算，与主面板、配置页同一套口径。
 const evaluated = computed(() =>
-  props.item ? evaluateItem(props.item, createEvaluator(stockingStore.config)) : null,
+  props.item
+    ? evaluateItem(props.item, createEvaluator(stockingStore.config, { manualOverrides: stockingStore.manualOverrides }))
+    : null,
 )
 const gradeDetails = computed(() => evaluated.value?.gradeDetails ?? [])
 const coefficients = computed(() => {
   const set = evaluated.value?.stockingCoefficients
   return props.item?.category ? set?.[props.item.category] ?? null : null
 })
-const coefficientText = computed(() =>
-  coefficients.value
+const coefficientText = computed(() => {
+  if (evaluated.value?.strategySlow) return '滞销'
+  return coefficients.value
     ? `${coefficients.value.redLine} / ${coefficients.value.normal} / ${coefficients.value.peak}`
-    : '缺省',
-)
+    : '缺省'
+})
 const productText = computed(() => String(props.item?.product ?? '').replace(/\s+/g, ' ').trim())
+
+// —— 策略：自动（按模式 + 评分档）/ 手动（自定系数 / 滞销）——
+const manualModes = computed(() => getManualModes(stockingStore.config))
+const skuId = computed(() => String(props.item?.skuId ?? '').trim())
+const savedEntry = computed(() => (skuId.value ? stockingStore.manualOverrides.get(skuId.value) ?? null : null))
+const strategyDraft = ref('auto')
+const manualModeDraft = ref('')
+const customCoefficients = reactive({ redLine: null, normal: null, peak: null })
+const savingManual = ref(false)
+
+const selectedManualMode = computed(
+  () => manualModes.value.find((mode) => mode.id === manualModeDraft.value) ?? null,
+)
+const isCustomMode = computed(() => selectedManualMode.value?.behavior === 'custom')
+const manualDirty = computed(() => {
+  if (strategyDraft.value !== 'manual') return Boolean(savedEntry.value)
+  if (!manualModeDraft.value) return false
+  if (savedEntry.value?.modeId !== manualModeDraft.value) return true
+  if (!isCustomMode.value) return false
+  const current = savedEntry.value?.coefficients ?? null
+  return (
+    !current ||
+    current.redLine !== customCoefficients.redLine ||
+    current.normal !== customCoefficients.normal ||
+    current.peak !== customCoefficients.peak
+  )
+})
+
+// 打开弹窗或切换 SKU 时，用已保存的手动设置回填表单。
+function syncStrategyDraft() {
+  const entry = savedEntry.value
+  if (!entry) {
+    strategyDraft.value = 'auto'
+    const fallback = manualModes.value.find((mode) => mode.behavior === 'custom') ?? manualModes.value[0]
+    manualModeDraft.value = fallback?.id ?? ''
+    const defaults = fallback?.defaultCoefficients ?? { redLine: null, normal: null, peak: null }
+    customCoefficients.redLine = defaults.redLine ?? null
+    customCoefficients.normal = defaults.normal ?? null
+    customCoefficients.peak = defaults.peak ?? null
+    return
+  }
+
+  strategyDraft.value = 'manual'
+  manualModeDraft.value = entry.modeId
+  const mode = manualModes.value.find((item) => item.id === entry.modeId)
+  const coefficients = entry.coefficients ?? mode?.defaultCoefficients ?? {}
+  customCoefficients.redLine = coefficients.redLine ?? null
+  customCoefficients.normal = coefficients.normal ?? null
+  customCoefficients.peak = coefficients.peak ?? null
+}
+
+watch([dialogVisible, skuId, manualModes], ([isVisible]) => {
+  if (!isVisible) return
+  syncStrategyDraft()
+}, { immediate: true })
+
+// 切到「自定模式」时，系数输入框默认填该模式的默认系数。
+watch(manualModeDraft, () => {
+  if (strategyDraft.value !== 'manual' || !isCustomMode.value) return
+  if (customCoefficients.redLine !== null) return
+  const defaults = selectedManualMode.value?.defaultCoefficients ?? {}
+  customCoefficients.redLine = defaults.redLine ?? null
+  customCoefficients.normal = defaults.normal ?? null
+  customCoefficients.peak = defaults.peak ?? null
+})
+
+async function saveStrategy() {
+  if (!skuId.value) return
+  savingManual.value = true
+  try {
+    if (strategyDraft.value === 'auto') {
+      await stockingStore.setManualEntry(skuId.value, null)
+      ElMessage.success('已恢复自动策略')
+      syncStrategyDraft()
+      return
+    }
+
+    const mode = selectedManualMode.value
+    if (!mode) {
+      ElMessage.error('请选择手动模式')
+      return
+    }
+
+    const entry = { modeId: mode.id }
+    if (mode.behavior === 'custom') {
+      const values = [customCoefficients.redLine, customCoefficients.normal, customCoefficients.peak]
+      if (!values.every((value) => Number.isFinite(value))) {
+        ElMessage.error('请填写完整的红线 / 正常 / 峰值系数')
+        return
+      }
+      if (values.some((value) => value < 0)) {
+        ElMessage.error('系数不能为负数')
+        return
+      }
+      if (!(values[0] <= values[1] && values[1] <= values[2])) {
+        ElMessage.error('系数需满足 红线 ≤ 正常 ≤ 峰值')
+        return
+      }
+      entry.coefficients = {
+        redLine: values[0],
+        normal: values[1],
+        peak: values[2],
+      }
+    }
+
+    await stockingStore.setManualEntry(skuId.value, entry)
+    ElMessage.success(`已设为「${mode.name}」`)
+    syncStrategyDraft()
+  } finally {
+    savingManual.value = false
+  }
+}
 
 const salesSheet = computed(() => inventoryStore.salesSheet)
 const months = computed(() => salesSheet.value?.months ?? [])
@@ -62,12 +186,24 @@ const countData = computed(() =>
 const weightData = computed(() =>
   months.value.map((month) => salesOfSku.value?.weights?.[month - 1] ?? null),
 )
+const orderData = computed(() =>
+  months.value.map((month) => salesOfSku.value?.orders?.[month - 1] ?? null),
+)
 const hasSalesData = computed(
   () =>
     months.value.length > 0 &&
     (countData.value.some((value) => value !== null) ||
       weightData.value.some((value) => value !== null)),
 )
+const hasOrderData = computed(
+  () => months.value.length > 0 && orderData.value.some((value) => value !== null),
+)
+// 累积条数：首批清洗结果（销售表「累积条数」列）随动销指标写入行数据。
+const cumulativeText = computed(() => {
+  const value = props.item?.cumulativeCount
+  if (!Number.isFinite(value)) return '--'
+  return `${Math.round(value).toLocaleString('zh-CN')} 条`
+})
 
 function formatFactorValue(detail) {
   const value = detail.value
@@ -146,8 +282,53 @@ function buildChartOption() {
   }
 }
 
+// —— 月度订单数统计图（独立实例，与销量图共用按需加载的 echarts） ——
+const orderChartRef = ref(null)
+let orderChart = null
+
+function buildOrderChartOption() {
+  return {
+    animationDuration: 260,
+    textStyle: { color: '#65737c', fontSize: 12 },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#f5f7f8',
+      borderColor: '#aab6be',
+      borderWidth: 1,
+      textStyle: { color: '#2f3b43', fontSize: 12 },
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(63, 113, 141, 0.08)' } },
+    },
+    grid: { left: 4, right: 4, top: 24, bottom: 0, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: months.value.map((month) => `${month}月`),
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: '#aab6be' } },
+      axisLabel: { color: '#65737c', fontSize: 11 },
+    },
+    yAxis: {
+      type: 'value',
+      name: '单',
+      minInterval: 1,
+      nameTextStyle: { color: '#65737c', fontSize: 11 },
+      splitLine: { lineStyle: { color: '#e1e6e9' } },
+      axisLabel: { color: '#65737c', fontSize: 11 },
+    },
+    series: [
+      {
+        name: '订单数',
+        type: 'bar',
+        barMaxWidth: 16,
+        itemStyle: { color: '#829a85', borderRadius: [2, 2, 0, 0] },
+        data: orderData.value,
+      },
+    ],
+  }
+}
+
 function resizeChart() {
   chart?.resize()
+  orderChart?.resize()
 }
 
 // ECharts 只在第一次打开弹窗时按需加载（只注册用到的图表与组件），不拖慢表格首屏。
@@ -175,22 +356,30 @@ function loadEcharts() {
 }
 
 async function renderChart() {
-  if (!hasSalesData.value) return
+  if (!hasSalesData.value && !hasOrderData.value) return
 
   const { init } = await loadEcharts()
   // 加载期间弹窗可能已关闭，此时图表容器已卸载。
-  if (!chartRef.value) return
-  if (!chart) {
-    chart = init(chartRef.value)
-    window.addEventListener('resize', resizeChart)
+  let dirty = false
+  if (hasSalesData.value && chartRef.value) {
+    if (!chart) chart = init(chartRef.value)
+    chart.setOption(buildChartOption(), true)
+    dirty = true
   }
-  chart.setOption(buildChartOption(), true)
+  if (hasOrderData.value && orderChartRef.value) {
+    if (!orderChart) orderChart = init(orderChartRef.value)
+    orderChart.setOption(buildOrderChartOption(), true)
+    dirty = true
+  }
+  if (dirty) window.addEventListener('resize', resizeChart)
 }
 
 function disposeChart() {
   window.removeEventListener('resize', resizeChart)
   chart?.dispose()
   chart = null
+  orderChart?.dispose()
+  orderChart = null
 }
 
 async function handleOpened() {
@@ -199,9 +388,9 @@ async function handleOpened() {
 }
 
 // 弹窗打开期间销售表才导入完成时，补渲染一次。
-watch([dialogVisible, hasSalesData], ([isVisible, hasData]) => {
+watch([dialogVisible, hasSalesData, hasOrderData], ([isVisible, hasData, hasOrders]) => {
   if (!isVisible) return
-  if (!hasData) {
+  if (!hasData && !hasOrders) {
     disposeChart()
     return
   }
@@ -223,6 +412,7 @@ onBeforeUnmount(disposeChart)
     width="620px"
     append-to-body
     align-center
+    :show-close="false"
     @opened="handleOpened"
     @closed="handleClosed"
   >
@@ -230,6 +420,19 @@ onBeforeUnmount(disposeChart)
       <div class="sku-detail__header">
         <span class="sku-detail__title" :title="productText">{{ productText }}</span>
         <span v-if="item?.color" class="sku-detail__color">{{ item.color }}</span>
+        <span class="sku-detail__header-spacer" />
+        <ElRadioGroup v-model="strategyDraft" size="small" class="sku-detail__strategy-radio">
+          <ElRadioButton value="auto">自动</ElRadioButton>
+          <ElRadioButton value="manual">手动</ElRadioButton>
+        </ElRadioGroup>
+        <button
+          type="button"
+          class="sku-detail__close"
+          aria-label="关闭"
+          @click="dialogVisible = false"
+        >
+          ×
+        </button>
       </div>
     </template>
 
@@ -237,11 +440,13 @@ onBeforeUnmount(disposeChart)
       <div class="sku-detail__meta">
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">模式</span>
-          <span class="sku-detail__value">{{ evaluated?.ruleName || '未命中模式' }}</span>
+          <span class="sku-detail__value">
+            {{ evaluated?.strategy === 'manual' ? `手动·${evaluated?.ruleName}` : evaluated?.ruleName || '未命中模式' }}
+          </span>
         </div>
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">评分档</span>
-          <span class="sku-detail__value">{{ evaluated?.tierName || '--' }}</span>
+          <span class="sku-detail__value">{{ evaluated?.strategySlow ? '滞销' : evaluated?.tierName || '--' }}</span>
         </div>
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">色彩</span>
@@ -251,7 +456,87 @@ onBeforeUnmount(disposeChart)
           <span class="sku-detail__label">系数（红 / 正 / 峰）</span>
           <span class="sku-detail__value">{{ coefficientText }}</span>
         </div>
+        <div class="sku-detail__meta-item">
+          <span class="sku-detail__label">累积条数</span>
+          <span class="sku-detail__value">{{ cumulativeText }}</span>
+        </div>
       </div>
+
+      <template v-if="strategyDraft === 'manual'">
+        <div class="sku-detail__manual">
+          <div class="sku-detail__manual-row">
+            <span class="sku-detail__manual-label">模式</span>
+            <ElSelect
+              v-model="manualModeDraft"
+              size="small"
+              class="sku-detail__manual-select"
+              placeholder="选择手动模式"
+            >
+              <ElOption
+                v-for="mode in manualModes"
+                :key="mode.id"
+                :label="mode.name"
+                :value="mode.id"
+              />
+            </ElSelect>
+            <span v-if="selectedManualMode?.description" class="sku-detail__manual-hint">
+              {{ selectedManualMode.description }}
+            </span>
+          </div>
+
+          <div v-if="isCustomMode" class="sku-detail__manual-row">
+            <span class="sku-detail__manual-label">系数</span>
+            <label class="sku-detail__coefficient">
+              <span>红线</span>
+              <ElInputNumber
+                v-model="customCoefficients.redLine"
+                :min="0"
+                :step="0.5"
+                :precision="1"
+                :controls="false"
+                size="small"
+                class="sku-detail__coefficient-input"
+              />
+            </label>
+            <label class="sku-detail__coefficient">
+              <span>正常</span>
+              <ElInputNumber
+                v-model="customCoefficients.normal"
+                :min="0"
+                :step="0.5"
+                :precision="1"
+                :controls="false"
+                size="small"
+                class="sku-detail__coefficient-input"
+              />
+            </label>
+            <label class="sku-detail__coefficient">
+              <span>峰值</span>
+              <ElInputNumber
+                v-model="customCoefficients.peak"
+                :min="0"
+                :step="0.5"
+                :precision="1"
+                :controls="false"
+                size="small"
+                class="sku-detail__coefficient-input"
+              />
+            </label>
+          </div>
+
+          <div class="sku-detail__manual-actions">
+            <ElButton
+              size="small"
+              type="primary"
+              :disabled="!manualDirty"
+              :loading="savingManual"
+              @click="saveStrategy"
+            >
+              保存策略
+            </ElButton>
+          </div>
+        </div>
+      </template>
 
       <h4 class="sku-detail__section">
         评分因子
@@ -288,6 +573,21 @@ onBeforeUnmount(disposeChart)
             : '尚未导入销售表，暂无 1-12 月销量数据'
         }}
       </div>
+
+      <h4 class="sku-detail__section">
+        月度订单数
+        <span v-if="months.length" class="sku-detail__section-hint">
+          销售表 {{ months[0] }}-{{ months[months.length - 1] }}月
+        </span>
+      </h4>
+      <div v-if="hasOrderData" ref="orderChartRef" class="sku-detail__chart sku-detail__chart--compact"></div>
+      <div v-else class="sku-detail__empty">
+        {{
+          salesSheet
+            ? '销售表未包含“N月订单数”列（用最新清洗脚本重新导出即可）'
+            : '尚未导入销售表，暂无月度订单数'
+        }}
+      </div>
     </div>
   </ElDialog>
 </template>
@@ -319,7 +619,25 @@ onBeforeUnmount(disposeChart)
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding-right: 24px;
+  padding-right: 0;
+}
+
+.sku-detail__close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--industrial-muted);
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sku-detail__close:hover {
+  color: var(--industrial-text);
+  background: var(--industrial-header);
 }
 
 .sku-detail__title {
@@ -340,10 +658,68 @@ onBeforeUnmount(disposeChart)
   font-size: 12px;
 }
 
+.sku-detail__header-spacer {
+  flex: 1 1 auto;
+}
+
+.sku-detail__strategy-radio {
+  flex: 0 0 auto;
+}
+
+.sku-detail__manual {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 4px;
+  background: var(--industrial-page);
+}
+
+.sku-detail__manual-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sku-detail__manual-label {
+  min-width: 32px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.sku-detail__manual-select {
+  width: 160px;
+}
+
+.sku-detail__manual-hint {
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.sku-detail__manual-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sku-detail__coefficient {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.sku-detail__coefficient-input {
+  width: 72px;
+}
+
 .sku-detail__meta {
   display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   margin-bottom: 16px;
 }
 
@@ -464,6 +840,10 @@ onBeforeUnmount(disposeChart)
   height: 220px;
 }
 
+.sku-detail__chart--compact {
+  height: 180px;
+}
+
 .sku-detail__empty {
   padding: 26px 0;
   color: var(--industrial-muted);
@@ -471,5 +851,60 @@ onBeforeUnmount(disposeChart)
   text-align: center;
   border: 1px dashed var(--industrial-grid-light);
   border-radius: 4px;
+}
+
+.sku-detail__strategy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 4px;
+  background: var(--industrial-page);
+}
+
+.sku-detail__strategy-radio {
+  align-self: flex-start;
+}
+
+.sku-detail__strategy-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sku-detail__strategy-label {
+  min-width: 32px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.sku-detail__strategy-select {
+  width: 160px;
+}
+
+.sku-detail__coefficient {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.sku-detail__coefficient-input {
+  width: 72px;
+}
+
+.sku-detail__strategy-hint {
+  margin: 0;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.sku-detail__strategy-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 </style>
