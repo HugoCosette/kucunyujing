@@ -16,7 +16,7 @@ tools/cleaning/
 ├─ clean-merge.js        命令行入口（定位 data/ 文件 → SheetJS 读表 → 写 output/）
 ├─ package.json
 ├─ 清洗提示词.txt         清洗 / 合并业务规则
-├─ data/                 原始表放这里（.gitignore，只留本地）
+├─ data/                 原始表放这里（内容 .gitignore，只留本地；目录由 .gitkeep 保留）
 │  ├─ 产品资料20261021.xlsx                    基准（SKU 全集）
 │  ├─ 出入库明细（销售+加工）20261021.xlsx      出库/订单/月份指标
 │  ├─ 库存结存表20261021.xlsx                  在仓库存

@@ -39,5 +39,8 @@ __screenshots__/
 *.timestamp-*-*.mjs
 
 # 数据清洗工具：原始表与清洗结果体积大（约 65MB），只在本地保留，不入库
-tools/cleaning/data/
+# data/ 目录本身要随仓库保留（clone 后直接放原始表），用 .gitkeep 占位；
+# 因此这里忽略的是 data/ 下的内容，而不是 data/ 目录
+tools/cleaning/data/*
+!tools/cleaning/data/.gitkeep
 tools/cleaning/output/
