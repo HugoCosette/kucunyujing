@@ -74,6 +74,8 @@ const JOINS = [
       { as: '周消耗', divideFrom: { column: '月均条数', by: 4 }, digits: 2 },
       { as: '订单总数', agg: 'rows' }, // 1 行 = 1 单
       { field: '做账日期', as: '动销月份', agg: 'months' }, // 最长连续月份数
+      // 动销客户 = 该 SKU 的去重客户数；明细表没有客户列时整列按 0 处理（optional）
+      { field: '客户', as: '动销客户', agg: 'distinct', optional: true },
     ],
     monthlyColumns: {
       dateField: '做账日期',
@@ -137,7 +139,7 @@ export const OUTPUTS = [
       '月均条数',
       '订单总数',
       '动销月份',
-      '动销客户', // 暂无数据源（出入库明细无客户字段）
+      '动销客户', // 出入库明细「客户」列去重计数
       '累积条数',
       MONTHLY_TOKEN,
     ],
@@ -281,7 +283,7 @@ function normalizeKeyText(key) {
   return key.normalize('NFKC').toLowerCase()
 }
 
-const NUMERIC_AGGS = new Set(['sum', 'count', 'rows', 'months', 'min', 'max'])
+const NUMERIC_AGGS = new Set(['sum', 'count', 'rows', 'months', 'min', 'max', 'distinct'])
 
 function columnDefault(column) {
   if (column.default !== undefined) return column.default
@@ -379,6 +381,7 @@ function initState(column) {
   switch (column.agg || 'sum') {
     case 'concat':
     case 'months':
+    case 'distinct':
       return new Set()
     case 'count':
     case 'rows':
@@ -411,7 +414,8 @@ function updateState(column, state, row) {
       const num = toNumber(value)
       return state === null || num > state ? num : state
     }
-    case 'concat': {
+    case 'concat':
+    case 'distinct': {
       const text = textValue(value)
       if (text) state.add(text)
       return state
@@ -434,6 +438,8 @@ function finalizeState(column, state, context) {
   switch (column.agg || 'sum') {
     case 'concat':
       return [...state].join(column.separator || '、')
+    case 'distinct':
+      return state.size
     case 'months':
       return longestConsecutiveMonths(state)
     case 'sum': {
@@ -484,7 +490,7 @@ export function assertSourceHeader(source, labels) {
     .filter((keyField) => ![keyField.field, ...keyField.aliases].some((name) => present.has(name)))
     .map((keyField) => keyField.field)
   const missingValueColumns = source.columns
-    .filter((column) => column.sourceField && !present.has(column.sourceField))
+    .filter((column) => column.sourceField && !column.optional && !present.has(column.sourceField))
     .map((column) => column.sourceField)
   const problems = [...new Set([...missing, ...missingValueColumns])]
   if (problems.length) {
@@ -658,7 +664,7 @@ function joinSources(base, baseColumns, joins, columnOrder) {
       }
       const target = joinColumn.get(name)
       if (!target) {
-        line.push(0) // 该列暂时没有数据源（如 生产中 / 周转入 / 动销客户）
+        line.push(0) // 该列暂时没有数据源（如 生产中 / 周转入）
         continue
       }
       const values = lookup(target, name)

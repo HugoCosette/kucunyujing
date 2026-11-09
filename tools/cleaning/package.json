@@ -8,6 +8,7 @@
     "clean": "node clean-merge.js"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "xlsx": "^0.18.5"
   }
 }
