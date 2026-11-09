@@ -902,20 +902,25 @@ function getRowClassName({ row }) {
     .join(' ')
 }
 
+// 点击整行等同于点击该行复选框：SKU 行切换自身，SPU 汇总行切换其下全部 SKU。
 function handleRowClick(row) {
   if (row.isProductGroup) {
-    // 点击 SPU 汇总行时保留之前选中的 SKU 高亮，不清除。
+    toggleGroupSelection(row, !isGroupFullySelected(row))
     return
   }
 
+  toggleSkuSelection(row.id, !isSkuSelected(row.id))
   selectedRowId.value = row.id
 }
 
 function handleProductCellClick(row) {
-  toggleProductGroup(row)
-  if (!row.isProductGroup) {
-    selectedRowId.value = row.id
+  if (row.isProductGroup) {
+    toggleProductGroup(row)
+    return
   }
+
+  toggleSkuSelection(row.id, !isSkuSelected(row.id))
+  selectedRowId.value = row.id
 }
 
 function escapeXml(value) {
@@ -1544,6 +1549,7 @@ function downloadImportTemplate() {
                   <div
                     class="planned-input-shell"
                     :class="{ 'planned-input-shell--locked': hasPlannedUndo(row.id) }"
+                    @click.stop
                   >
                     <ElInputNumber
                       :model-value="getPlannedDraft(row)"
@@ -2535,6 +2541,7 @@ function downloadImportTemplate() {
 
 .inventory-vtable__row--body {
   background: var(--industrial-surface);
+  cursor: pointer;
 }
 
 .inventory-vtable__row--body.product-group-row {

@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ElButton,
+  ElCheckbox,
+  ElDialog,
   ElIcon,
   ElInput,
   ElInputNumber,
@@ -19,6 +21,8 @@ import StockingFieldPicker from '@/components/StockingFieldPicker.vue'
 import {
   ALL_GRADES,
   COMPARE_OPERATORS,
+  buildGradeTiers,
+  calibrateGrades,
   createDefaultCoefficients,
   createDefaultManualMode,
   createEvaluator,
@@ -30,6 +34,7 @@ import {
   getFieldLabel,
   getFieldMeta,
   getManualStrategy,
+  importConfigFile,
   normalizeConfig,
   summarizeEvaluation,
   validateConfig,
@@ -95,6 +100,17 @@ const activeRule = computed(
     autoModes.value[0] ??
     null,
 )
+
+// —— 配置方案（Profile）——
+// 方案列表与当前方案来自 store；切换方案后草稿整体换成该方案的配置。
+const profiles = computed(() => stockingStore.profiles)
+const activeProfileId = computed(() => stockingStore.activeProfileId)
+const activeProfileName = computed(() => stockingStore.activeProfile?.name ?? '')
+// 下拉单独用可回退的本地值：取消切换时把它拨回当前方案，避免控件停留在未生效的选项上。
+const profileSelection = ref(activeProfileId.value)
+watch(activeProfileId, (profileId) => {
+  profileSelection.value = profileId
+})
 
 // —— 草稿撤销 / 重做 ——
 // 历史只覆盖「未保存的草稿」：改动前存一份 JSON 快照，连续输入合并成一步，
@@ -372,9 +388,13 @@ function addRuleFactor(field) {
   if (!rule) return
 
   const meta = getFieldMeta(field)
-  const value = meta.kind === 'number' ? 0 : meta.options?.[0] ?? ''
   beforeStructuralChange()
-  rule.factors.push({ field, operator: operatorOptions(field)[0].value, value })
+  // 数值因子用范围式：min / max 留空表示该侧不限制（空 min 等于 0，空 max 等于正无穷）。
+  if (meta.kind === 'number') {
+    rule.factors.push({ field, min: null, max: null })
+    return
+  }
+  rule.factors.push({ field, value: meta.options?.[0] ?? '' })
 }
 
 function removeRuleFactor(index) {
@@ -560,6 +580,200 @@ async function clearDanglingEntries() {
   await stockingStore.removeManualEntries(danglingSkuIds.value)
 }
 
+// —— 配置方案 ——
+function resetDraftFromStore() {
+  configDraft.value = normalizeConfig(stockingStore.config)
+  selectedRuleId.value = autoModes.value[0]?.id ?? ''
+  pendingRuleDeleteId.value = ''
+  draftVersion.value += 1
+  clearHistory()
+}
+
+async function confirmDiscardForProfile() {
+  if (!configDirty.value) return true
+  return ElMessageBox.confirm(
+    '当前方案有未保存的修改，切换后将丢弃这些修改。是否继续？',
+    '切换配置方案',
+    { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' },
+  )
+    .then(() => true)
+    .catch(() => false)
+}
+
+async function switchProfile(profileId) {
+  if (!profileId || profileId === activeProfileId.value) return
+  if (!(await confirmDiscardForProfile())) {
+    profileSelection.value = activeProfileId.value
+    return
+  }
+  const saved = await stockingStore.selectProfile(profileId)
+  resetDraftFromStore()
+  ElMessage.success(`已切换到「${stockingStore.activeProfile?.name ?? ''}」`)
+  return saved
+}
+
+async function duplicateProfile() {
+  const name = await ElMessageBox.prompt('新方案名称', '复制配置方案', {
+    confirmButtonText: '复制',
+    cancelButtonText: '取消',
+    inputValue: `${activeProfileName.value} 副本`,
+    inputValidator: (value) => (String(value ?? '').trim() ? true : '名称不能为空'),
+  })
+    .then((result) => result.value)
+    .catch(() => null)
+  if (name === null) return
+
+  if (configDirty.value) {
+    const proceed = await ElMessageBox.confirm(
+      '将以当前编辑中的草稿为准复制出新方案（草稿会一并保存）。是否继续？',
+      '复制配置方案',
+      { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' },
+    )
+      .then(() => true)
+      .catch(() => false)
+    if (!proceed) return
+    await stockingStore.apply(configDraft.value)
+  }
+
+  await stockingStore.duplicateProfile(name)
+  resetDraftFromStore()
+  ElMessage.success('已复制为新方案并切换')
+}
+
+async function renameProfile() {
+  const name = await ElMessageBox.prompt('方案名称', '重命名配置方案', {
+    confirmButtonText: '保存',
+    cancelButtonText: '取消',
+    inputValue: activeProfileName.value,
+    inputValidator: (value) => (String(value ?? '').trim() ? true : '名称不能为空'),
+  })
+    .then((result) => result.value)
+    .catch(() => null)
+  if (name === null) return
+
+  await stockingStore.renameProfile(activeProfileId.value, name)
+  ElMessage.success('已重命名')
+}
+
+async function deleteProfile() {
+  if (profiles.value.length <= 1) return
+  const confirmed = await ElMessageBox.confirm(
+    `删除配置方案「${activeProfileName.value}」？该方案的阈值与系数会一并删除。`,
+    '删除配置方案',
+    { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+  )
+    .then(() => true)
+    .catch(() => false)
+  if (!confirmed) return
+
+  await stockingStore.removeProfile(activeProfileId.value)
+  resetDraftFromStore()
+  ElMessage.success('已删除配置方案')
+}
+
+// 导出 / 导入都以整份方案文件为单位，导入会覆盖当前全部方案。
+function currentProfileFile() {
+  const active = stockingStore.activeProfile
+  return {
+    ...stockingStore.profileFile,
+    profiles: stockingStore.profiles.map((profile) =>
+      profile.id === active?.id ? { ...profile, config: configDraft.value } : profile,
+    ),
+  }
+}
+
+const importInputRef = ref(null)
+
+function triggerImport() {
+  importInputRef.value?.click()
+}
+
+async function handleImportFile(event) {
+  const file = event.target?.files?.[0]
+  if (event.target) event.target.value = ''
+  if (!file) return
+
+  let imported = null
+  try {
+    imported = importConfigFile(await file.text())
+  } catch (error) {
+    ElMessage.error('配置文件解析失败，请确认是导出的 JSON 文件')
+    return
+  }
+
+  const confirmed = await ElMessageBox.confirm(
+    `将导入 ${imported.profiles.length} 个配置方案，并覆盖当前全部方案。是否继续？`,
+    '导入配置方案',
+    { confirmButtonText: '导入', cancelButtonText: '取消', type: 'warning' },
+  )
+    .then(() => true)
+    .catch(() => false)
+  if (!confirmed) return
+
+  await stockingStore.importProfiles(imported)
+  resetDraftFromStore()
+  ElMessage.success('已导入配置方案')
+}
+
+// —— 按当前数据校准评分阈值 ——
+const calibrateVisible = ref(false)
+const calibrateRows = ref([])
+const calibrateRuleId = ref('')
+// 默认顺手把档位也按 S 个数重建为 3S / 2S / 1S / 默认档。
+const calibrateRebuildTiers = ref(true)
+const hasCalibration = computed(() =>
+  calibrateRows.value.some((row) => row.thresholds),
+)
+
+function formatThresholds(thresholds) {
+  if (!thresholds) return '—'
+  return GRADE_KEYS.map((grade) => thresholds[grade] ?? '—').join(' / ')
+}
+
+function openCalibration() {
+  const rule = activeRule.value
+  if (!rule) return
+  const fields = usedGradeFields(rule)
+  if (!fields.length) {
+    ElMessage.warning('请先添加评分因子，再按数据校准')
+    return
+  }
+  calibrateRuleId.value = rule.id
+  calibrateRows.value = calibrateGrades(inventoryItems, fields, rule.grades)
+  calibrateVisible.value = true
+}
+
+function applyCalibration() {
+  const rule = autoModes.value.find((entry) => entry.id === calibrateRuleId.value)
+  const rows = calibrateRows.value.filter((row) => row.thresholds)
+  if (!rule || !rows.length) {
+    calibrateVisible.value = false
+    ElMessage.warning('当前数据里没有可用的数值，未写入阈值')
+    return
+  }
+
+  beforeStructuralChange()
+  for (const row of rows) {
+    rule.grades[row.field] = { ...row.thresholds }
+  }
+
+  let rebuilt = false
+  if (calibrateRebuildTiers.value) {
+    rule.tiers = buildGradeTiers(Object.keys(rule.grades), {
+      ruleId: rule.id,
+      tiers: rule.tiers,
+    })
+    rebuilt = true
+  }
+
+  calibrateVisible.value = false
+  ElMessage.success(
+    rebuilt
+      ? `已写入 ${rows.length} 个因子阈值，并按 S 个数重建评分档（3S / 2S / 1S / 默认档）`
+      : `已写入 ${rows.length} 个因子阈值，保存后生效`,
+  )
+}
+
 // —— 保存 / 重置 / 导出 ——
 async function confirmConfig() {
   const result = validateConfig(configDraft.value)
@@ -589,8 +803,8 @@ async function confirmConfig() {
   clearHistory()
   ElMessage.success(
     saved.written
-      ? '配置已保存到 src/stocking/config.json'
-      : '已保存到本地缓存（部署环境无法写源文件，可点击“导出配置”覆盖）',
+      ? `「${activeProfileName.value}」已保存到 src/stocking/config.json`
+      : `「${activeProfileName.value}」已保存到本地缓存（部署环境无法写源文件，可点击“导出配置”覆盖）`,
   )
 }
 
@@ -604,7 +818,7 @@ function discardChanges() {
 
 async function restoreDefaults() {
   const confirmed = await ElMessageBox.confirm(
-    '恢复为内置默认配置并立即写回配置文件？当前修改会丢失。',
+    `恢复「${activeProfileName.value}」为内置默认配置并立即写回配置文件？当前方案的修改会丢失，其他方案不受影响。`,
     '恢复默认',
     { confirmButtonText: '恢复默认', cancelButtonText: '取消', type: 'warning' },
   )
@@ -618,12 +832,12 @@ async function restoreDefaults() {
   pendingRuleDeleteId.value = ''
   draftVersion.value += 1
   clearHistory()
-  ElMessage.success('已恢复默认配置')
+  ElMessage.success(`「${activeProfileName.value}」已恢复默认配置`)
 }
 
 function downloadConfig() {
-  exportConfigFile(configDraft.value)
-  ElMessage.success('配置文件已导出，可覆盖 src/stocking/config.json')
+  exportConfigFile(currentProfileFile())
+  ElMessage.success('配置方案已导出，可覆盖 src/stocking/config.json')
 }
 
 // 备货策略四列：不显示"缺省"，直接把简短原因写进格子，悬停看完整说明。
@@ -826,6 +1040,32 @@ function handleRowClick(row) {
           </span>
         </div>
 
+        <div class="profile-bar">
+          <span class="profile-bar__label">配置方案</span>
+          <ElSelect
+            v-model="profileSelection"
+            size="small"
+            class="profile-bar__select"
+            aria-label="配置方案"
+            @change="switchProfile"
+          >
+            <ElOption
+              v-for="profile in profiles"
+              :key="profile.id"
+              :label="profile.name"
+              :value="profile.id"
+            />
+          </ElSelect>
+          <ElButton size="small" @click="duplicateProfile">复制方案</ElButton>
+          <ElButton size="small" @click="renameProfile">重命名</ElButton>
+          <ElButton size="small" :disabled="profiles.length <= 1" @click="deleteProfile">
+            删除方案
+          </ElButton>
+          <span class="profile-bar__hint">
+            当前方案「{{ activeProfileName }}」独立保存，切换方案不影响其他方案的阈值与系数。
+          </span>
+        </div>
+
         <div class="strategy-tabs" role="tablist" aria-label="策略">
           <button
             type="button"
@@ -911,7 +1151,9 @@ function handleRowClick(row) {
           <div v-if="!activeRule.isDefault" class="rule-block">
             <div class="rule-block__heading">
               <h3>① 模式因子</h3>
-              <span class="rule-block__hint">全部条件同时满足才算命中；同字段可加多条表达区间</span>
+              <span class="rule-block__hint">
+                每个字段一条范围：左空视为 0，右空视为正无穷；全部条件同时满足才算命中
+              </span>
               <StockingFieldPicker
                 label="＋ 添加条件"
                 :used-fields="usedFactorFields(activeRule)"
@@ -926,14 +1168,6 @@ function handleRowClick(row) {
                 class="rule-factor-row"
               >
                 <span class="rule-factor-row__label">{{ getFieldLabel(factor.field) }}</span>
-                <ElSelect v-model="factor.operator" size="small" class="rule-factor-row__operator">
-                  <ElOption
-                    v-for="operator in operatorOptions(factor.field)"
-                    :key="operator.value"
-                    :label="operator.label"
-                    :value="operator.value"
-                  />
-                </ElSelect>
                 <ElSelect
                   v-if="isEnumField(factor.field)"
                   v-model="factor.value"
@@ -954,13 +1188,25 @@ function handleRowClick(row) {
                   class="rule-factor-row__value"
                   placeholder="精确匹配"
                 />
-                <ElInputNumber
-                  v-else
-                  v-model="factor.value"
-                  :controls="false"
-                  size="small"
-                  class="rule-factor-row__value"
-                />
+                <div v-else class="rule-factor-row__range">
+                  <ElInputNumber
+                    v-model="factor.min"
+                    :controls="false"
+                    size="small"
+                    class="rule-factor-row__range-input"
+                    :placeholder="'0'"
+                    :aria-label="`${getFieldLabel(factor.field)}下限`"
+                  />
+                  <span class="rule-factor-row__range-dash">—</span>
+                  <ElInputNumber
+                    v-model="factor.max"
+                    :controls="false"
+                    size="small"
+                    class="rule-factor-row__range-input"
+                    placeholder="∞"
+                    :aria-label="`${getFieldLabel(factor.field)}上限`"
+                  />
+                </div>
                 <ElButton
                   size="small"
                   text
@@ -988,6 +1234,22 @@ function handleRowClick(row) {
                 numeric-only
                 @select="addGradeField"
               />
+              <ElTooltip
+                content="按当前已导入数据的分位重设该模式的 S/A/B/C 阈值"
+                placement="top"
+              >
+                <span class="config-action-wrap">
+                  <ElButton
+                    size="small"
+                    text
+                    class="rule-block__add"
+                    :disabled="!usedGradeFields(activeRule).length"
+                    @click="openCalibration"
+                  >
+                    按当前数据校准
+                  </ElButton>
+                </span>
+              </ElTooltip>
             </div>
 
             <div v-if="usedGradeFields(activeRule).length" class="grade-table">
@@ -1347,12 +1609,27 @@ function handleRowClick(row) {
               </ElButton>
             </span>
           </ElTooltip>
-          <ElTooltip content="把当前配置导出为 JSON，用于覆盖 src/stocking/config.json" placement="top">
+          <ElTooltip
+            content="把全部配置方案导出为 JSON，用于覆盖 src/stocking/config.json"
+            placement="top"
+          >
             <span class="config-action-wrap">
-              <ElButton size="small" @click="downloadConfig">导出配置</ElButton>
+              <ElButton size="small" @click="downloadConfig">导出方案</ElButton>
             </span>
           </ElTooltip>
-          <ElTooltip content="恢复为内置默认配置并立即写回配置文件" placement="top">
+          <ElTooltip content="导入配置方案文件，会覆盖当前全部方案" placement="top">
+            <span class="config-action-wrap">
+              <ElButton size="small" @click="triggerImport">导入方案</ElButton>
+            </span>
+          </ElTooltip>
+          <input
+            ref="importInputRef"
+            type="file"
+            accept="application/json,.json"
+            class="profile-import-input"
+            @change="handleImportFile"
+          />
+          <ElTooltip content="仅把当前方案恢复为内置默认配置并立即写回配置文件" placement="top">
             <span class="config-action-wrap">
               <ElButton size="small" @click="restoreDefaults">恢复默认</ElButton>
             </span>
@@ -1477,6 +1754,56 @@ function handleRowClick(row) {
         </ElButton>
       </div>
     </div>
+
+    <ElDialog
+      v-model="calibrateVisible"
+      title="按当前数据校准评分阈值"
+      width="760px"
+      append-to-body
+    >
+      <p class="calibrate-hint">
+        用当前已导入的 {{ inventoryItems.length }} 条记录计算分位：S≈前 10%、A≈前 30%、B≈前 60%，C 固定为 0；
+        阈值不会超过样本最大值。只影响「{{ activeRule?.name }}」这个模式，确认后仍需点击右下角「确定」保存。
+      </p>
+      <ElTable :data="calibrateRows" border size="small" max-height="360">
+        <ElTableColumn prop="label" label="评分因子" width="120" />
+        <ElTableColumn label="样本数" width="80" align="center">
+          <template #default="{ row }">{{ row.sampleCount }}</template>
+        </ElTableColumn>
+        <ElTableColumn label="当前 S / A / B / C" min-width="150" align="center">
+          <template #default="{ row }">{{ formatThresholds(row.current) }}</template>
+        </ElTableColumn>
+        <ElTableColumn label="建议 S / A / B / C" min-width="170" align="center">
+          <template #default="{ row }">
+            {{ row.thresholds ? formatThresholds(row.thresholds) : '无有效数据' }}
+          </template>
+        </ElTableColumn>
+        <ElTableColumn label="建议阈值下的等级分布" min-width="190" align="center">
+          <template #default="{ row }">
+            <span v-if="row.distribution">
+              S {{ row.distribution.S }} · A {{ row.distribution.A }} · B
+              {{ row.distribution.B }} · C {{ row.distribution.C }}
+              <template v-if="row.distribution.Z"> · Z {{ row.distribution.Z }}</template>
+            </span>
+            <span v-else>—</span>
+          </template>
+        </ElTableColumn>
+      </ElTable>
+      <div class="calibrate-options">
+        <ElCheckbox v-model="calibrateRebuildTiers">
+          同时按 S 个数重建评分档（3S / 2S / 1S / 默认档）
+        </ElCheckbox>
+        <span class="calibrate-options__hint">
+          档条件依次为 S ≥ 3 / 2 / 1；同名档保留原系数，缺失档按默认档系数放大补齐。
+        </span>
+      </div>
+      <template #footer>
+        <ElButton size="small" @click="calibrateVisible = false">取消</ElButton>
+        <ElButton size="small" type="primary" :disabled="!hasCalibration" @click="applyCalibration">
+          应用到当前模式
+        </ElButton>
+      </template>
+    </ElDialog>
   </main>
 </template>
 
@@ -1541,6 +1868,57 @@ function handleRowClick(row) {
   color: var(--industrial-muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.profile-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--industrial-grid);
+  border-radius: 4px;
+  background: var(--industrial-page);
+}
+
+.profile-bar__label {
+  font-size: 12px;
+  color: var(--industrial-muted);
+}
+
+.profile-bar__select {
+  width: 180px;
+}
+
+.profile-bar__hint {
+  flex: 1 1 260px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.profile-import-input {
+  display: none;
+}
+
+.calibrate-hint {
+  margin: 0 0 10px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.calibrate-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 10px;
+}
+
+.calibrate-options__hint {
+  color: var(--industrial-muted);
+  font-size: 12px;
 }
 
 .rule-tabs {
@@ -1765,9 +2143,25 @@ function handleRowClick(row) {
 
 .rule-factor-row {
   display: grid;
-  grid-template-columns: 76px 72px minmax(0, 200px) 24px;
+  grid-template-columns: 76px minmax(0, 240px) 24px;
   align-items: center;
   gap: 6px;
+}
+
+.rule-factor-row__range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rule-factor-row__range-input {
+  width: 100%;
+}
+
+.rule-factor-row__range-dash {
+  flex: 0 0 auto;
+  color: var(--industrial-muted);
+  font-size: 12px;
 }
 
 .rule-factor-row__label {

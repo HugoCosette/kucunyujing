@@ -60,6 +60,8 @@ const coefficientText = computed(() => {
     : '缺省'
 })
 const productText = computed(() => String(props.item?.product ?? '').replace(/\s+/g, ' ').trim())
+// 色彩标签分灰阶 / 彩色两种色调，与导入时的「黑白 / 彩色」口径保持一致。
+const monochrome = computed(() => String(props.item?.category ?? '').includes('黑白'))
 
 // —— 策略：自动（按模式 + 评分档）/ 手动（自定系数 / 滞销）——
 const manualModes = computed(() => getManualModes(stockingStore.config))
@@ -420,6 +422,13 @@ onBeforeUnmount(disposeChart)
       <div class="sku-detail__header">
         <span class="sku-detail__title" :title="productText">{{ productText }}</span>
         <span v-if="item?.color" class="sku-detail__color">{{ item.color }}</span>
+        <span
+          v-if="item?.category"
+          class="sku-detail__tone"
+          :class="monochrome ? 'sku-detail__tone--mono' : 'sku-detail__tone--colorful'"
+        >
+          {{ item.category }}
+        </span>
         <span class="sku-detail__header-spacer" />
         <ElRadioGroup v-model="strategyDraft" size="small" class="sku-detail__strategy-radio">
           <ElRadioButton value="auto">自动</ElRadioButton>
@@ -447,10 +456,6 @@ onBeforeUnmount(disposeChart)
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">评分档</span>
           <span class="sku-detail__value">{{ evaluated?.strategySlow ? '滞销' : evaluated?.tierName || '--' }}</span>
-        </div>
-        <div class="sku-detail__meta-item">
-          <span class="sku-detail__label">色彩</span>
-          <span class="sku-detail__value">{{ item.category || '--' }}</span>
         </div>
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">系数（红 / 正 / 峰）</span>
@@ -570,7 +575,7 @@ onBeforeUnmount(disposeChart)
         {{
           salesSheet
             ? '销售表中没有该商品的月度数据'
-            : '尚未导入销售表，暂无 1-12 月销量数据'
+            : '尚未导入销售表，暂无 1-12销量数据'
         }}
       </div>
 
@@ -656,6 +661,34 @@ onBeforeUnmount(disposeChart)
   background: rgba(63, 113, 141, 0.12);
   border-radius: 3px;
   font-size: 12px;
+}
+
+.sku-detail__tone {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 黑白 SKU：灰阶色调 */
+.sku-detail__tone--mono {
+  color: #4d565c;
+  background: linear-gradient(120deg, #eef1f2, #dbe0e3);
+  border-color: rgba(77, 86, 92, 0.24);
+}
+
+/* 彩色 SKU：粉 → 紫 → 蓝的彩虹色调 */
+.sku-detail__tone--colorful {
+  color: #5f3fa0;
+  background: linear-gradient(
+    90deg,
+    rgba(240, 98, 170, 0.42),
+    rgba(160, 100, 240, 0.34) 45%,
+    rgba(86, 150, 248, 0.42)
+  );
+  border-color: rgba(150, 92, 236, 0.38);
 }
 
 .sku-detail__header-spacer {

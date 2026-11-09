@@ -8,9 +8,10 @@ function matchesFactor(item, factor) {
   if (meta.kind === 'number') {
     const actual = Number(item[factor.field])
     if (!Number.isFinite(actual)) return false
-    if (factor.operator === 'gte') return actual >= factor.value
-    if (factor.operator === 'lte') return actual <= factor.value
-    return actual === factor.value
+    // 空值表示该侧不限制：min 空等于 0，max 空等于正无穷。
+    if (factor.min !== null && factor.min !== undefined && actual < factor.min) return false
+    if (factor.max !== null && factor.max !== undefined && actual > factor.max) return false
+    return true
   }
 
   const actual = String(item[factor.field] ?? '').trim()

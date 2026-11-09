@@ -27,32 +27,65 @@ function normalizeFactor(factor) {
   const meta = getFieldMeta(factor?.field)
   if (!meta) return null
 
-  const allowed = operatorsFor(meta.field).map((entry) => entry.value)
-  const operator = allowed.includes(factor.operator) ? factor.operator : allowed[0]
-
   if (meta.kind === 'number') {
-    const value = toNumber(factor.value)
-    return value === null ? null : { field: meta.field, operator, value }
+    // 范围式因子：min / max 留空表示该侧不限制。
+    // 兼容旧的 { operator, value }：gte→min、lte→max、eq→min=max。
+    let min = toNumber(factor.min)
+    let max = toNumber(factor.max)
+    const legacyValue = toNumber(factor.value)
+    if (min === null && max === null && legacyValue !== null) {
+      if (factor.operator === 'lte') max = legacyValue
+      else if (factor.operator === 'eq') {
+        min = legacyValue
+        max = legacyValue
+      } else min = legacyValue
+    }
+    if (min !== null && max !== null && min > max) {
+      const swapped = min
+      min = max
+      max = swapped
+    }
+    return { field: meta.field, min, max }
   }
 
   const value = String(factor.value ?? '').trim()
   if (!value) return null
   if (meta.kind === 'enum' && !meta.options.includes(value)) return null
-  return { field: meta.field, operator: 'eq', value }
+  return { field: meta.field, value }
 }
 
-// 同一字段允许出现多条条件（≥100 + ≤199 表达区间），只去掉完全重复的条件。
+// 同一字段只保留一条范围条件：后一条与已存在条件合并（取更窄的区间）。
 function normalizeFactors(factors) {
   const result = []
-  const seen = new Set()
+  const indexByField = new Map()
+
   for (const factor of Array.isArray(factors) ? factors : []) {
     const next = normalizeFactor(factor)
     if (!next) continue
-    const key = `${next.field}\u0000${next.operator}\u0000${next.value}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    result.push(next)
+
+    const existingIndex = indexByField.get(next.field)
+    if (existingIndex === undefined) {
+      indexByField.set(next.field, result.length)
+      result.push(next)
+      continue
+    }
+
+    const existing = result[existingIndex]
+    if ('min' in existing && 'min' in next) {
+      // 区间合并
+      const mins = [existing.min, next.min].filter((value) => value !== null)
+      const maxs = [existing.max, next.max].filter((value) => value !== null)
+      result[existingIndex] = {
+        field: existing.field,
+        min: mins.length ? Math.max(...mins) : null,
+        max: maxs.length ? Math.min(...maxs) : null,
+      }
+    } else if (existing.value !== next.value) {
+      // 文本/枚举字段出现两个不同等值条件时，后一条视为冲突，丢弃
+      continue
+    }
   }
+
   return result
 }
 
@@ -253,6 +286,78 @@ export function findManualMode(config, modeId) {
   return getManualModes(config).find((mode) => mode.id === modeId) ?? null
 }
 
+// —— 配置方案（Profile）——
+// config.json 从 v2 的单份配置升级为「多方案文件」：同一时刻只有 activeProfileId 生效。
+// 引擎、校验、页面拿到的仍然是单份 v2 配置，多方案的复杂度只留在这一层。
+export const PROFILE_FILE_VERSION = 3
+
+function uniqueName(base, used) {
+  let name = base
+  let index = 2
+  while (used.has(name)) {
+    name = `${base}（${index}）`
+    index += 1
+  }
+  used.add(name)
+  return name
+}
+
+export function normalizeProfile(profile, index = 0) {
+  const source = isPlainObject(profile) ? profile : {}
+  const configSource = isPlainObject(source.config) ? source.config : source
+  return {
+    id: String(source.id ?? '').trim() || `profile-${index + 1}`,
+    name: String(source.name ?? '').trim() || `配置方案${index + 1}`,
+    config: normalizeConfig(configSource),
+  }
+}
+
+// 兼容三种来源：v3 多方案文件、v2 单份配置、v1 只有 rules 的旧配置。
+export function normalizeProfileFile(file) {
+  const source = isPlainObject(file) ? file : {}
+  const rawProfiles = Array.isArray(source.profiles)
+    ? source.profiles.filter(isPlainObject)
+    : []
+
+  const profiles = rawProfiles.length
+    ? rawProfiles.map((profile, index) => normalizeProfile(profile, index))
+    : [normalizeProfile({ id: 'production', name: '生产配置', config: source }, 0)]
+
+  const usedIds = new Set()
+  const usedNames = new Set()
+  const normalizedProfiles = profiles.map((profile, index) => {
+    let id = profile.id
+    let suffix = index + 1
+    while (usedIds.has(id)) {
+      id = `${profile.id}-${suffix}`
+      suffix += 1
+    }
+    usedIds.add(id)
+    return { ...profile, id, name: uniqueName(profile.name, usedNames) }
+  })
+
+  const requestedActive = String(source.activeProfileId ?? '')
+  const activeProfileId = usedIds.has(requestedActive)
+    ? requestedActive
+    : normalizedProfiles[0].id
+
+  return {
+    version: PROFILE_FILE_VERSION,
+    updatedAt:
+      typeof source.updatedAt === 'string' ? source.updatedAt : new Date().toISOString(),
+    activeProfileId,
+    profiles: normalizedProfiles,
+  }
+}
+
+export function getActiveProfile(file) {
+  const normalized = normalizeProfileFile(file)
+  return (
+    normalized.profiles.find((profile) => profile.id === normalized.activeProfileId) ??
+    normalized.profiles[0]
+  )
+}
+
 function validateGrades(rule, errors, warnings) {
   const entries = Object.entries(rule.grades)
   if (entries.length === 0) {
@@ -345,9 +450,12 @@ function ruleBounds(rule) {
     }
 
     if (meta.kind === 'number') {
-      if (factor.operator === 'gte') bound.min = Math.max(bound.min, factor.value)
-      else if (factor.operator === 'lte') bound.max = Math.min(bound.max, factor.value)
-      else bound.equals = factor.value
+      if (factor.min !== null && factor.min !== undefined) {
+        bound.min = Math.max(bound.min, factor.min)
+      }
+      if (factor.max !== null && factor.max !== undefined) {
+        bound.max = Math.min(bound.max, factor.max)
+      }
       continue
     }
 

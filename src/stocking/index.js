@@ -18,24 +18,38 @@ export {
 export {
   BUILTIN_MANUAL_MODES,
   BUILTIN_STRATEGIES,
+  DEFAULT_PROFILE_ID,
+  DEFAULT_PROFILE_NAME,
   MANUAL_BEHAVIORS,
   createDefaultCoefficients,
   createDefaultConfig,
   createDefaultManualMode,
+  createDefaultProfileFile,
   createDefaultRule,
   createDefaultTier,
 } from './defaults.js'
 
 export {
+  PROFILE_FILE_VERSION,
   detectRuleOverlap,
   findManualMode,
+  getActiveProfile,
   getAutoModes,
   getAutoStrategy,
   getManualModes,
   getManualStrategy,
   normalizeConfig,
+  normalizeProfile,
+  normalizeProfileFile,
   validateConfig,
 } from './validate.js'
+
+export {
+  CALIBRATION_QUANTILES,
+  TIER_S_LEVELS,
+  buildGradeTiers,
+  calibrateGrades,
+} from './calibrate.js'
 
 export {
   createEvaluator,
@@ -47,12 +61,18 @@ export {
   CONFIG_FILE_NAME,
   CONFIG_SAVE_ENDPOINT,
   CONFIG_STORAGE_KEY,
+  activateProfile,
   exportConfigFile,
   getConfig,
+  getProfiles,
+  importConfigFile,
   loadConfig,
+  loadProfiles,
   resetConfig,
   saveConfig,
+  saveProfiles,
   setConfigRuntime,
+  setProfilesRuntime,
 } from './persistence.js'
 
 export {

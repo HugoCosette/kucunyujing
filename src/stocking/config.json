@@ -1,206 +1,700 @@
 {
-  "version": 2,
-  "updatedAt": "2026-11-06T08:04:53.081Z",
-  "strategies": [
+  "version": 3,
+  "updatedAt": "2026-11-06T10:02:15.206Z",
+  "activeProfileId": "demo",
+  "profiles": [
     {
-      "id": "auto",
-      "name": "自动策略",
-      "behavior": "auto",
-      "modes": [
-        {
-          "id": "rule-1",
-          "name": "模式1",
-          "isDefault": false,
-          "factors": [
-            {
-              "field": "monthlyAvgCount",
-              "operator": "gte",
-              "value": 100
-            }
-          ],
-          "grades": {
-            "monthlyAvgCount": {
-              "S": 120,
-              "A": 60,
-              "B": 30,
-              "C": 0
-            },
-            "totalOrders": {
-              "S": 120,
-              "A": 60,
-              "B": 30,
-              "C": 0
-            },
-            "activeMonths": {
-              "S": 12,
-              "A": 8,
-              "B": 3,
-              "C": 0
-            },
-            "activeCustomers": {
-              "S": 30,
-              "A": 20,
-              "B": 10,
-              "C": 0
-            }
+      "id": "production",
+      "name": "生产配置",
+      "config": {
+        "version": 2,
+        "updatedAt": "2026-11-06T08:24:58.442Z",
+        "strategies": [
+          {
+            "id": "auto",
+            "name": "自动策略",
+            "behavior": "auto",
+            "modes": [
+              {
+                "id": "rule-1",
+                "name": "模式1",
+                "isDefault": false,
+                "factors": [
+                  {
+                    "field": "cumulativeCount",
+                    "min": 100,
+                    "max": null
+                  }
+                ],
+                "grades": {
+                  "monthlyAvgCount": {
+                    "S": 120,
+                    "A": 60,
+                    "B": 30,
+                    "C": 0
+                  },
+                  "totalOrders": {
+                    "S": 120,
+                    "A": 60,
+                    "B": 30,
+                    "C": 0
+                  },
+                  "activeMonths": {
+                    "S": 12,
+                    "A": 8,
+                    "B": 3,
+                    "C": 0
+                  },
+                  "activeCustomers": {
+                    "S": 30,
+                    "A": 20,
+                    "B": 10,
+                    "C": 0
+                  }
+                },
+                "tiers": [
+                  {
+                    "id": "rule-1-tier-hot-a",
+                    "name": "3S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 3
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 3,
+                        "normal": 5,
+                        "peak": 8
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-1-tier-mw1z9gs1",
+                    "name": "2S1A",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 2
+                      },
+                      {
+                        "grade": "A",
+                        "operator": "gte",
+                        "count": 1
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-1-tier-mw1zcbv5",
+                    "name": "1S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 1
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-1-tier-default",
+                    "name": "默认档",
+                    "isDefault": true,
+                    "conditions": [],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "rule-default",
+                "name": "兜底模式",
+                "isDefault": true,
+                "factors": [],
+                "grades": {
+                  "monthlyAvgCount": {
+                    "S": 120,
+                    "A": 90,
+                    "B": 30,
+                    "C": 1
+                  }
+                },
+                "tiers": [
+                  {
+                    "id": "rule-default-tier-default",
+                    "name": "兜底档",
+                    "isDefault": true,
+                    "conditions": [],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
           },
-          "tiers": [
-            {
-              "id": "rule-1-tier-hot-a",
-              "name": "3S",
-              "isDefault": false,
-              "conditions": [
-                {
-                  "grade": "S",
-                  "operator": "gte",
-                  "count": 3
+          {
+            "id": "manual",
+            "name": "手动策略",
+            "behavior": "manual",
+            "modes": [
+              {
+                "id": "manual-custom",
+                "name": "自定模式",
+                "behavior": "custom",
+                "description": "由人工为该 SKU 指定红线 / 正常 / 峰值系数",
+                "defaultCoefficients": {
+                  "redLine": 1,
+                  "normal": 2,
+                  "peak": 3
                 }
-              ],
-              "coefficients": {
-                "黑白": {
-                  "redLine": 3,
-                  "normal": 5,
-                  "peak": 8
-                },
-                "彩色": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                }
+              },
+              {
+                "id": "manual-slow",
+                "name": "滞销模式",
+                "behavior": "slow",
+                "description": "不参与备货：不计预警、不进紧急补货、不给建议值"
               }
-            },
-            {
-              "id": "rule-1-tier-mw1z9gs1",
-              "name": "2S1A",
-              "isDefault": false,
-              "conditions": [
-                {
-                  "grade": "S",
-                  "operator": "gte",
-                  "count": 2
-                },
-                {
-                  "grade": "A",
-                  "operator": "gte",
-                  "count": 1
-                }
-              ],
-              "coefficients": {
-                "黑白": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                },
-                "彩色": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                }
-              }
-            },
-            {
-              "id": "rule-1-tier-mw1zcbv5",
-              "name": "1S",
-              "isDefault": false,
-              "conditions": [
-                {
-                  "grade": "S",
-                  "operator": "gte",
-                  "count": 1
-                }
-              ],
-              "coefficients": {
-                "黑白": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                },
-                "彩色": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                }
-              }
-            },
-            {
-              "id": "rule-1-tier-default",
-              "name": "默认档",
-              "isDefault": true,
-              "conditions": [],
-              "coefficients": {
-                "黑白": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                },
-                "彩色": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                }
-              }
-            }
-          ]
-        },
-        {
-          "id": "rule-default",
-          "name": "兜底模式",
-          "isDefault": true,
-          "factors": [],
-          "grades": {
-            "monthlyAvgCount": {
-              "S": 120,
-              "A": 90,
-              "B": 30,
-              "C": 1
-            }
-          },
-          "tiers": [
-            {
-              "id": "rule-default-tier-default",
-              "name": "兜底档",
-              "isDefault": true,
-              "conditions": [],
-              "coefficients": {
-                "黑白": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                },
-                "彩色": {
-                  "redLine": 2,
-                  "normal": 4,
-                  "peak": 6
-                }
-              }
-            }
-          ]
-        }
-      ]
+            ]
+          }
+        ]
+      }
     },
     {
-      "id": "manual",
-      "name": "手动策略",
-      "behavior": "manual",
-      "modes": [
-        {
-          "id": "manual-custom",
-          "name": "自定模式",
-          "behavior": "custom",
-          "description": "由人工为该 SKU 指定红线 / 正常 / 峰值系数",
-          "defaultCoefficients": {
-            "redLine": 1,
-            "normal": 2,
-            "peak": 3
+      "id": "demo",
+      "name": "演示配置",
+      "config": {
+        "version": 2,
+        "updatedAt": "2026-11-06T09:46:57.794Z",
+        "strategies": [
+          {
+            "id": "auto",
+            "name": "自动策略",
+            "behavior": "auto",
+            "modes": [
+              {
+                "id": "rule-demo-1",
+                "name": "模式1",
+                "isDefault": false,
+                "factors": [
+                  {
+                    "field": "totalOrders",
+                    "min": 100,
+                    "max": null
+                  }
+                ],
+                "grades": {
+                  "monthlyAvgCount": {
+                    "S": 94,
+                    "A": 37,
+                    "B": 19,
+                    "C": 0
+                  },
+                  "totalOrders": {
+                    "S": 678,
+                    "A": 255,
+                    "B": 149,
+                    "C": 0
+                  },
+                  "activeMonths": {
+                    "S": 9,
+                    "A": 8,
+                    "B": 7,
+                    "C": 0
+                  },
+                  "activeCustomers": {
+                    "S": 10,
+                    "A": 5,
+                    "B": 2,
+                    "C": 0
+                  }
+                },
+                "tiers": [
+                  {
+                    "id": "rule-demo-1-tier-3s",
+                    "name": "3S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 3
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 4,
+                        "normal": 6,
+                        "peak": 9
+                      },
+                      "彩色": {
+                        "redLine": 4,
+                        "normal": 6,
+                        "peak": 9
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-1-tier-2s",
+                    "name": "2S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 2
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 3,
+                        "normal": 5,
+                        "peak": 7
+                      },
+                      "彩色": {
+                        "redLine": 3,
+                        "normal": 5,
+                        "peak": 7
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-1-tier-1s",
+                    "name": "1S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 1
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-1-tier-default",
+                    "name": "默认档",
+                    "isDefault": true,
+                    "conditions": [],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "rule-demo-2",
+                "name": "模式2",
+                "isDefault": false,
+                "factors": [
+                  {
+                    "field": "totalOrders",
+                    "min": 20,
+                    "max": 99
+                  }
+                ],
+                "grades": {
+                  "monthlyAvgCount": {
+                    "S": 14,
+                    "A": 7,
+                    "B": 3.5,
+                    "C": 0
+                  },
+                  "totalOrders": {
+                    "S": 78,
+                    "A": 58,
+                    "B": 36,
+                    "C": 0
+                  },
+                  "activeMonths": {
+                    "S": 9,
+                    "A": 8,
+                    "B": 7,
+                    "C": 0
+                  },
+                  "activeCustomers": {
+                    "S": 10,
+                    "A": 5,
+                    "B": 2,
+                    "C": 0
+                  }
+                },
+                "tiers": [
+                  {
+                    "id": "rule-demo-2-tier-3s",
+                    "name": "3S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 3
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 3,
+                        "normal": 5,
+                        "peak": 7
+                      },
+                      "彩色": {
+                        "redLine": 3,
+                        "normal": 5,
+                        "peak": 7
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-2-tier-2s",
+                    "name": "2S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 2
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2.5,
+                        "normal": 4.5,
+                        "peak": 6.5
+                      },
+                      "彩色": {
+                        "redLine": 2.5,
+                        "normal": 4.5,
+                        "peak": 6.5
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-2-tier-1s",
+                    "name": "1S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 1
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-2-tier-default",
+                    "name": "默认档",
+                    "isDefault": true,
+                    "conditions": [],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 4,
+                        "peak": 6
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "rule-demo-3",
+                "name": "模式3",
+                "isDefault": false,
+                "factors": [
+                  {
+                    "field": "totalOrders",
+                    "min": 1,
+                    "max": 19
+                  }
+                ],
+                "grades": {
+                  "monthlyAvgCount": {
+                    "S": 12,
+                    "A": 4,
+                    "B": 1.5,
+                    "C": 0
+                  },
+                  "totalOrders": {
+                    "S": 15,
+                    "A": 10,
+                    "B": 5,
+                    "C": 0
+                  },
+                  "activeMonths": {
+                    "S": 5,
+                    "A": 3,
+                    "B": 2,
+                    "C": 0
+                  },
+                  "activeCustomers": {
+                    "S": 10,
+                    "A": 5,
+                    "B": 2,
+                    "C": 0
+                  }
+                },
+                "tiers": [
+                  {
+                    "id": "rule-demo-3-tier-3s",
+                    "name": "3S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 3
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 2,
+                        "normal": 3,
+                        "peak": 4
+                      },
+                      "彩色": {
+                        "redLine": 2,
+                        "normal": 3,
+                        "peak": 4
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-3-tier-2s",
+                    "name": "2S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 2
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 1.5,
+                        "normal": 3,
+                        "peak": 4
+                      },
+                      "彩色": {
+                        "redLine": 1.5,
+                        "normal": 3,
+                        "peak": 4
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-3-tier-1s",
+                    "name": "1S",
+                    "isDefault": false,
+                    "conditions": [
+                      {
+                        "grade": "S",
+                        "operator": "gte",
+                        "count": 1
+                      }
+                    ],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 1,
+                        "normal": 2,
+                        "peak": 3
+                      },
+                      "彩色": {
+                        "redLine": 1,
+                        "normal": 2,
+                        "peak": 3
+                      }
+                    }
+                  },
+                  {
+                    "id": "rule-demo-3-tier-default",
+                    "name": "默认档",
+                    "isDefault": true,
+                    "conditions": [],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 1,
+                        "normal": 2,
+                        "peak": 3
+                      },
+                      "彩色": {
+                        "redLine": 1,
+                        "normal": 2,
+                        "peak": 3
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "rule-demo-default",
+                "name": "兜底模式",
+                "isDefault": true,
+                "factors": [],
+                "grades": {
+                  "monthlyAvgCount": {
+                    "S": 1,
+                    "A": 0.5,
+                    "B": 0.1,
+                    "C": 0
+                  },
+                  "totalOrders": {
+                    "S": 8,
+                    "A": 4,
+                    "B": 2,
+                    "C": 0
+                  },
+                  "activeMonths": {
+                    "S": 3,
+                    "A": 2,
+                    "B": 1,
+                    "C": 0
+                  },
+                  "activeCustomers": {
+                    "S": 10,
+                    "A": 5,
+                    "B": 2,
+                    "C": 0
+                  }
+                },
+                "tiers": [
+                  {
+                    "id": "rule-demo-default-tier-default",
+                    "name": "默认档",
+                    "isDefault": true,
+                    "conditions": [],
+                    "coefficients": {
+                      "黑白": {
+                        "redLine": 0.5,
+                        "normal": 1,
+                        "peak": 2
+                      },
+                      "彩色": {
+                        "redLine": 0.5,
+                        "normal": 1,
+                        "peak": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "manual",
+            "name": "手动策略",
+            "behavior": "manual",
+            "modes": [
+              {
+                "id": "manual-custom",
+                "name": "自定模式",
+                "behavior": "custom",
+                "description": "由人工为该 SKU 指定红线 / 正常 / 峰值系数",
+                "defaultCoefficients": {
+                  "redLine": 1,
+                  "normal": 2,
+                  "peak": 3
+                }
+              },
+              {
+                "id": "manual-slow",
+                "name": "滞销模式",
+                "behavior": "slow",
+                "description": "不参与备货：不计预警、不进紧急补货、不给建议值"
+              }
+            ]
           }
-        },
-        {
-          "id": "manual-slow",
-          "name": "滞销模式",
-          "behavior": "slow",
-          "description": "不参与备货：不计预警、不进紧急补货、不给建议值"
-        }
-      ]
+        ]
+      }
     }
   ]
 }

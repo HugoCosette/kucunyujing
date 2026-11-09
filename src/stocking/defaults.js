@@ -12,6 +12,9 @@ const NORMAL_COEFFICIENTS = {
 
 const DEFAULT_CONFIG_UPDATED_AT = '2026-11-04T00:00:00.000Z'
 
+export const DEFAULT_PROFILE_ID = 'production'
+export const DEFAULT_PROFILE_NAME = '生产配置'
+
 // 手动策略下内置的两种模式：行为由代码提供，名称与参数可由使用者调整。
 export const BUILTIN_MANUAL_MODES = [
   {
@@ -101,8 +104,8 @@ export function createDefaultConfig() {
             name: '模式1',
             isDefault: false,
             factors: [
-              { field: 'monthlyAvgCount', operator: 'gte', value: 200 },
-              { field: 'totalOrders', operator: 'gte', value: 10 },
+              { field: 'monthlyAvgCount', min: 200, max: null },
+              { field: 'totalOrders', min: 10, max: null },
             ],
             grades: {
               monthlyAvgCount: createThresholds('monthlyAvgCount'),
@@ -146,6 +149,22 @@ export function createDefaultConfig() {
       {
         ...BUILTIN_STRATEGIES[1],
         modes: clone(BUILTIN_MANUAL_MODES),
+      },
+    ],
+  }
+}
+
+// 多方案文件的默认内容：只含「生产配置」一个方案。
+export function createDefaultProfileFile() {
+  return {
+    version: 3,
+    updatedAt: DEFAULT_CONFIG_UPDATED_AT,
+    activeProfileId: DEFAULT_PROFILE_ID,
+    profiles: [
+      {
+        id: DEFAULT_PROFILE_ID,
+        name: DEFAULT_PROFILE_NAME,
+        config: createDefaultConfig(),
       },
     ],
   }
