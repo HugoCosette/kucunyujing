@@ -6,7 +6,7 @@ import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
-import { SALES_MONTH_FIELDS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
+import { SALES_MONTH_FIELDS, SALES_RATIO_COLUMNS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
 import { useInventoryStore } from '@/stores/inventory'
 import { groupTableRowsByProduct } from '@/utils/productGroups'
 
@@ -39,26 +39,59 @@ const tableColumns = SALES_TABLE_COLUMNS.map((column, index) => ({
           ? MONTH_COLUMN_WIDTH
           : 96,
 }))
-// 品名、颜色之后全部是数值列，参与品名父行求和。
+// 品名、颜色之后全部是数值列，参与品名父行求和；比例列（客户CR5率）单独按权重列加权平均。
+const ratioColumnIndexes = new Set(
+  SALES_RATIO_COLUMNS.map((entry) =>
+    tableColumns.find((column) => column.key === entry.key)?.index,
+  ).filter((index) => index !== undefined),
+)
 const quantityColumnIndexes = tableColumns
   .map((column) => column.index)
-  .filter((index) => index > 1)
+  .filter((index) => index > 1 && !ratioColumnIndexes.has(index))
+const ratioColumns = SALES_RATIO_COLUMNS.map((entry) => ({
+  index: tableColumns.find((column) => column.key === entry.key)?.index ?? -1,
+  weightIndex: tableColumns.find((column) => column.key === entry.weightKey)?.index ?? -1,
+}))
 
 function toCellValue(value) {
   return value === null || value === undefined ? '' : value
+}
+
+function formatValue(value, column) {
+  if (value === null || value === undefined || value === '') return ''
+  if (column?.kind === 'percent') {
+    const ratio = Number(value)
+    return Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : String(value)
+  }
+  return String(value)
+}
+
+function formatCell(row, column) {
+  return formatValue(row.cells?.[column.index], column)
+}
+
+// 搜索索引按展示文本生成，比例列也能用「82.8%」这类写法搜到。
+function buildSearchText(cells) {
+  return cells
+    .map((value, index) => formatValue(value, tableColumns[index]))
+    .join('\u0000')
+    .toLocaleLowerCase('zh-CN')
 }
 
 function buildSalesCells(item, sales) {
   const cells = [
     item.product,
     item.color,
-    // 4 个动销指标保留主面板导入值，销售表文件里的同名列不参与。
+    // 动销指标保留主面板导入值，销售表文件里的同名列不参与。
     ...HEAT_FACTOR_FIELDS.map(({ field }) => toCellValue(item[field])),
+    // 客户CR5率只来自销售表，不进主面板与评分。
+    toCellValue(sales?.cr5 ?? null),
   ]
   for (const { index } of SALES_MONTH_FIELDS) {
+    // 每月三列：条数（换算值）+ 销量（公斤）+ 订单数
     cells.push(
       toCellValue(sales?.counts[index] ?? null),
-      toCellValue(sales?.weights[index] ?? null),
+      toCellValue(sales?.sales[index] ?? null),
       toCellValue(sales?.orders[index] ?? null),
     )
   }
@@ -96,11 +129,11 @@ function rebuildRows() {
       const cells = buildSalesCells(item, bySku?.get(item.skuId))
       return {
         id: item.id,
-        // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算模式 / 评分档 / 因子等级。
+        // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算模式与系数。
         item,
         cells,
         // 预存小写索引，搜索时只做 includes。
-        searchText: cells.join('\u0000').toLocaleLowerCase('zh-CN'),
+        searchText: buildSearchText(cells),
       }
     })
 }
@@ -175,6 +208,7 @@ const productGroups = computed(() =>
   groupTableRowsByProduct(filteredLeafRows.value, {
     productIndex: PRODUCT_INDEX,
     quantityIndexes: quantityColumnIndexes,
+    ratioColumns,
     columnCount: tableColumns.length,
   }),
 )
@@ -264,10 +298,6 @@ const monthRangeText = computed(() => {
 const metricSourceText = computed(() =>
   salesSheet.value?.metricFields?.length ? '动销指标取自销售表' : '动销指标沿用总表',
 )
-
-function formatCell(row, column) {
-  return String(row.cells?.[column.index] ?? '')
-}
 
 onMounted(() => {
   const element = tableScrollRef.value

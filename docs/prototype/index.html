@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>库存储备看板 · 界面调整原型</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- ===================== 顶部导航 ===================== -->
+    <header class="app-header">
+      <nav class="nav" aria-label="页面导航">
+        <button class="nav__item is-active" data-screen="inventory">主面板</button>
+        <button class="nav__item" data-screen="sales">销售表</button>
+        <button class="nav__item" data-screen="config">配置信息</button>
+      </nav>
+
+      <!-- 示例数据区：位置与提示保留 -->
+      <div class="header__right">
+        <span class="example-hint">示例数据，请勿修改</span>
+        <button class="link-btn" data-demo="示例面板仅用于对照演示">示例面板</button>
+        <button class="link-btn" data-demo="示例配置仅用于对照演示">示例配置</button>
+      </div>
+    </header>
+
+    <!-- ===================== 主面板 ===================== -->
+    <section class="screen" id="screen-inventory">
+      <div class="page">
+        <div class="page-head">
+          <h1 class="page-title">主面板</h1>
+          <div class="page-head__actions">
+            <button class="btn" data-demo="选择模板文件下载">导入模板</button>
+            <button class="btn" data-demo="导出当前视图为 Excel">保存 Excel</button>
+            <button class="btn" data-demo="选择 5 张分表，清洗后导入">导入分表</button>
+            <button class="btn btn--primary" data-demo="选择总表 + 销售表">导入 Excel</button>
+            <button class="btn btn--danger" data-demo="打开紧急补货弹窗">
+              紧急补货 <span class="btn__count">36</span>
+            </button>
+            <button class="btn" data-demo="打开本次采购清单">
+              采购清单 <span class="btn__count" style="background: #e1e6e9; color: #2f3b43">12</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <label class="field">
+            <svg class="field__icon" viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="4.2" stroke="currentColor" stroke-width="1.4" />
+              <path d="m10.2 10.2 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+            <input class="input input--search" id="filterProduct" placeholder="品名" style="width: 118px" />
+          </label>
+          <label class="field">
+            <svg class="field__icon" viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="4.2" stroke="currentColor" stroke-width="1.4" />
+              <path d="m10.2 10.2 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+            <input class="input input--search" id="filterColor" placeholder="颜色" style="width: 118px" />
+          </label>
+          <select class="input" id="filterMode" style="width: 104px" aria-label="按模式筛选">
+            <option value="all">全部模式</option>
+            <option value="热销">热销</option>
+            <option value="常规">常规</option>
+            <option value="按量">按量</option>
+            <option value="尾货">尾货</option>
+            <option value="滞销">滞销</option>
+          </select>
+          <span class="toolbar__sep"></span>
+          <div class="chips" id="toneFilters"></div>
+          <div class="toolbar__end">
+            <span class="meta" id="rowCount"></span>
+            <button class="btn btn--sm" id="resetFilters">重置</button>
+            <button class="btn btn--sm" id="toggleAll">全部展开</button>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-scroll">
+            <div class="gt" id="invTable"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 销售表 ===================== -->
+    <section class="screen" id="screen-sales" hidden>
+      <div class="page">
+        <div class="page-head">
+          <h1 class="page-title">销售表</h1>
+          <div class="page-head__actions">
+            <span class="meta" id="salesFile">销售明细_2026Q4.xlsx</span>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <label class="field">
+            <svg class="field__icon" viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="4.2" stroke="currentColor" stroke-width="1.4" />
+              <path d="m10.2 10.2 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+            <input class="input input--search" id="salesSearch" placeholder="搜索全部列" style="width: 190px" />
+          </label>
+          <span class="toolbar__sep"></span>
+          <span class="meta" id="salesCount"></span>
+          <div class="toolbar__end">
+            <button class="btn btn--sm" id="salesToggleAll">全部收起</button>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-scroll table-scroll--sales">
+            <div class="gt" id="salesTable"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 配置信息 ===================== -->
+    <section class="screen" id="screen-config" hidden>
+      <div class="page page--config">
+        <div class="config-bar">
+          <h1 class="config-bar__title">配置信息</h1>
+
+          <div class="menu-anchor">
+            <button class="btn btn--plan" id="profileBtn">
+              生产配置
+              <svg class="btn__caret" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path d="M3 4.5 6 7.5l3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+            <div class="menu" id="profileMenu" hidden>
+              <button class="menu__item" data-demo="复制为新方案">复制为新方案</button>
+              <button class="menu__item" data-demo="重命名当前方案">重命名</button>
+              <button class="menu__item" data-demo="删除当前方案">删除方案</button>
+              <div class="menu__divider"></div>
+              <button class="menu__item" data-demo="导出全部方案 JSON">导出方案文件</button>
+              <button class="menu__item" data-demo="导入方案文件">导入方案文件</button>
+              <div class="menu__divider"></div>
+              <button class="menu__item" data-demo="当前方案恢复默认">恢复默认</button>
+            </div>
+          </div>
+
+          <span class="state" id="saveState">已保存</span>
+
+          <div class="config-bar__end">
+            <button class="icon-btn" id="undoBtn" title="撤销" disabled>
+              <svg viewBox="0 0 16 16" fill="none">
+                <path d="M6 3.5 3 6.5l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+                <path d="M3 6.5h5.6a3.4 3.4 0 0 1 0 6.8H6.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              </svg>
+            </button>
+            <button class="icon-btn" id="redoBtn" title="重做" disabled>
+              <svg viewBox="0 0 16 16" fill="none">
+                <path d="M10 3.5 13 6.5l-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+                <path d="M13 6.5H7.4a3.4 3.4 0 0 0 0 6.8h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              </svg>
+            </button>
+            <span class="config-bar__divider"></span>
+            <button class="btn btn--text" id="discardBtn" disabled>放弃</button>
+            <button class="btn btn--primary" id="saveBtn" disabled>保存</button>
+          </div>
+        </div>
+
+        <div class="config-layout">
+          <aside class="rail">
+            <button class="rail__item is-active" data-panel="strategy">
+              <span class="rail__title">策略与模式</span>
+              <span class="rail__meta">5 个模式 · 命中 21</span>
+            </button>
+            <button class="rail__item" data-panel="weights">
+              <span class="rail__title">销量加权</span>
+              <span class="rail__meta">50 / 30 / 20</span>
+            </button>
+            <button class="rail__item" data-panel="scoring">
+              <span class="rail__title">健康度评分</span>
+              <span class="rail__meta">5 个维度</span>
+            </button>
+            <button class="rail__item" data-panel="spu">
+              <span class="rail__title">SPU 分级</span>
+              <span class="rail__meta">6 档</span>
+            </button>
+          </aside>
+
+          <div>
+            <!-- 策略与模式 -->
+            <section class="panel" data-panel-view="strategy">
+              <div class="panel__head">
+                <h2 class="panel__title">策略与模式</h2>
+              </div>
+
+              <div class="subtabs" role="tablist" aria-label="策略">
+                <button class="subtab is-active" data-strategy="auto" role="tab">
+                  自动策略 <span class="subtab__count">5</span>
+                </button>
+                <button class="subtab" data-strategy="manual" role="tab">
+                  手动策略 <span class="subtab__count">2</span>
+                </button>
+              </div>
+
+              <div class="master" id="autoStrategy">
+                <div class="mode-list" id="modeList"></div>
+                <div class="mode-editor" id="modeEditor"></div>
+              </div>
+
+              <div class="panel__body" id="manualStrategy" hidden>
+                <div class="manual-section">
+                  <div class="manual-section__head">
+                    <h3 class="manual-section__title">手动模式</h3>
+                    <div class="manual-section__actions">
+                      <button class="btn btn--sm" data-demo="新增手动模式">新增模式</button>
+                    </div>
+                  </div>
+                  <table class="plain-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 170px">名称</th>
+                        <th style="width: 84px">行为</th>
+                        <th>说明</th>
+                        <th style="width: 92px">红线（条）</th>
+                        <th style="width: 92px">正常（条）</th>
+                        <th style="width: 92px">峰值（条）</th>
+                        <th style="width: 42px"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><input class="input" value="自定模式" style="width: 100%" /></td>
+                        <td class="meta">自定系数</td>
+                        <td><input class="input" value="人工指定红线 / 正常 / 峰值" style="width: 100%" /></td>
+                        <td><input class="coef-input" value="20.0" /></td>
+                        <td><input class="coef-input" value="40.0" /></td>
+                        <td><input class="coef-input" value="60.0" /></td>
+                        <td class="row-actions">
+                          <button class="icon-btn" disabled title="内置行为必须保留一个">
+                            <svg viewBox="0 0 16 16" fill="none">
+                              <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+                            </svg>
+                          </button>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td><input class="input" value="滞销模式" style="width: 100%" /></td>
+                        <td class="meta">滞销</td>
+                        <td><input class="input" value="不计预警、不进紧急补货" style="width: 100%" /></td>
+                        <td colspan="3" class="coef-table__skip">不参与计算</td>
+                        <td class="row-actions">
+                          <button class="icon-btn" disabled title="内置行为必须保留一个">
+                            <svg viewBox="0 0 16 16" fill="none">
+                              <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+                            </svg>
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="manual-section">
+                  <div class="manual-section__head">
+                    <h3 class="manual-section__title">手动 SKU 清单</h3>
+                    <div class="manual-section__actions">
+                      <button class="btn btn--sm" data-demo="把选中行恢复自动">恢复自动（0）</button>
+                    </div>
+                  </div>
+                  <table class="plain-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 30px"><span class="cbx"><input type="checkbox" /><span></span></span></th>
+                        <th style="width: 150px">唯一标识</th>
+                        <th>品名</th>
+                        <th style="width: 150px">颜色</th>
+                        <th style="width: 130px">模式</th>
+                        <th style="width: 260px">系数（红线 / 正常 / 峰值，条）</th>
+                        <th style="width: 88px"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><span class="cbx"><input type="checkbox" /><span></span></span></td>
+                        <td class="meta">NB-193#KC-0021</td>
+                        <td>挪威网</td>
+                        <td>193#浅咖</td>
+                        <td>
+                          <select class="input" style="width: 100%">
+                            <option>自定模式</option>
+                            <option>滞销模式</option>
+                          </select>
+                        </td>
+                        <td>
+                          <input class="coef-input" value="20.0" />
+                          <input class="coef-input" value="40.0" />
+                          <input class="coef-input" value="60.0" />
+                        </td>
+                        <td class="row-actions"><button class="btn btn--text btn--sm" data-demo="恢复自动判定">恢复自动</button></td>
+                      </tr>
+                      <tr>
+                        <td><span class="cbx"><input type="checkbox" /><span></span></span></td>
+                        <td class="meta">9090-33#SH-0014</td>
+                        <td>9090网布</td>
+                        <td>33#深灰</td>
+                        <td>
+                          <select class="input" style="width: 100%">
+                            <option>滞销模式</option>
+                            <option>自定模式</option>
+                          </select>
+                        </td>
+                        <td class="coef-table__skip">不参与计算</td>
+                        <td class="row-actions"><button class="btn btn--text btn--sm" data-demo="恢复自动判定">恢复自动</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+
+            <!-- 销量加权 -->
+            <section class="panel" data-panel-view="weights" hidden>
+              <div class="panel__head">
+                <h2 class="panel__title">销量加权</h2>
+              </div>
+              <div class="panel__body">
+                <table class="score-table weight-table">
+                  <thead>
+                    <tr>
+                      <th>统计区间</th>
+                      <th style="width: 132px">权重</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>近 1 个月</td>
+                      <td>
+                        <label class="cell-field">
+                          <input class="num-input" type="number" min="0" max="100" step="5" data-weight="m1" />
+                          <span>%</span>
+                        </label>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>近 3 个月月均</td>
+                      <td>
+                        <label class="cell-field">
+                          <input class="num-input" type="number" min="0" max="100" step="5" data-weight="m3" />
+                          <span>%</span>
+                        </label>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>近 12 个月月均</td>
+                      <td>
+                        <label class="cell-field">
+                          <input class="num-input" type="number" min="0" max="100" step="5" data-weight="m12" />
+                          <span>%</span>
+                        </label>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="score-foot">
+                  <span class="weight-total" id="weightTotal"></span>
+                  <button class="btn btn--text btn--sm panel__foot-action" data-reset-weights title="恢复为 50 / 30 / 20">
+                    恢复默认
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <!-- 健康度评分 -->
+            <section class="panel" data-panel-view="scoring" hidden>
+              <div class="panel__head">
+                <h2 class="panel__title">健康度评分</h2>
+              </div>
+              <div class="panel__body">
+                <table class="score-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 130px">维度</th>
+                      <th style="width: 66px">权重</th>
+                      <th>低风险</th>
+                      <th>中风险</th>
+                      <th>高风险</th>
+                    </tr>
+                  </thead>
+                  <tbody id="scoringBody"></tbody>
+                </table>
+
+                <div class="score-foot">
+                  <span>三档得分 <b>低 80 / 中 60 / 高 40</b></span>
+                  <span>综合分档 <b>&lt; 50 红 · 50–70 黄 · &gt; 70 绿</b></span>
+                  <button class="btn btn--text btn--sm panel__foot-action" data-demo="打开评分规则编辑">
+                    编辑规则
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <!-- SPU 分级 -->
+            <section class="panel" data-panel-view="spu" hidden>
+              <div class="panel__head">
+                <h2 class="panel__title">SPU 分级</h2>
+              </div>
+              <div class="panel__body">
+                <table class="score-table spu-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 80px">等级</th>
+                      <th>月均条数阈值</th>
+                      <th style="width: 90px" class="is-num">命中 SPU</th>
+                    </tr>
+                  </thead>
+                  <tbody id="gradeBody"></tbody>
+                </table>
+                <div class="score-foot">
+                  <span>从高到低判定，命中第一个「月均 ≥ 下限」的等级</span>
+                  <button class="btn btn--text btn--sm panel__foot-action" data-demo="打开 SPU 分级编辑">
+                    编辑分级
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 批量补货条 ===================== -->
+    <div class="batchbar" id="batchbar" hidden>
+      <span class="batchbar__text">已选 <strong id="batchCount">0</strong> 个 SKU</span>
+      <button class="batchbar__clear" id="batchClear">清空</button>
+      <button class="btn btn--primary" data-demo="打开确认补货弹窗">确认补货</button>
+    </div>
+
+    <!-- ===================== SKU 详情 ===================== -->
+    <div class="overlay" id="skuOverlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-label="SKU 配置信息">
+        <div class="modal__head" id="skuHead"></div>
+        <div class="modal__body" id="skuBody"></div>
+        <div class="modal__foot">
+          <div class="modal__foot-actions">
+            <button class="btn" id="skuClose">关闭</button>
+            <button class="btn btn--primary" id="skuSave" data-demo="保存该 SKU 的手动策略">保存策略</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="./vendor/echarts.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

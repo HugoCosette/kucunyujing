@@ -22,8 +22,11 @@ const metricLabelOf = (field) =>
 
 const salesMetricText = computed(() => {
   const fields = props.summary?.sales?.metricFields ?? []
-  return fields.length ? fields.map(metricLabelOf).join(' / ') : '未包含（评分因子记 Z）'
+  return fields.length ? fields.map(metricLabelOf).join(' / ') : '未包含（月均条数缺失按 0 处理）'
 })
+
+// 客户CR5率只展示在销售表，不参与评分，这里单独提示是否识别到。
+const hasCr5 = computed(() => Boolean(props.summary?.sales?.hasCr5))
 
 const canConfirm = computed(
   () => Boolean(props.summary?.inventory) && Boolean(props.summary?.sales),
@@ -68,7 +71,7 @@ function closeDialog() {
             忽略“需安排”列：{{ summary.inventory.ignoredPlannedRows }} 行有值，需安排以面板内采纳结果为准
           </li>
           <li v-if="summary.inventory.ignoredHeatRows">
-            忽略“评分档”列（旧模板为“热度”）：{{ summary.inventory.ignoredHeatRows }} 行有值，评分档按备货配置计算
+            忽略“评分档”列（旧模板为“热度”）：{{ summary.inventory.ignoredHeatRows }} 行有值，模式与系数一律按备货配置计算
           </li>
           <li v-if="summary.inventory.ignoredMetricRows">
             忽略“动销指标”列：{{ summary.inventory.ignoredMetricRows }} 行有值，动销指标以销售表为准
@@ -103,6 +106,11 @@ function closeDialog() {
             >
           </li>
           <li>动销指标列：{{ salesMetricText }}</li>
+          <li>
+            客户CR5率：{{
+              hasCr5 ? '已识别（前 5 客户销量占比，仅展示在销售表）' : '未包含'
+            }}
+          </li>
           <li>匹配总表：{{ summary.sales.merge.matched }} 个SKU</li>
           <li v-if="summary.sales.merge.unmatched">
             跳过未匹配：{{ summary.sales.merge.unmatched }} 行（总表没有对应的唯一标识，如：{{
@@ -137,7 +145,7 @@ function closeDialog() {
 
       <p class="import-sources__hint">
         确认后：总表整表替换主面板库存行（需安排、撤销记录与采购清单按唯一标识保留）；销售表的动销指标写入对应 SKU，1-12
-        月条数与重量叠加到销售表页；随后按备货配置重算模式、评分档与系数。理论库存、预警、缺口量、缺口率、库销比仍由系统计算。
+        月条数与重量叠加到销售表页；随后按备货配置重算模式与系数。理论库存、预警、缺口量、缺口率、日库销比仍由系统计算。
       </p>
     </template>
 

@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   ElButton,
   ElDialog,
+  ElInput,
   ElInputNumber,
   ElMessage,
   ElOption,
@@ -13,7 +14,8 @@ import {
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
-import { createEvaluator, evaluateItem, getManualModes } from '@/stocking'
+import { createEvaluator, evaluateItem, evaluateBulkScoring, evaluateScoring, getAutoModes, getManualModes } from '@/stocking'
+import { calculateInventoryRow, getSuggestedPlanned } from '@/utils/inventory'
 
 const props = defineProps({
   // 传主面板行或原始 SKU 行都行：评估只读取因子字段，不依赖派生值。
@@ -42,44 +44,95 @@ const dialogVisible = computed({
   set: (value) => emit('update:visible', value),
 })
 
-// 模式 / 评分档 / 因子等级全部按当前配置现算，与主面板、配置页同一套口径。
+// 模式 / 系数按当前配置现算，与主面板、配置页同一套口径。
+const baselineMonth = computed(() => {
+  const month = inventoryStore.salesSheet?.baselineMonth
+  return Number.isFinite(month) && month > 0 ? month : null
+})
 const evaluated = computed(() =>
   props.item
-    ? evaluateItem(props.item, createEvaluator(stockingStore.config, { manualOverrides: stockingStore.manualOverrides }))
+    ? evaluateItem(
+        props.item,
+        createEvaluator(stockingStore.config, {
+          manualOverrides: stockingStore.manualOverrides,
+          baselineMonth: baselineMonth.value,
+        }),
+      )
     : null,
 )
-const gradeDetails = computed(() => evaluated.value?.gradeDetails ?? [])
-const coefficients = computed(() => {
-  const set = evaluated.value?.stockingCoefficients
-  return props.item?.category ? set?.[props.item.category] ?? null : null
-})
+// evaluateItem 已按当前色彩（黑白 / 彩色）选好系数，这里直接取用。
+const coefficients = computed(() => evaluated.value?.stockingCoefficients ?? null)
 const coefficientText = computed(() => {
-  if (evaluated.value?.strategySlow) return '滞销'
+  const row = evaluated.value
+  if (row?.excluded) {
+    if (row.manualBehavior === 'order') return '订单货：不参与备货'
+    if (row.manualBehavior === 'exclude') return '已排除：不参与备货'
+    return row.exclusive ? '专属品：不参与计算' : '不参与计算'
+  }
   return coefficients.value
     ? `${coefficients.value.redLine} / ${coefficients.value.normal} / ${coefficients.value.peak}`
     : '缺省'
+})
+// 加权月销量 = 近1个月×w1 + 近3个月月均×w3 + 近12个月月均×w12。
+const monthlySalesText = computed(() => {
+  const value = evaluated.value?.monthlySales
+  if (!Number.isFinite(value)) return '--'
+  return `${value.toFixed(2)} 条/月`
 })
 const productText = computed(() => String(props.item?.product ?? '').replace(/\s+/g, ' ').trim())
 // 色彩标签分灰阶 / 彩色两种色调，与导入时的「黑白 / 彩色」口径保持一致。
 const monochrome = computed(() => String(props.item?.category ?? '').includes('黑白'))
 
-// —— 策略：自动（按模式 + 评分档）/ 手动（自定系数 / 滞销）——
+// —— 策略：自动（按模式判定）/ 手动（自定系数 / 排除 / 订单货）——
 const manualModes = computed(() => getManualModes(stockingStore.config))
 const skuId = computed(() => String(props.item?.skuId ?? '').trim())
 const savedEntry = computed(() => (skuId.value ? stockingStore.manualOverrides.get(skuId.value) ?? null : null))
 const strategyDraft = ref('auto')
 const manualModeDraft = ref('')
 const customCoefficients = reactive({ redLine: null, normal: null, peak: null })
+const orderDraft = ref([])
 const savingManual = ref(false)
 
 const selectedManualMode = computed(
   () => manualModes.value.find((mode) => mode.id === manualModeDraft.value) ?? null,
 )
 const isCustomMode = computed(() => selectedManualMode.value?.behavior === 'custom')
+const isOrderMode = computed(() => selectedManualMode.value?.behavior === 'order')
+
+// 订单行：空行丢弃、字符串去空格，保存与「是否有改动」判断共用同一套清洗。
+function normalizeOrderRows(rows) {
+  return (rows ?? [])
+    .map((row) => ({
+      name: String(row?.name ?? '').trim(),
+      factory: String(row?.factory ?? '').trim(),
+      quantity: Number.isFinite(row?.quantity) ? row.quantity : null,
+      note: String(row?.note ?? '').trim(),
+    }))
+    .filter((row) => row.name || row.factory || row.note || row.quantity !== null)
+}
+
+function emptyOrderRow() {
+  return { name: '', factory: '', quantity: null, note: '' }
+}
+
+function addOrderRow() {
+  orderDraft.value = [...orderDraft.value, emptyOrderRow()]
+}
+
+function removeOrderRow(index) {
+  orderDraft.value = orderDraft.value.filter((_, rowIndex) => rowIndex !== index)
+}
+
 const manualDirty = computed(() => {
   if (strategyDraft.value !== 'manual') return Boolean(savedEntry.value)
   if (!manualModeDraft.value) return false
   if (savedEntry.value?.modeId !== manualModeDraft.value) return true
+  if (isOrderMode.value) {
+    return (
+      JSON.stringify(normalizeOrderRows(orderDraft.value)) !==
+      JSON.stringify(normalizeOrderRows(savedEntry.value?.orders ?? []))
+    )
+  }
   if (!isCustomMode.value) return false
   const current = savedEntry.value?.coefficients ?? null
   return (
@@ -101,6 +154,7 @@ function syncStrategyDraft() {
     customCoefficients.redLine = defaults.redLine ?? null
     customCoefficients.normal = defaults.normal ?? null
     customCoefficients.peak = defaults.peak ?? null
+    orderDraft.value = []
     return
   }
 
@@ -111,6 +165,12 @@ function syncStrategyDraft() {
   customCoefficients.redLine = coefficients.redLine ?? null
   customCoefficients.normal = coefficients.normal ?? null
   customCoefficients.peak = coefficients.peak ?? null
+  orderDraft.value = (entry.orders ?? []).map((order) => ({
+    name: order.name ?? '',
+    factory: order.factory ?? '',
+    quantity: Number.isFinite(order.quantity) ? order.quantity : null,
+    note: order.note ?? '',
+  }))
 }
 
 watch([dialogVisible, skuId, manualModes], ([isVisible]) => {
@@ -118,9 +178,14 @@ watch([dialogVisible, skuId, manualModes], ([isVisible]) => {
   syncStrategyDraft()
 }, { immediate: true })
 
-// 切到「自定模式」时，系数输入框默认填该模式的默认系数。
+// 切到「自定系数模式」时默认填该模式的默认系数；切到「订单货模式」时至少留一行订单。
 watch(manualModeDraft, () => {
-  if (strategyDraft.value !== 'manual' || !isCustomMode.value) return
+  if (strategyDraft.value !== 'manual') return
+  if (isOrderMode.value) {
+    if (!orderDraft.value.length) orderDraft.value = [emptyOrderRow()]
+    return
+  }
+  if (!isCustomMode.value) return
   if (customCoefficients.redLine !== null) return
   const defaults = selectedManualMode.value?.defaultCoefficients ?? {}
   customCoefficients.redLine = defaults.redLine ?? null
@@ -146,6 +211,18 @@ async function saveStrategy() {
     }
 
     const entry = { modeId: mode.id }
+    if (mode.behavior === 'order') {
+      const orders = normalizeOrderRows(orderDraft.value)
+      if (!orders.length) {
+        ElMessage.error('请至少填写一条订单')
+        return
+      }
+      if (orders.some((order) => !order.name)) {
+        ElMessage.error('请填写订单名')
+        return
+      }
+      entry.orders = orders
+    }
     if (mode.behavior === 'custom') {
       const values = [customCoefficients.redLine, customCoefficients.normal, customCoefficients.peak]
       if (!values.every((value) => Number.isFinite(value))) {
@@ -182,20 +259,65 @@ const salesOfSku = computed(() => {
   if (!skuId) return null
   return salesSheet.value?.bySku?.get(skuId) ?? null
 })
+
+// —— 健康度评分 ——
+// 主面板传的是算过库存列的行，销售表传的是原始行，这里统一按当前配置重算一遍再评分。
+const calculatedRow = computed(() =>
+  props.item ? calculateInventoryRow(evaluated.value) : null,
+)
+const suggestedQuantity = computed(() =>
+  calculatedRow.value ? getSuggestedPlanned(calculatedRow.value) : 0,
+)
+// 按量模式用专属的两项判定（本次进销比 / 累积客户数），区间取配置页「按量」模式里的设置。
+const isBulkMode = computed(() => evaluated.value?.modeKey === 'bulk')
+const bulkHealthScoring = computed(
+  () =>
+    getAutoModes(stockingStore.config).find((mode) => mode.key === 'bulk')?.healthScoring ?? null,
+)
+const scoring = computed(() => {
+  if (!props.item || !calculatedRow.value) return null
+  const row = calculatedRow.value
+  // 专属品 / 尾货 / 排除模式 / 模式缺省一律显示「不参与」。
+  const participates = Boolean(row.strategyAvailable) && !row.excluded
+  const metrics = {
+    cr5: salesOfSku.value?.cr5 ?? null,
+    activeCustomers: props.item.activeCustomers,
+    sales: salesOfSku.value?.sales ?? props.item.monthSales,
+    cumulativeSales: salesOfSku.value?.cumulativeSales ?? props.item.cumulativeSales,
+    suggestedQuantity: suggestedQuantity.value,
+    monthlySales: evaluated.value?.monthlySales,
+    theoreticalStock: row.theoreticalStock,
+  }
+  if (isBulkMode.value) {
+    return evaluateBulkScoring({
+      metrics,
+      participates,
+      healthScoring: bulkHealthScoring.value,
+    })
+  }
+  return evaluateScoring({
+    config: stockingStore.config.scoring,
+    participates,
+    metrics,
+  })
+})
+// 按量模式没有「得分」，tooltip 里直接给出该项的判定规则。
+function scoringDimensionTitle(dimension) {
+  if (!dimension.available) return dimension.detail
+  const rule = dimension.tierRangeText ?? dimension.ruleText
+  return `${dimension.detail}；命中${dimension.tierLabel}（${rule}）`
+}
+const salesData = computed(() =>
+  months.value.map((month) => salesOfSku.value?.sales?.[month - 1] ?? null),
+)
 const countData = computed(() =>
   months.value.map((month) => salesOfSku.value?.counts?.[month - 1] ?? null),
 )
-const weightData = computed(() =>
-  months.value.map((month) => salesOfSku.value?.weights?.[month - 1] ?? null),
+const hasSalesData = computed(
+  () => months.value.length > 0 && salesData.value.some((value) => value !== null),
 )
 const orderData = computed(() =>
   months.value.map((month) => salesOfSku.value?.orders?.[month - 1] ?? null),
-)
-const hasSalesData = computed(
-  () =>
-    months.value.length > 0 &&
-    (countData.value.some((value) => value !== null) ||
-      weightData.value.some((value) => value !== null)),
 )
 const hasOrderData = computed(
   () => months.value.length > 0 && orderData.value.some((value) => value !== null),
@@ -206,14 +328,6 @@ const cumulativeText = computed(() => {
   if (!Number.isFinite(value)) return '--'
   return `${Math.round(value).toLocaleString('zh-CN')} 条`
 })
-
-function formatFactorValue(detail) {
-  const value = detail.value
-  if (value === null || value === undefined || value === '') return '--'
-  if (typeof value !== 'number') return String(value)
-  if (!Number.isFinite(value)) return '--'
-  return Number.isInteger(value) ? value.toLocaleString('zh-CN') : value.toFixed(2)
-}
 
 // —— 月度销量统计图 ——
 const chartRef = ref(null)
@@ -249,14 +363,14 @@ function buildChartOption() {
     yAxis: [
       {
         type: 'value',
-        name: '条数',
+        name: '销量(公斤)',
         nameTextStyle: { color: '#65737c', fontSize: 11 },
         splitLine: { lineStyle: { color: '#e1e6e9' } },
         axisLabel: { color: '#65737c', fontSize: 11 },
       },
       {
         type: 'value',
-        name: '重量',
+        name: '条数',
         nameTextStyle: { color: '#c49a52', fontSize: 11 },
         splitLine: { show: false },
         axisLabel: { color: '#c49a52', fontSize: 11 },
@@ -264,27 +378,29 @@ function buildChartOption() {
     ],
     series: [
       {
-        name: '条数',
+        name: '销量(公斤)',
         type: 'bar',
         barMaxWidth: 16,
         itemStyle: { color: '#3f718d', borderRadius: [2, 2, 0, 0] },
-        data: countData.value,
+        data: salesData.value,
       },
       {
-        name: '重量',
+        name: '条数',
         type: 'line',
         yAxisIndex: 1,
         smooth: true,
         symbolSize: 5,
         lineStyle: { width: 2 },
         itemStyle: { color: '#c49a52' },
-        data: weightData.value,
+        data: countData.value,
       },
     ],
   }
 }
 
 // —— 月度订单数统计图（独立实例，与销量图共用按需加载的 echarts） ——
+// 默认折叠：弹窗只显示月度销量图，点箭头才展开订单数图（折叠区用 CSS 高度过渡向下延伸）。
+const orderChartExpanded = ref(false)
 const orderChartRef = ref(null)
 let orderChart = null
 
@@ -389,15 +505,24 @@ async function handleOpened() {
   renderChart()
 }
 
-// 弹窗打开期间销售表才导入完成时，补渲染一次。
-watch([dialogVisible, hasSalesData, hasOrderData], ([isVisible, hasData, hasOrders]) => {
-  if (!isVisible) return
-  if (!hasData && !hasOrders) {
-    disposeChart()
-    return
-  }
-  nextTick(renderChart)
+// 关闭弹窗时立刻回到折叠态：下次打开直接是紧凑形态，不会看到折叠动画。
+// （不依赖 @closed，后台标签页里过渡结束事件可能不触发。）
+watch(dialogVisible, (isVisible) => {
+  if (!isVisible) orderChartExpanded.value = false
 })
+
+// 弹窗打开期间销售表才导入完成、或展开折叠区时，补渲染 / 重算尺寸。
+watch(
+  [dialogVisible, hasSalesData, hasOrderData, orderChartExpanded],
+  ([isVisible, hasData, hasOrders]) => {
+    if (!isVisible) return
+    if (!hasData && !hasOrders) {
+      disposeChart()
+      return
+    }
+    nextTick(renderChart)
+  },
+)
 
 function handleClosed() {
   disposeChart()
@@ -449,13 +574,11 @@ onBeforeUnmount(disposeChart)
       <div class="sku-detail__meta">
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">模式</span>
-          <span class="sku-detail__value">
-            {{ evaluated?.strategy === 'manual' ? `手动·${evaluated?.ruleName}` : evaluated?.ruleName || '未命中模式' }}
-          </span>
+          <span class="sku-detail__value">{{ evaluated?.modeLabel || '未命中模式' }}</span>
         </div>
         <div class="sku-detail__meta-item">
-          <span class="sku-detail__label">评分档</span>
-          <span class="sku-detail__value">{{ evaluated?.strategySlow ? '滞销' : evaluated?.tierName || '--' }}</span>
+          <span class="sku-detail__label">加权月销量</span>
+          <span class="sku-detail__value">{{ monthlySalesText }}</span>
         </div>
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">系数（红 / 正 / 峰）</span>
@@ -464,6 +587,56 @@ onBeforeUnmount(disposeChart)
         <div class="sku-detail__meta-item">
           <span class="sku-detail__label">累积条数</span>
           <span class="sku-detail__value">{{ cumulativeText }}</span>
+        </div>
+      </div>
+
+      <h4 class="sku-detail__section">
+        健康度评分
+        <span v-if="scoring?.participates" class="sku-detail__section-hint">
+          {{
+            scoring.mode === 'bulk'
+              ? '按量模式 · 2 项判定'
+              : `5 维加权 · 参与权重 ${scoring.weightTotal}%`
+          }}
+        </span>
+      </h4>
+      <div v-if="scoring && !scoring.participates" class="sku-detail__empty">
+        该 SKU 不参与备货计算，不做健康度评分
+      </div>
+      <div v-else-if="scoring" class="sku-score">
+        <div
+          v-if="scoring.mode !== 'bulk'"
+          class="sku-score__total"
+          :class="`sku-score__tone--${scoring.tone}`"
+        >
+          <span class="sku-score__total-label">综合评分</span>
+          <strong class="sku-score__total-value">{{ scoring.totalText }}</strong>
+          <span class="sku-score__badge">{{ scoring.toneLabel }}</span>
+          <span v-if="scoring.missing" class="sku-score__total-hint">
+            {{ scoring.missing }} 项无数据，按其余维度权重折算
+          </span>
+        </div>
+        <div class="sku-score__grid" :class="{ 'sku-score__grid--bulk': scoring.mode === 'bulk' }">
+          <div
+            v-for="dimension in scoring.dimensions"
+            :key="dimension.key"
+            class="sku-score__card"
+            :class="`sku-score__tone--${dimension.tone}`"
+            :title="scoringDimensionTitle(dimension)"
+          >
+            <span class="sku-score__label">{{ dimension.label }}</span>
+            <div class="sku-score__main">
+              <strong class="sku-score__score">
+                {{ scoring.mode === 'bulk' ? dimension.valueText : dimension.scoreText }}
+              </strong>
+              <span class="sku-score__tier">{{ dimension.tierLabel }}</span>
+            </div>
+            <span v-if="scoring.mode === 'bulk'" class="sku-score__rule">{{ dimension.ruleText }}</span>
+            <template v-else>
+              <span class="sku-score__value">{{ dimension.valueText }}</span>
+              <span class="sku-score__weight">权重 {{ dimension.weightText }}</span>
+            </template>
+          </div>
         </div>
       </div>
 
@@ -487,6 +660,39 @@ onBeforeUnmount(disposeChart)
             <span v-if="selectedManualMode?.description" class="sku-detail__manual-hint">
               {{ selectedManualMode.description }}
             </span>
+          </div>
+
+          <div v-if="isOrderMode" class="sku-detail__orders">
+            <div class="sku-detail__orders-head">
+              <span class="sku-detail__manual-label">订单</span>
+              <ElButton size="small" text type="primary" @click="addOrderRow">
+                ＋ 添加订单
+              </ElButton>
+            </div>
+            <div
+              v-for="(order, index) in orderDraft"
+              :key="index"
+              class="sku-detail__order-row"
+            >
+              <ElInput v-model="order.name" size="small" placeholder="订单名" aria-label="订单名" />
+              <ElInput v-model="order.factory" size="small" placeholder="订单厂家" aria-label="订单厂家" />
+              <ElInputNumber
+                v-model="order.quantity"
+                :min="0"
+                :controls="false"
+                size="small"
+                class="sku-detail__order-quantity"
+                placeholder="数量"
+                aria-label="数量"
+              />
+              <ElInput v-model="order.note" size="small" placeholder="备注（可选）" aria-label="备注" />
+              <ElButton size="small" text type="danger" @click="removeOrderRow(index)">
+                删除
+              </ElButton>
+            </div>
+            <p v-if="!orderDraft.length" class="sku-detail__manual-hint">
+              还没有订单，点「添加订单」记录订单名 / 厂家 / 数量 / 备注。
+            </p>
           </div>
 
           <div v-if="isCustomMode" class="sku-detail__manual-row">
@@ -544,27 +750,6 @@ onBeforeUnmount(disposeChart)
       </template>
 
       <h4 class="sku-detail__section">
-        评分因子
-        <span v-if="evaluated?.gradeSummary" class="sku-detail__section-hint">
-          等级明细 {{ evaluated.gradeSummary }}
-        </span>
-      </h4>
-      <div v-if="gradeDetails.length" class="sku-factor-row">
-        <div
-          v-for="detail in gradeDetails"
-          :key="detail.field"
-          class="sku-factor"
-          :class="`sku-factor--${detail.grade.toLowerCase()}`"
-          :title="`${detail.label}：${formatFactorValue(detail)} → ${detail.grade}`"
-        >
-          <span class="sku-factor__label">{{ detail.label }}</span>
-          <strong class="sku-factor__grade">{{ detail.grade }}</strong>
-          <span class="sku-factor__value">{{ formatFactorValue(detail) }}</span>
-        </div>
-      </div>
-      <div v-else class="sku-detail__empty">当前模式没有配置评分因子</div>
-
-      <h4 class="sku-detail__section">
         月度销量
         <span v-if="months.length" class="sku-detail__section-hint">
           销售表 {{ months[0] }}-{{ months[months.length - 1] }}月
@@ -579,19 +764,33 @@ onBeforeUnmount(disposeChart)
         }}
       </div>
 
-      <h4 class="sku-detail__section">
-        月度订单数
-        <span v-if="months.length" class="sku-detail__section-hint">
-          销售表 {{ months[0] }}-{{ months[months.length - 1] }}月
-        </span>
-      </h4>
-      <div v-if="hasOrderData" ref="orderChartRef" class="sku-detail__chart sku-detail__chart--compact"></div>
-      <div v-else class="sku-detail__empty">
-        {{
-          salesSheet
-            ? '销售表未包含“N月订单数”列（用最新清洗脚本重新导出即可）'
-            : '尚未导入销售表，暂无月度订单数'
-        }}
+      <button
+        type="button"
+        class="sku-detail__collapse"
+        :aria-expanded="orderChartExpanded"
+        @click="orderChartExpanded = !orderChartExpanded"
+      >
+        <span class="sku-detail__collapse-line" aria-hidden="true"></span>
+        <span class="sku-detail__collapse-label">月度订单数</span>
+        <span
+          class="sku-detail__collapse-arrow"
+          :class="{ 'is-open': orderChartExpanded }"
+          aria-hidden="true"
+        ></span>
+        <span class="sku-detail__collapse-line" aria-hidden="true"></span>
+      </button>
+
+      <div class="sku-detail__collapse-body" :class="{ 'is-open': orderChartExpanded }">
+        <div class="sku-detail__collapse-inner">
+          <div v-if="hasOrderData" ref="orderChartRef" class="sku-detail__chart sku-detail__chart--compact"></div>
+          <div v-else class="sku-detail__empty">
+            {{
+              salesSheet
+                ? '销售表未包含“N月订单数”列（用最新清洗脚本重新导出即可）'
+                : '尚未导入销售表，暂无月度订单数'
+            }}
+          </div>
+        </div>
       </div>
     </div>
   </ElDialog>
@@ -613,10 +812,11 @@ onBeforeUnmount(disposeChart)
   flex-direction: column;
 }
 
-/* 内容高于视口时只让正文滚动，标题栏与关闭按钮始终可见 */
+/* 内容高于视口时只让正文滚动，标题栏与关闭按钮始终可见；横向不出现滚动条 */
 :global(.sku-detail-dialog .el-dialog__body) {
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .sku-detail__header {
@@ -737,6 +937,30 @@ onBeforeUnmount(disposeChart)
   justify-content: flex-end;
 }
 
+/* 订单货：一个 SKU 可以挂多张订单，每行四列 + 删除 */
+.sku-detail__orders {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sku-detail__orders-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sku-detail__order-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 72px minmax(0, 1.2fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.sku-detail__order-quantity {
+  width: 100%;
+}
+
 .sku-detail__coefficient {
   display: inline-flex;
   align-items: center;
@@ -797,75 +1021,138 @@ onBeforeUnmount(disposeChart)
   letter-spacing: 1px;
 }
 
-.sku-factor-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+/* 健康度评分：5 张维度小卡 + 1 条综合评分，红 / 黄 / 绿三档背景；
+   按量模式改为 2 张判定卡（本次进销比 / 累积客户数），不显示综合评分 */
+.sku-score {
   margin-bottom: 18px;
 }
 
-.sku-factor {
+.sku-score__tone--red {
+  --sku-score-color: var(--industrial-urgent);
+  --sku-score-bg: rgba(184, 79, 72, 0.08);
+  --sku-score-border: rgba(184, 79, 72, 0.4);
+}
+
+.sku-score__tone--yellow {
+  --sku-score-color: var(--industrial-replenish);
+  --sku-score-bg: rgba(196, 154, 82, 0.1);
+  --sku-score-border: rgba(196, 154, 82, 0.45);
+}
+
+.sku-score__tone--green {
+  --sku-score-color: var(--industrial-normal);
+  --sku-score-bg: rgba(130, 154, 133, 0.1);
+  --sku-score-border: rgba(130, 154, 133, 0.45);
+}
+
+.sku-score__tone--unavailable {
+  --sku-score-color: var(--industrial-muted);
+  --sku-score-bg: #f0f3f5;
+  --sku-score-border: var(--industrial-grid-light);
+}
+
+.sku-score__total {
   display: flex;
-  flex: 1 1 96px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  min-width: 96px;
-  padding: 10px 8px 8px;
-  background: #fff;
-  border: 1px solid var(--industrial-grid-light);
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 9px 12px;
+  color: var(--sku-score-color);
+  background: var(--sku-score-bg);
+  border: 1px solid var(--sku-score-border);
   border-radius: 6px;
 }
 
-.sku-factor__label {
+.sku-score__total-label {
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.sku-score__total-value {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.sku-score__badge {
+  padding: 1px 8px;
+  color: #fff;
+  background: var(--sku-score-color);
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.sku-score__total-hint {
+  margin-left: auto;
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.sku-score__grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.sku-score__grid--bulk {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.sku-score__card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+  color: var(--sku-score-color);
+  background: var(--sku-score-bg);
+  border: 1px solid var(--sku-score-border);
+  border-radius: 6px;
+}
+
+.sku-score__label {
   overflow: hidden;
-  max-width: 100%;
   color: var(--industrial-muted);
   font-size: 11px;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.sku-factor__grade {
-  font-size: 34px;
-  font-weight: 700;
-  line-height: 1.1;
-  letter-spacing: 1px;
+.sku-score__main {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
 }
 
-.sku-factor__value {
-  color: var(--industrial-muted);
+.sku-score__score {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.sku-score__tier {
   font-size: 11px;
 }
 
-.sku-factor--s {
-  color: var(--industrial-urgent);
-  border-color: rgba(184, 79, 72, 0.45);
-  background: rgba(184, 79, 72, 0.07);
+.sku-score__value {
+  overflow: hidden;
+  color: var(--industrial-text);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.sku-factor--a {
-  color: var(--industrial-replenish);
-  border-color: rgba(196, 154, 82, 0.5);
-  background: rgba(196, 154, 82, 0.08);
-}
-
-.sku-factor--b {
-  color: var(--industrial-primary);
-  border-color: rgba(63, 113, 141, 0.45);
-  background: rgba(63, 113, 141, 0.07);
-}
-
-.sku-factor--c {
-  color: var(--industrial-normal);
-  border-color: rgba(130, 154, 133, 0.5);
-  background: rgba(130, 154, 133, 0.08);
-}
-
-.sku-factor--z {
+.sku-score__weight {
   color: var(--industrial-muted);
-  background: #f0f3f5;
+  font-size: 10px;
+}
+
+/* 按量模式的判定规则文案（低于 40% 低风险 / 40% ~ 60% 正常 / 高于 60% 高风险 …） */
+.sku-score__rule {
+  color: var(--industrial-muted);
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 .sku-detail__chart {
@@ -873,8 +1160,83 @@ onBeforeUnmount(disposeChart)
   height: 220px;
 }
 
+.sku-detail__chart-note {
+  margin: 6px 0 0;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: right;
+}
+
 .sku-detail__chart--compact {
   height: 180px;
+  margin-top: 8px;
+}
+
+/* 月度订单数默认折叠：居中的「月度订单数 + 箭头」分隔行，点击展开 */
+.sku-detail__collapse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  margin: 6px 0 0;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: var(--industrial-muted);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sku-detail__collapse:hover {
+  color: var(--industrial-primary);
+}
+
+.sku-detail__collapse-line {
+  flex: 1 1 auto;
+  min-width: 8px;
+  height: 0;
+  border-top: 1px dashed var(--industrial-grid-light);
+}
+
+.sku-detail__collapse-label {
+  flex: 0 0 auto;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.sku-detail__collapse-arrow {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform 0.2s ease;
+}
+
+.sku-detail__collapse-arrow.is-open {
+  transform: rotate(225deg) translateY(-1px);
+}
+
+/* 展开区：grid 行高 0fr → 1fr 过渡，弹窗跟着向下延伸 */
+.sku-detail__collapse-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s ease;
+}
+
+.sku-detail__collapse-body.is-open {
+  grid-template-rows: 1fr;
+}
+
+.sku-detail__collapse-inner {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .sku-detail__empty {

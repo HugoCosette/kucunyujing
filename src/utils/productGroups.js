@@ -5,7 +5,7 @@ export const PRODUCT_SUMMARY_FIELDS = [
   'planned',
   'producing',
   'backorder',
-  'weeklyUsage',
+  'weeklySales',
   'warehouseStock',
   'turnoverIn',
   'inTransitStock',
@@ -20,38 +20,49 @@ function sumField(rows, field) {
     return rows.reduce((total, row) => total + (row[field] ?? 0), 0)
   }
 
-  return rows.every((row) => Number.isFinite(row[field]))
-    ? rows.reduce((total, row) => total + row[field], 0)
-    : null
+  // 汇总只看有数据的子行：缺省行跳过，不因为一个子行无数据就让整行变缺省。
+  const values = rows
+    .map((row) => row[field])
+    .filter((value) => Number.isFinite(value))
+  return values.length ? values.reduce((total, value) => total + value, 0) : null
 }
 
 function createProductSummary(allRows) {
-  // 滞销 SKU 不参与备货，父行汇总时直接排除，避免把"不打算备货"的量算进备货基线。
-  const rows = allRows.filter((row) => !row.strategySlow)
-  const strategyAvailable = rows.length > 0 && rows.every((row) => row.strategyAvailable)
   const summary = Object.fromEntries(
-    PRODUCT_SUMMARY_FIELDS.map((field) => [field, sumField(rows, field)]),
+    PRODUCT_SUMMARY_FIELDS.map((field) => [field, sumField(allRows, field)]),
   )
 
   for (const field of strategyFields) {
-    summary[field] = strategyAvailable ? sumField(rows, field) : null
+    summary[field] = sumField(allRows, field)
   }
+
+  // 日库销比由「汇总库存条数 ÷ 汇总日销量」还原，和子行同一口径。
+  const projectedUnits = sumField(allRows, 'projectedUnits')
+  const dailySales = sumField(allRows, 'dailySales')
+  let daysOfStock = null
+  if (projectedUnits !== null) {
+    daysOfStock = dailySales > 0 ? projectedUnits / dailySales : Number.POSITIVE_INFINITY
+  }
+
+  const countedRows = allRows.filter((row) => row.strategyAvailable)
+  const strategyAvailable = countedRows.length > 0
 
   return {
     ...summary,
     redLineFactor: null,
     normalFactor: null,
     peakFactor: null,
+    daysOfStock,
     shortageRate:
-      !strategyAvailable || summary.normalStock === 0
+      !strategyAvailable || !summary.normalStock
         ? null
         : (summary.shortage / summary.normalStock) * 100,
-    stockSalesRatio:
-      summary.weeklyUsage === 0 ? null : summary.warehouseStock / summary.weeklyUsage,
     strategyAvailable,
     strategyIssue: '',
     strategyIssueShort: '',
-    strategySlow: rows.length === 0 && allRows.length > 0,
+    // 整个品名下的 SKU 全部不参与计算时，父行也不参与。
+    excluded: allRows.length > 0 && countedRows.length === 0,
+    exclusive: false,
     urgencyText: '',
     urgencyTone: '',
   }
@@ -71,7 +82,10 @@ export function toQuantityValue(value) {
 // 单元格是否可参与数量汇总：空/占位或数字都接受，文本列会被排除。
 // 销售表 SPU 汇总：按品名把同一品名的行聚成一个父行，父行只填品名与数量列合计，
 // 颜色等文本列留空，与主面板父行的展示口径一致。
-export function groupTableRowsByProduct(rows, { productIndex, quantityIndexes, columnCount }) {
+export function groupTableRowsByProduct(
+  rows,
+  { productIndex, quantityIndexes, ratioColumns = [], columnCount },
+) {
   const groupsByProduct = new Map()
   const groups = []
 
@@ -99,9 +113,13 @@ export function groupTableRowsByProduct(rows, { productIndex, quantityIndexes, c
     group.children.push(row)
   }
 
+  const ratioIndexes = new Set(ratioColumns.map((entry) => entry.index))
+
   for (const group of groups) {
     if (!group.isProductGroup) continue
     for (const index of quantityIndexes) {
+      // 比例列不能直接相加，下面单独按权重列聚合。
+      if (ratioIndexes.has(index)) continue
       let total = 0
       let hasValue = false
       for (const child of group.children) {
@@ -111,6 +129,29 @@ export function groupTableRowsByProduct(rows, { productIndex, quantityIndexes, c
         hasValue = true
       }
       if (hasValue) group.cells[index] = formatQuantity(total)
+    }
+
+    // 比例列（客户CR5率）：按权重列（累积条数）加权平均；
+    // 权重全缺失时退回算术平均，两者都拿不到值就保持空白。
+    for (const { index, weightIndex } of ratioColumns) {
+      if (!Number.isInteger(index) || index < 0) continue
+      let weightedSum = 0
+      let weightTotal = 0
+      let plainSum = 0
+      let count = 0
+      for (const child of group.children) {
+        const value = toQuantityValue(child.cells[index])
+        if (value === null) continue
+        plainSum += value
+        count += 1
+        const weight = weightIndex >= 0 ? toQuantityValue(child.cells[weightIndex]) : null
+        if (weight !== null && weight > 0) {
+          weightedSum += value * weight
+          weightTotal += weight
+        }
+      }
+      if (weightTotal > 0) group.cells[index] = Number((weightedSum / weightTotal).toFixed(4))
+      else if (count > 0) group.cells[index] = Number((plainSum / count).toFixed(4))
     }
   }
 
@@ -132,10 +173,9 @@ export function groupRowsByProduct(rows) {
       color: '',
       category: '',
       skuId: '',
-      ruleName: '',
-      tierName: '',
-      gradeSummary: '',
-      ruleConflict: false,
+      modeKey: '',
+      modeName: '',
+      modeLabel: '',
       isProductGroup: true,
       children,
     })

@@ -29,9 +29,16 @@ import {
   formatQuantity,
   formatRate,
   formatRatio,
+  getSuggestedPlanned,
 } from '@/utils/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
-import { createEvaluator, evaluateItem } from '@/stocking'
+import {
+  createEvaluator,
+  describeSpuGradeThresholds,
+  evaluateItem,
+  normalizeSpuGrades,
+  resolveSpuGrade,
+} from '@/stocking'
 import { IMPORT_TEMPLATE_COLUMNS, IMPORT_TEMPLATE_SAMPLE_ROWS } from '@/utils/inventoryImport'
 
 const props = defineProps({
@@ -42,11 +49,22 @@ const props = defineProps({
 })
 
 const inventoryStore = useInventoryStore(props.panelKey)
-// 备货配置全应用唯一：模式判定、评分分档与系数都按这份配置计算。
+// 备货配置全应用唯一：模式判定与系数都按这份配置计算。
 const stockingStore = useStockingConfigStore()
+// 「近 N 个月」的基准月：数据里最后一个有销量的月份（导入时算好存在 salesSheet 上）。
+const baselineMonth = computed(() => {
+  const month = inventoryStore.salesSheet?.baselineMonth
+  return Number.isFinite(month) && month > 0 ? month : null
+})
 const stockingEvaluator = computed(() =>
-  createEvaluator(stockingStore.config, { manualOverrides: stockingStore.manualOverrides }),
+  createEvaluator(stockingStore.config, {
+    manualOverrides: stockingStore.manualOverrides,
+    baselineMonth: baselineMonth.value,
+  }),
 )
+// SPU 等级只按「该品名全部 SKU 的月均条数合计」判定，与备货模式 / 系数无关，改配置立刻生效。
+const spuGrades = computed(() => normalizeSpuGrades(stockingStore.config.spuGrades))
+const spuGradeThresholds = computed(() => describeSpuGradeThresholds(spuGrades.value))
 const inventoryItems = inventoryStore.inventoryItems
 const purchaseList = inventoryStore.purchaseList
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
@@ -63,8 +81,7 @@ const purchaseListRows = computed(() =>
 const plannedDrafts = reactive({})
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const selectedWarningTones = ref([])
-const selectedRuleNames = ref([])
-const selectedTierNames = ref([])
+const selectedModeLabels = ref([])
 const productFilter = ref('')
 const colorFilter = ref('')
 const expandingProductKeys = ref(new Set())
@@ -159,7 +176,7 @@ const itemById = computed(() => {
 })
 
 function buildLeafRow(item) {
-  // 模式 / 评分档 / 系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
+  // 模式与系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
   const row = calculateInventoryRow(evaluateItem(item, stockingEvaluator.value))
   return {
     ...row,
@@ -169,16 +186,45 @@ function buildLeafRow(item) {
 }
 
 const inventoryLeafRows = shallowRef([])
+// 每个品名的月均条数合计（含该品名全部 SKU）：SPU 等级按它判定，不随筛选变化。
+const productMonthlyTotals = shallowRef(new Map())
 const leafRowIndexById = new Map()
 
-// 模式 / 评分档筛选项取当前数据里实际出现的名称，配置改动后自动跟随。
-const ruleOptions = computed(() =>
-  [...new Set(inventoryLeafRows.value.map((row) => row.ruleName).filter(Boolean))].sort(
-    (first, second) => productCollator.compare(first, second),
-  ),
-)
-const tierOptions = computed(() =>
-  [...new Set(inventoryLeafRows.value.map((row) => row.tierName).filter(Boolean))].sort(
+// 模式列悬停说明：该模式怎么比较、为什么可能不参与计算。
+function modeTitle(row) {
+  if (!row) return ''
+  if (row.strategy === 'manual') {
+    const orders = row.manualOrders ?? []
+    if (!orders.length) return `手动策略 · ${row.modeLabel}`
+    const lines = orders.map((order) =>
+      [
+        order.name || '未命名订单',
+        order.factory ? `厂家：${order.factory}` : '',
+        Number.isFinite(order.quantity) ? `数量：${order.quantity}` : '',
+        order.note ? `备注：${order.note}` : '',
+      ]
+        .filter(Boolean)
+        .join(' / '),
+    )
+    return [`手动策略 · ${row.modeLabel}`, ...lines].join('\n')
+  }
+  if (row.exclusive) return `${row.modeLabel}：累计客户为 1，不参与备货计算`
+  if (!row.modeParticipates) return `${row.modeLabel}：不参与备货计算，仅做标注`
+  return row.modeMetric === 'days'
+    ? `${row.modeLabel}：按日库销比（天）比较`
+    : `${row.modeLabel}：按库存条数比较`
+}
+
+// SPU 汇总行的模式列：展示等级，并说明月均条数合计与命中的区间。
+function spuGradeTitle(row) {
+  if (!row?.spuGrade) return `${row?.product ?? '该品名'}：没有月均条数，无法分级`
+  const threshold = spuGradeThresholds.value[row.spuGrade.key] ?? ''
+  return `SPU 等级 ${row.spuGrade.label}：全部 SKU 月均合计 ${formatQuantity(row.spuMonthlyAvg)} 条（${threshold}）`
+}
+
+// 模式筛选项取当前数据里实际出现的模式标签（含「热销·专属品」这类标记），配置改动后自动跟随。
+const modeOptions = computed(() =>
+  [...new Set(inventoryLeafRows.value.map((row) => row.modeLabel).filter(Boolean))].sort(
     (first, second) => productCollator.compare(first, second),
   ),
 )
@@ -187,12 +233,19 @@ function rebuildLeafRows() {
   const rows = inventoryItems.map((item) => buildLeafRow(item))
   // 按品名聚合月均条数，品名按聚合值降序排列；同品名内按月均条数降序，再按颜色。
   const productMonthlyAvg = new Map()
+  // SPU 等级用的合计：整个品名都没有月均值时记 null，界面显示「—」而不是硬判 Z。
+  const monthlyTotals = new Map()
   for (const row of rows) {
     productMonthlyAvg.set(row.product, (productMonthlyAvg.get(row.product) ?? 0) + (row.monthlyAvgCount ?? 0))
+    if (Number.isFinite(row.monthlyAvgCount)) {
+      monthlyTotals.set(row.product, (monthlyTotals.get(row.product) ?? 0) + row.monthlyAvgCount)
+    } else if (!monthlyTotals.has(row.product)) {
+      monthlyTotals.set(row.product, null)
+    }
   }
   rows.sort((first, second) => {
-    // 滞销品不参与备货排名，统一沉到列表末尾。
-    const slowDiff = Number(Boolean(first.strategySlow)) - Number(Boolean(second.strategySlow))
+    // 尾货 / 滞销 / 专属品不参与备货排名，统一沉到列表末尾。
+    const slowDiff = Number(Boolean(first.excluded)) - Number(Boolean(second.excluded))
     if (slowDiff !== 0) return slowDiff
     const productDiff =
       (productMonthlyAvg.get(second.product) ?? 0) - (productMonthlyAvg.get(first.product) ?? 0)
@@ -209,6 +262,7 @@ function rebuildLeafRows() {
   })
   leafRowIndexById.clear()
   rows.forEach((row, index) => leafRowIndexById.set(row.id, index))
+  productMonthlyTotals.value = monthlyTotals
   inventoryLeafRows.value = rows
 }
 
@@ -242,7 +296,7 @@ function refreshLeafRows(ids) {
 rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
-// 备货配置（模式 / 评分档 / 系数）修改后，整表按新配置重算。
+// 备货配置（模式 / 系数）修改后，整表按新配置重算。
 watch(() => stockingStore.config, rebuildLeafRows)
 // 手动清单变化（策略切换、改系数、恢复自动）同样要整表重算。
 watch(() => stockingStore.manual, rebuildLeafRows)
@@ -289,8 +343,7 @@ const hasActiveFilters = computed(
     productFilter.value.trim() !== '' ||
     colorFilter.value.trim() !== '' ||
     selectedWarningTones.value.length > 0 ||
-    selectedRuleNames.value.length > 0 ||
-    selectedTierNames.value.length > 0,
+    selectedModeLabels.value.length > 0,
 )
 
 // 关键词筛选输入防抖，避免大表逐键全量过滤。
@@ -319,32 +372,37 @@ const filteredInventoryLeafRows = computed(() => {
   const product = appliedProductFilter.value
   const color = appliedColorFilter.value
   const tones = selectedWarningTones.value
-  const rules = selectedRuleNames.value
-  const tiers = selectedTierNames.value
-  if (!product && !color && tones.length === 0 && rules.length === 0 && tiers.length === 0) {
+  const modes = selectedModeLabels.value
+  if (!product && !color && tones.length === 0 && modes.length === 0) {
     return inventoryLeafRows.value
   }
 
   const toneSet = tones.length > 0 ? new Set(tones) : null
-  const ruleSet = rules.length > 0 ? new Set(rules) : null
-  const tierSet = tiers.length > 0 ? new Set(tiers) : null
+  const modeSet = modes.length > 0 ? new Set(modes) : null
   return inventoryLeafRows.value.filter(
     (row) =>
       (!product || row.searchProduct.includes(product)) &&
       (!color || row.searchColor.includes(color)) &&
       (!toneSet || toneSet.has(row.urgencyTone)) &&
-      (!ruleSet || ruleSet.has(row.ruleName)) &&
-      (!tierSet || tierSet.has(row.tierName)),
+      (!modeSet || modeSet.has(row.modeLabel)),
   )
 })
-const inventoryRows = computed(() => groupRowsByProduct(filteredInventoryLeafRows.value))
+const inventoryRows = computed(() => {
+  const groups = groupRowsByProduct(filteredInventoryLeafRows.value)
+  const totals = productMonthlyTotals.value
+  const grades = spuGrades.value
+  return groups.map((group) => {
+    if (!group.isProductGroup) return group
+    const spuMonthlyAvg = totals.get(group.product) ?? null
+    return { ...group, spuMonthlyAvg, spuGrade: resolveSpuGrade(spuMonthlyAvg, grades) }
+  })
+})
 
 function resetFilters() {
   productFilter.value = ''
   colorFilter.value = ''
   selectedWarningTones.value = []
-  selectedRuleNames.value = []
-  selectedTierNames.value = []
+  selectedModeLabels.value = []
 }
 
 function toggleWarningFilter(key) {
@@ -427,22 +485,21 @@ const TABLE_COLUMNS = [
   // 批量补货勾选列：表头是全选（作用于当前筛选结果），品名父行勾选连带其下所有 SKU。
   { key: 'select', label: '选择', width: 44, group: '选择' },
   { key: 'rule', label: '模式', width: 96, group: '信息' },
-  { key: 'tier', label: '评分档', width: 84, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
   { key: 'color', label: '颜色', width: 132, group: '商品' },
   { key: 'urgency', label: '预警', width: 44, group: '商品' },
   { key: 'planned', label: '需安排', width: 142, group: '入口' },
   { key: 'producing', label: '生产中', width: 76, group: '入口' },
   { key: 'backorder', label: '欠货', width: 68, group: '出口' },
-  { key: 'weeklyUsage', label: '周消耗', width: 76, group: '出口' },
-  { key: 'turnoverIn', label: '周转入', width: 74, group: '库存' },
-  { key: 'inTransitStock', label: '在途库存', width: 84, group: '库存' },
-  { key: 'warehouseStock', label: '在仓库存', width: 84, group: '库存' },
-  { key: 'theoreticalStock', label: '理论库存', width: 84, group: '库存' },
-  { key: 'projectedStock', label: '预计库存', width: 84, group: '库存' },
+  { key: 'weeklySales', label: '周销量', width: 76, group: '出口' },
+  { key: 'turnoverIn', label: '周转入', width: 74, group: '库存(公斤)' },
+  { key: 'inTransitStock', label: '在途库存', width: 84, group: '库存(公斤)' },
+  { key: 'warehouseStock', label: '在仓库存', width: 84, group: '库存(公斤)' },
+  { key: 'theoreticalStock', label: '理论库存', width: 84, group: '库存(公斤)' },
+  { key: 'projectedStock', label: '预计库存', width: 84, group: '库存(公斤)' },
+  { key: 'daysOfStock', label: '日库销比', width: 80, group: '数据反馈' },
   { key: 'shortage', label: '缺口量', width: 72, group: '数据反馈' },
   { key: 'shortageRate', label: '缺口率', width: 76, group: '数据反馈' },
-  { key: 'stockSalesRatio', label: '库销比', width: 68, group: '数据反馈' },
 ]
 // 各列按自身宽度分配剩余空间，始终铺满可用宽度，避免右侧出现空列
 const tableGridTemplate = TABLE_COLUMNS.map(
@@ -540,7 +597,7 @@ function openUrgentPlanDialog() {
     color: row.color,
     currentPlanned: row.planned ?? 0,
     additionalPlan: 0,
-    recommendedPlan: Math.max(0, Math.ceil(row.normalStock * 0.8 - row.projectedStock)),
+    recommendedPlan: Math.max(0, Math.ceil(row.normalStock - row.projectedStock)),
   }))
   urgentPlanDialogVisible.value = true
 }
@@ -625,17 +682,7 @@ function getPlannedDraft(row) {
   return hasPlannedDraft(row.id) ? plannedDrafts[row.id] : row.planned
 }
 
-// 需安排建议值：补到“正常库存 80% 下限”的差额（基于理论库存，采纳后叠加为预计库存）。
-// 批量补货的默认数量与单行占位保持同一口径。
-function getSuggestedPlanned(row) {
-  if (!row.strategyAvailable) return row.planned ?? 0
-  return Math.max(
-    row.planned ?? 0,
-    0,
-    Math.ceil(row.normalStock * 0.8 - row.theoreticalStock),
-  )
-}
-
+// 需安排建议值：补到绿色带中位（正常库存）的差额，基于理论库存；批量补货的默认数量与单行占位同一口径。
 function getPlannedPlaceholder(row) {
   if (!row.strategyAvailable) return ''
   return `${formatQuantity(getSuggestedPlanned(row))}`
@@ -646,7 +693,8 @@ function getPlannedPlaceholderTitle(row) {
     return `备货模式缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
   }
 
-  return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存的 80% 下限；该建议不会自动采纳`}
+  return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存（绿色带中位）；该建议不会自动采纳`
+}
 
 function updatePlannedDraft(id, value) {
   if (Reflect.has(plannedUndoHistory, id)) return
@@ -954,11 +1002,12 @@ function createExcelCell(value, reference, styleIndex = 0) {
 
 function exportInventoryToExcel() {
   const columnGroups = [
-    { label: '信息', columns: ['唯一标识', '模式', '评分档', '等级', '色彩'] },    { label: '商品', columns: ['品名', '颜色', '预警'] },
+    { label: '信息', columns: ['唯一标识', '模式', '色彩'] },
+    { label: '商品', columns: ['品名', '颜色', '预警'] },
     { label: '入口', columns: ['需安排', '生产中'] },
-    { label: '出口', columns: ['欠货', '周消耗'] },
-    { label: '库存', columns: ['周转入', '在途库存', '在仓库存', '理论库存', '预计库存'] },
-    { label: '数据反馈', columns: ['缺口量', '缺口率', '库销比'] },
+    { label: '出口', columns: ['欠货', '周销量'] },
+    { label: '库存(公斤)', columns: ['周转入', '在途库存', '在仓库存', '理论库存', '预计库存'] },
+    { label: '数据反馈', columns: ['日库销比', '缺口量', '缺口率'] },
     { label: '备货策略', columns: ['红线库存', '正常库存', '峰值库存', '系数'] },
   ]
   const groupHeaders = []
@@ -977,24 +1026,23 @@ function exportInventoryToExcel() {
   const headers = columnGroups.flatMap(({ columns }) => columns)
   const data = inventoryLeafRows.value.map((row) => [
     row.skuId,
-    row.strategy === 'manual' ? `手动·${row.ruleName}` : row.ruleName,
-    row.strategySlow ? '滞销' : row.tierName,
-    row.strategy === 'manual' ? '' : row.gradeSummary,
-    row.category,    row.product,
+    row.modeLabel,
+    row.category,
+    row.product,
     row.color,
     row.urgencyText,
     row.planned,
     row.producing,
     row.backorder,
-    row.weeklyUsage,
+    row.weeklySales,
     row.turnoverIn,
     row.inTransitStock,
     row.warehouseStock,
     row.theoreticalStock,
     row.projectedStock,
-    row.shortage ?? '缺省',
-    formatRate(row.shortageRate, row.strategyAvailable),
-    formatRatio(row.stockSalesRatio),
+    row.excluded ? '—' : formatRatio(row.daysOfStock),
+    row.excluded ? '—' : row.shortage ?? '缺省',
+    row.excluded ? '—' : formatRate(row.shortageRate, row.strategyAvailable),
     row.redLineStock ?? '缺省',
     row.normalStock ?? '缺省',
     row.peakStock ?? '缺省',
@@ -1278,7 +1326,7 @@ function downloadImportTemplate() {
           clearable
         />
         <ElSelect
-          v-model="selectedRuleNames"
+          v-model="selectedModeLabels"
           class="text-filter"
           multiple
           collapse-tags
@@ -1286,18 +1334,7 @@ function downloadImportTemplate() {
           placeholder="按模式筛选"
           aria-label="按模式筛选"
         >
-          <ElOption v-for="name in ruleOptions" :key="name" :label="name" :value="name" />
-        </ElSelect>
-        <ElSelect
-          v-model="selectedTierNames"
-          class="text-filter"
-          multiple
-          collapse-tags
-          clearable
-          placeholder="按评分档筛选"
-          aria-label="按评分档筛选"
-        >
-          <ElOption v-for="name in tierOptions" :key="name" :label="name" :value="name" />
+          <ElOption v-for="name in modeOptions" :key="name" :label="name" :value="name" />
         </ElSelect>
         <div class="warning-filters" role="group" aria-label="按预警状态筛选">
           <button
@@ -1465,35 +1502,22 @@ function downloadImportTemplate() {
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
                 <span
-                  v-if="!row.isProductGroup && row.ruleName"
+                  v-if="row.isProductGroup"
+                  class="spu-grade"
+                  :class="row.spuGrade ? `spu-grade--${row.spuGrade.tone}` : 'spu-grade--empty'"
+                  :title="spuGradeTitle(row)"
+                >
+                  {{ row.spuGrade?.label ?? '—' }}
+                </span>
+                <span
+                  v-else-if="row.modeLabel"
                   class="stocking-text"
                   :class="{
-                    'stocking-text--conflict': row.ruleConflict,
-                    'stocking-text--manual': row.strategy === 'manual',
+                    'stocking-text--manual': row.excluded,
                   }"
-                  :title="
-                    row.ruleConflict
-                      ? '命中多条模式，已按列表中靠前的模式处理，请收窄模式条件'
-                      : row.strategy === 'manual'
-                        ? `手动策略 · ${row.ruleName}`
-                        : row.ruleName
-                  "
+                  :title="modeTitle(row)"
                 >
-                  {{ row.strategy === 'manual' ? `手动·${row.ruleName}` : row.ruleName }}
-                </span>
-              </div>
-              <div class="inventory-vtable__cell inventory-vtable__cell--stocking">
-                <span
-                  v-if="!row.isProductGroup && row.strategySlow"
-                  class="stocking-text stocking-text--manual"
-                  title="滞销模式：不参与备货排名与预警"
-                >滞销</span>
-                <span
-                  v-else-if="!row.isProductGroup && row.tierName"
-                  class="stocking-text"
-                  :title="`等级明细：${row.gradeSummary || '--'}`"
-                >
-                  {{ row.tierName }}
+                  {{ row.modeLabel }}
                 </span>
               </div>
               <div
@@ -1607,7 +1631,7 @@ function downloadImportTemplate() {
                 {{ formatQuantity(row.backorder) }}
               </div>
               <div class="inventory-vtable__cell">
-                {{ formatQuantity(row.weeklyUsage) }}
+                {{ formatQuantity(row.weeklySales) }}
               </div>
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.turnoverIn) }}
@@ -1616,7 +1640,7 @@ function downloadImportTemplate() {
                 {{ formatQuantity(row.inTransitStock) }}
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
-                {{ formatQuantity(row.warehouseStock) }}
+                {{ formatQuantity(row.warehouseKg) }}
               </div>
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.theoreticalStock) }}
@@ -1625,13 +1649,13 @@ function downloadImportTemplate() {
                 {{ formatQuantity(row.projectedStock) }}
               </div>
               <div class="inventory-vtable__cell">
-                {{ row.strategySlow ? '—' : formatQuantity(row.shortage) }}
+                {{ row.excluded ? '—' : formatRatio(row.daysOfStock) }}
               </div>
               <div class="inventory-vtable__cell">
-                {{ row.strategySlow ? '—' : formatRate(row.shortageRate, row.strategyAvailable) }}
+                {{ row.excluded ? '—' : formatQuantity(row.shortage) }}
               </div>
               <div class="inventory-vtable__cell">
-                {{ row.strategySlow ? '—' : formatRatio(row.stockSalesRatio) }}
+                {{ row.excluded ? '—' : formatRate(row.shortageRate, row.strategyAvailable) }}
               </div>
             </div>
           </div>
@@ -1661,7 +1685,7 @@ function downloadImportTemplate() {
       align-center
     >
       <p class="urgent-plan-hint">
-        填写新增计划数量，提交后将累加到主表“需安排”。推荐计划数按补至绿色状态的最低数量计算。
+        填写新增计划数量，提交后将累加到主表“需安排”。推荐计划数按补至绿色带中位（正常库存）的数量计算。
       </p>
       <div class="urgent-plan-table" role="table" aria-label="紧急补货计划">
         <VirtualList
@@ -2605,6 +2629,60 @@ function downloadImportTemplate() {
 
 .stocking-text--manual {
   color: var(--industrial-primary);
+}
+
+/* SPU 汇总行模式列里的等级徽标：字大一点、底色很浅、不描硬边，避免在汇总行里过于抢眼。 */
+.spu-grade {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.spu-grade--violet {
+  color: #6b5a86;
+  background: #f4f1f8;
+}
+
+.spu-grade--red {
+  color: #a64f49;
+  background: #faf2f1;
+}
+
+.spu-grade--amber {
+  color: #8a6a2f;
+  background: #faf6ed;
+}
+
+.spu-grade--blue {
+  color: var(--industrial-primary);
+  background: #f1f5f8;
+}
+
+.spu-grade--green {
+  color: #5b7460;
+  background: #f3f7f4;
+}
+
+.spu-grade--gray {
+  color: var(--industrial-muted);
+  background: #f2f5f6;
+}
+
+.spu-grade--empty {
+  min-width: 0;
+  padding: 0;
+  color: var(--industrial-muted);
+  border-color: transparent;
+  background: none;
+  font-weight: 400;
 }
 
 .inventory-vtable__row--body.product-color-row > .inventory-vtable__cell--product {

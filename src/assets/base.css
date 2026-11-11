@@ -42,3 +42,91 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
 }
+
+/* —— 配置页通用卡片：标题行 + 可折叠内容（配置信息、评分设置、SPU 分级共用）—— */
+.config-card {
+  border: 1px solid var(--industrial-grid);
+  border-radius: 6px;
+  background: var(--industrial-surface);
+}
+
+.config-card + .config-card {
+  margin-top: 10px;
+}
+
+.config-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.config-card--open > .config-card__head {
+  border-bottom: 1px solid var(--industrial-grid-light);
+}
+
+.config-card__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 8px 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.config-card__title {
+  color: var(--industrial-text);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.config-card__summary {
+  overflow: hidden;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.config-card__chevron {
+  color: var(--industrial-muted);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.config-card--open .config-card__chevron {
+  transform: rotate(180deg);
+}
+
+.config-card__spacer {
+  flex: 1 1 auto;
+}
+
+.config-card__body {
+  padding: 10px;
+}
+
+/* 长说明收进 tooltip，页面上只留一个 ⓘ 标记 */
+.config-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 50%;
+  color: var(--industrial-muted);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1;
+  cursor: help;
+}

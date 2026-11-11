@@ -2,8 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ElButton,
-  ElCheckbox,
-  ElDialog,
+  ElDropdown,
+  ElDropdownItem,
+  ElDropdownMenu,
   ElIcon,
   ElInput,
   ElInputNumber,
@@ -17,33 +18,30 @@ import {
 } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 import PanelNavigation from '@/components/PanelNavigation.vue'
-import StockingFieldPicker from '@/components/StockingFieldPicker.vue'
+import ScoringSettings from '@/components/ScoringSettings.vue'
+import SpuGradeSettings from '@/components/SpuGradeSettings.vue'
 import {
-  ALL_GRADES,
-  COMPARE_OPERATORS,
-  buildGradeTiers,
-  calibrateGrades,
-  createDefaultCoefficients,
+  CATEGORIES,
+  COEFFICIENT_KEYS,
+  MODE_METRICS,
+  MANUAL_BEHAVIORS,
+  SALES_WINDOW_DEFAULTS,
+  DEFAULT_MANUAL_MODE_NAMES,
   createDefaultManualMode,
-  createEvaluator,
-  createThresholds,
-  evaluateItem,
+  expandMonthWeights,
   exportConfigFile,
+  findBaselineMonth,
   findDanglingSkuIds,
-  getAutoStrategy,
-  getFieldLabel,
-  getFieldMeta,
-  getManualStrategy,
   importConfigFile,
   normalizeConfig,
+  normalizeScoring,
+  normalizeSpuGrades,
   summarizeEvaluation,
   validateConfig,
 } from '@/stocking'
 import { DEFAULT_PANEL_KEY, getPanelConfigLabel, isExamplePanel } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
-import { groupRowsByProduct } from '@/utils/productGroups'
-import { calculateInventoryRow, formatFactors, formatQuantity } from '@/utils/inventory'
 
 // 主面板与示例配置共用同一份备货配置（src/stocking/config.json），改哪边都一样。
 const props = defineProps({
@@ -53,13 +51,16 @@ const props = defineProps({
   },
 })
 
-const COEFFICIENT_KEYS = [
-  { key: 'redLine', label: '红线' },
-  { key: 'normal', label: '正常' },
-  { key: 'peak', label: '峰值' },
+const WEIGHT_FIELDS = [
+  { key: 'm1', label: '近 1 个月' },
+  { key: 'm3', label: '近 3 个月月均' },
+  { key: 'm12', label: '近 12 个月月均' },
 ]
-const GRADE_KEYS = ['S', 'A', 'B', 'C']
-const CATEGORIES = getFieldMeta('category').options
+
+// 手动模式的行为标签统一从 MANUAL_BEHAVIORS 取，避免多处硬编码。
+const MANUAL_MODE_BEHAVIOR_LABELS = Object.fromEntries(
+  MANUAL_BEHAVIORS.map((behavior) => [behavior.value, behavior.label]),
+)
 
 const inventoryStore = useInventoryStore(props.panelKey)
 const stockingStore = useStockingConfigStore()
@@ -68,41 +69,109 @@ const examplePanel = isExamplePanel(props.panelKey)
 const configLabel = getPanelConfigLabel(props.panelKey)
 const panelDescription = examplePanel
   ? '示例配置：与主面板共用同一份备货配置，仅供对照演示。'
-  : '维护模式、评分与备货系数；修改会写回 src/stocking/config.json。'
+  : '维护模式判定与备货系数；修改会写回 src/stocking/config.json。'
 
 // —— 配置草稿 ——
 const configDraft = ref(normalizeConfig(stockingStore.config))
-// 策略层：自动策略（模式 → 评分档）与手动策略（手动模式 + SKU 清单）。
+// 策略层：自动策略（5 个固定模式）与手动策略（手动模式 + SKU 清单）。
 // 注意：这里直接读 configDraft 的 strategies，不经过 normalizeConfig，
 // 否则每次读取都会生成新对象，v-model 绑定的输入框在失焦时会被重置。
 const activeStrategy = ref('auto')
-const autoStrategy = computed(() =>
-  configDraft.value.strategies?.find((strategy) => strategy.behavior === 'auto') ?? null,
+const autoStrategy = computed(
+  () => configDraft.value.strategies?.find((strategy) => strategy.behavior === 'auto') ?? null,
 )
 const autoModes = computed(() => autoStrategy.value?.modes ?? [])
-const manualStrategy = computed(() =>
-  configDraft.value.strategies?.find((strategy) => strategy.behavior === 'manual') ?? null,
+const manualStrategy = computed(
+  () => configDraft.value.strategies?.find((strategy) => strategy.behavior === 'manual') ?? null,
 )
 const manualModes = computed(() => manualStrategy.value?.modes ?? [])
-const selectedRuleId = ref(autoModes.value[0]?.id ?? '')
-// 模式删除需要二次点击确认，避免误删整条模式。
-const pendingRuleDeleteId = ref('')
-let ruleDeleteTimer = 0
-const configDirty = computed(
+const activeModeKey = ref(autoModes.value[0]?.key ?? '')
+const activeMode = computed(
   () =>
-    JSON.stringify(configDraft.value) !==
-    JSON.stringify(normalizeConfig(stockingStore.config)),
-)
-const validation = computed(() => validateConfig(configDraft.value))
-const activeRule = computed(
-  () =>
-    autoModes.value.find((rule) => rule.id === selectedRuleId.value) ??
+    autoModes.value.find((mode) => mode.key === activeModeKey.value) ??
     autoModes.value[0] ??
     null,
 )
+const configDirty = computed(
+  () =>
+    JSON.stringify(configDraft.value) !== JSON.stringify(normalizeConfig(stockingStore.config)),
+)
+const validation = computed(() => validateConfig(configDraft.value))
+
+// —— 销量权重 ——
+const salesWeights = computed(
+  () => configDraft.value.salesWindow?.weights ?? { ...SALES_WINDOW_DEFAULTS },
+)
+const weightsTotal = computed(
+  () => salesWeights.value.m1 + salesWeights.value.m3 + salesWeights.value.m12,
+)
+const weightsBalanced = computed(() => Math.abs(weightsTotal.value - 1) <= 0.001)
+const monthWeights = computed(() => expandMonthWeights(salesWeights.value))
+// 12 个月权重默认收起，标题行先给一行摘要，展开才看明细。
+const weightsOpen = ref(false)
+
+function formatPercent(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? `${(number * 100).toFixed(2)}%` : '—'
+}
+
+function shortPercent(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? `${Number((number * 100).toFixed(2))}%` : '—'
+}
+
+const weightsSummary = computed(
+  () =>
+    `${shortPercent(salesWeights.value.m1)} / ${shortPercent(salesWeights.value.m3)} / ${shortPercent(salesWeights.value.m12)} · 合计 ${shortPercent(weightsTotal.value)}`,
+)
+const weightsIntro =
+  '加权月销量 = 近 1 个月 × 权重 + 近 3 个月月均 × 权重 + 近 12 个月月均 × 权重；' +
+  '只影响「够卖多少天」的系数比较，不参与模式判定。三档权重之和应为 100%。'
+const strategyIntro = computed(() =>
+  activeStrategy.value === 'auto'
+    ? '自动策略按「月均条数」判定 5 个模式：热销 / 常规 按「够卖多少天」比较系数，按量按库存公斤数比较，尾货 / 滞销 仅标注不参与计算。判定从上一个模式往下依次进行，先命中先归属。'
+    : '手动策略是人对单个 SKU 的长期决定：在 SKU 弹窗里切到手动模式即可加入清单，跨导入与刷新保留，不写进配置方案文件。',
+)
+
+function resetWeights() {
+  beforeStructuralChange()
+  configDraft.value.salesWindow = { weights: { ...SALES_WINDOW_DEFAULTS } }
+}
+
+// —— 健康度评分 ——
+// 评分规则挂在方案里的 config.scoring 上；设置面板（摘要 + 编辑弹窗）整体由 ScoringSettings 组件负责。
+const scoring = computed(() => normalizeScoring(configDraft.value.scoring))
+
+function applyScoring(next) {
+  beforeStructuralChange()
+  configDraft.value.scoring = normalizeScoring(next)
+  ElMessage.success('评分规则已更新，点「确定」后写入配置')
+}
+
+// —— SPU 分级 ——
+// 分级规则挂在 config.spuGrades 上，卡片（摘要 + 编辑弹窗）由 SpuGradeSettings 组件承载。
+const spuGrades = computed(() => normalizeSpuGrades(configDraft.value.spuGrades))
+
+function applySpuGrades(next) {
+  beforeStructuralChange()
+  configDraft.value.spuGrades = normalizeSpuGrades(next)
+  ElMessage.success('SPU 分级已更新，点「确定」后写入配置')
+}
+
+// 每个品名的月均条数合计：只用于卡片里预览各等级命中多少个 SPU。
+const spuMonthlyTotals = computed(() => {
+  const totals = new Map()
+  for (const item of inventoryItems) {
+    if (!Number.isFinite(item.monthlyAvgCount)) {
+      if (!totals.has(item.product)) totals.set(item.product, null)
+      continue
+    }
+    totals.set(item.product, (totals.get(item.product) ?? 0) + item.monthlyAvgCount)
+  }
+  return [...totals.values()]
+})
 
 // —— 配置方案（Profile）——
-// 方案列表与当前方案来自 store；切换方案后草稿整体换成该方案的配置。
 const profiles = computed(() => stockingStore.profiles)
 const activeProfileId = computed(() => stockingStore.activeProfileId)
 const activeProfileName = computed(() => stockingStore.activeProfile?.name ?? '')
@@ -114,7 +183,7 @@ watch(activeProfileId, (profileId) => {
 
 // —— 草稿撤销 / 重做 ——
 // 历史只覆盖「未保存的草稿」：改动前存一份 JSON 快照，连续输入合并成一步，
-// 结构性操作（增删模式 / 档位 / 因子 / 条件）各自单独成步。
+// 结构性操作（改权重、改阈值等）各自单独成步。
 const HISTORY_LIMIT = 50
 const HISTORY_DEBOUNCE = 600
 const undoStack = ref([])
@@ -153,30 +222,32 @@ function commitPendingHistory() {
   baseline = current
 }
 
-// 结构性操作前先提交已有改动，保证“改一个数值 + 删一个档位”是两步。
 function beforeStructuralChange() {
   commitPendingHistory()
 }
 
-watch(configDraft, () => {
-  if (restoringDraft) return
+watch(
+  configDraft,
+  () => {
+    if (restoringDraft) return
 
-  const current = snapshotDraft()
-  if (current === baseline && pendingBase === null) return
-  if (pendingBase === null) pendingBase = baseline
-  pendingHistory.value = true
+    const current = snapshotDraft()
+    if (current === baseline && pendingBase === null) return
+    if (pendingBase === null) pendingBase = baseline
+    pendingHistory.value = true
 
-  if (historyTimer) clearTimeout(historyTimer)
-  historyTimer = window.setTimeout(commitPendingHistory, HISTORY_DEBOUNCE)
-}, { deep: true })
+    if (historyTimer) clearTimeout(historyTimer)
+    historyTimer = window.setTimeout(commitPendingHistory, HISTORY_DEBOUNCE)
+  },
+  { deep: true },
+)
 
 function applySnapshot(json) {
   restoringDraft = true
   configDraft.value = normalizeConfig(JSON.parse(json))
-  if (!autoModes.value.some((rule) => rule.id === selectedRuleId.value)) {
-    selectedRuleId.value = autoModes.value[0]?.id ?? ''
+  if (!autoModes.value.some((mode) => mode.key === activeModeKey.value)) {
+    activeModeKey.value = autoModes.value[0]?.key ?? ''
   }
-  pendingRuleDeleteId.value = ''
   draftVersion.value += 1
   baseline = snapshotDraft()
   pendingBase = null
@@ -240,7 +311,13 @@ function handleHistoryShortcut(event) {
 
 onMounted(() => document.addEventListener('keydown', handleHistoryShortcut))
 
-// 模式/档位的实际命中分布：配置改动后延迟重算，避免逐键全量评估。
+// 「近 N 个月」的基准月：数据里最后一个有销量的月份。
+const baselineMonth = computed(() => {
+  const month = inventoryStore.salesSheet?.baselineMonth
+  return Number.isFinite(month) && month > 0 ? month : findBaselineMonth(inventoryItems)
+})
+
+// 模式命中分布：配置改动后延迟重算，避免逐键全量评估。
 const distribution = ref(null)
 let distributionTimer = 0
 
@@ -250,6 +327,7 @@ function scheduleDistribution() {
     distributionTimer = 0
     distribution.value = summarizeEvaluation(inventoryItems, configDraft.value, {
       manualOverrides: stockingStore.manualOverrides,
+      baselineMonth: baselineMonth.value,
     })
   }, 250)
 }
@@ -260,231 +338,50 @@ scheduleDistribution()
 onBeforeUnmount(() => {
   if (distributionTimer) clearTimeout(distributionTimer)
   if (historyTimer) clearTimeout(historyTimer)
-  if (ruleDeleteTimer) clearTimeout(ruleDeleteTimer)
-  productTransitionTimers.forEach((timer) => clearTimeout(timer))
   document.removeEventListener('keydown', handleHistoryShortcut)
 })
 
-function ruleHitCount(ruleName) {
-  return distribution.value?.ruleCounts.get(ruleName) ?? null
+function modeHitCount(modeKey) {
+  return distribution.value?.counts.get(modeKey) ?? null
 }
 
-function tierHitCount(ruleName, tierName) {
-  return distribution.value?.tierCounts.get(`${ruleName}\u0000${tierName}`) ?? null
+function exclusiveHitCount(modeKey) {
+  return distribution.value?.exclusiveCounts.get(modeKey) ?? null
 }
 
-function factorCountOf(rule) {
-  return rule ? Object.keys(rule.grades).length : 0
+const METRIC_BADGES = { days: '按天数', stock: '按公斤', none: '仅标注' }
+
+function metricBadge(mode) {
+  if (!mode) return ''
+  return METRIC_BADGES[mode.metric] ?? METRIC_BADGES.none
 }
 
-function operatorOptions(field) {
-  const meta = getFieldMeta(field)
-  return meta?.kind === 'number' ? COMPARE_OPERATORS : COMPARE_OPERATORS.slice(2)
+function metricTitle(mode) {
+  if (!mode?.participates) return '该模式不参与计算，只在主面板「模式」列标注'
+  const metric = MODE_METRICS[mode.metric] ?? MODE_METRICS.none
+  return `${metric.hint}（单位：${metric.label}）`
 }
 
-function isEnumField(field) {
-  return getFieldMeta(field)?.kind === 'enum'
+function coefficientUnit(mode) {
+  if (!mode?.participates) return '—'
+  return mode.metric === 'days' ? '天' : '条'
 }
 
-function isTextField(field) {
-  return getFieldMeta(field)?.kind === 'text'
+function coefficientKinds(mode) {
+  if (!mode?.coefficients) return []
+  return Object.keys(mode.coefficients).filter((kind) => mode.coefficients[kind])
 }
 
-function usedFactorFields(rule) {
-  return (rule?.factors ?? []).map((factor) => factor.field)
+function thresholdHint(mode) {
+  if (!mode) return ''
+  const { from, to } = mode.range
+  if (from === null && to === null) return '不限区间：任何月均条数都会归入该模式'
+  if (to === null) return `月均条数 ≥ ${from} 归入该模式（更靠前的模式先命中）`
+  if (from === null) return `月均条数 ≤ ${to} 归入该模式（更靠前的模式先命中）`
+  return `${from} ≤ 月均条数 ≤ ${to} 归入该模式（更靠前的模式先命中）`
 }
 
-function usedGradeFields(rule) {
-  return Object.keys(rule?.grades ?? {})
-}
-
-// —— 模式 ——
-function addRule() {
-  const used = new Set(
-    autoModes.value.filter((rule) => !rule.isDefault).map((rule) => rule.name),
-  )
-  let index = 1
-  while (used.has(`模式${index}`)) index += 1
-
-  const id = `rule-${Date.now().toString(36)}`
-  const rule = {
-    id,
-    name: `模式${index}`,
-    isDefault: false,
-    factors: [],
-    grades: { monthlyAvgCount: createThresholds('monthlyAvgCount') },
-    tiers: [
-      {
-        id: `${id}-tier-1`,
-        name: '热销A',
-        isDefault: false,
-        conditions: [{ grade: 'S', operator: 'gte', count: 1 }],
-        coefficients: createDefaultCoefficients(),
-      },
-      {
-        id: `${id}-tier-default`,
-        name: '默认档',
-        isDefault: true,
-        conditions: [],
-        coefficients: createDefaultCoefficients(),
-      },
-    ],
-  }
-
-  const defaultIndex = autoModes.value.findIndex((entry) => entry.isDefault)
-  beforeStructuralChange()
-  autoModes.value.splice(
-    defaultIndex < 0 ? autoModes.value.length : defaultIndex,
-    0,
-    rule,
-  )
-  selectedRuleId.value = id
-}
-
-function removeRule(rule) {
-  if (!rule || rule.isDefault) return
-  const index = autoModes.value.findIndex((entry) => entry.id === rule.id)
-  if (index < 0) return
-
-  beforeStructuralChange()
-  autoModes.value.splice(index, 1)
-  if (selectedRuleId.value === rule.id) {
-    selectedRuleId.value = autoModes.value[0]?.id ?? ''
-  }
-}
-
-// 第一次点击只进入“待确认”状态，3 秒内再次点击才真正删除。
-function requestRemoveRule(rule) {
-  if (!rule || rule.isDefault) return
-
-  if (pendingRuleDeleteId.value !== rule.id) {
-    pendingRuleDeleteId.value = rule.id
-    if (ruleDeleteTimer) clearTimeout(ruleDeleteTimer)
-    ruleDeleteTimer = window.setTimeout(() => {
-      pendingRuleDeleteId.value = ''
-      ruleDeleteTimer = 0
-    }, 3000)
-    return
-  }
-
-  if (ruleDeleteTimer) clearTimeout(ruleDeleteTimer)
-  ruleDeleteTimer = 0
-  pendingRuleDeleteId.value = ''
-  removeRule(rule)
-}
-
-// 切换模式时取消待确认状态，避免按钮文案残留到另一条模式上。
-watch(selectedRuleId, () => {
-  pendingRuleDeleteId.value = ''
-  if (ruleDeleteTimer) {
-    clearTimeout(ruleDeleteTimer)
-    ruleDeleteTimer = 0
-  }
-})
-
-// —— 模式因子 ——
-function addRuleFactor(field) {
-  const rule = activeRule.value
-  if (!rule) return
-
-  const meta = getFieldMeta(field)
-  beforeStructuralChange()
-  // 数值因子用范围式：min / max 留空表示该侧不限制（空 min 等于 0，空 max 等于正无穷）。
-  if (meta.kind === 'number') {
-    rule.factors.push({ field, min: null, max: null })
-    return
-  }
-  rule.factors.push({ field, value: meta.options?.[0] ?? '' })
-}
-
-function removeRuleFactor(index) {
-  if (!activeRule.value) return
-  beforeStructuralChange()
-  activeRule.value.factors.splice(index, 1)
-}
-
-// —— 评分因子与评分标准 ——
-function addGradeField(field) {
-  const rule = activeRule.value
-  if (!rule || rule.grades[field]) return
-  beforeStructuralChange()
-  rule.grades[field] = createThresholds(field)
-}
-
-function removeGradeField(field) {
-  const rule = activeRule.value
-  if (!rule) return
-  beforeStructuralChange()
-  delete rule.grades[field]
-}
-
-// —— 评分档 ——
-function nextTierName(rule) {
-  const used = new Set(rule.tiers.filter((tier) => !tier.isDefault).map((tier) => tier.name))
-  for (let index = 0; index < 26; index += 1) {
-    const name = `热销${String.fromCharCode(65 + index)}`
-    if (!used.has(name)) return name
-  }
-  return '热销Z'
-}
-
-function addTier() {
-  const rule = activeRule.value
-  if (!rule) return
-
-  const tier = {
-    id: `${rule.id}-tier-${Date.now().toString(36)}`,
-    name: nextTierName(rule),
-    isDefault: false,
-    conditions: [{ grade: 'S', operator: 'gte', count: 1 }],
-    coefficients: createDefaultCoefficients(),
-  }
-  const defaultIndex = rule.tiers.findIndex((entry) => entry.isDefault)
-  beforeStructuralChange()
-  rule.tiers.splice(defaultIndex < 0 ? rule.tiers.length : defaultIndex, 0, tier)
-}
-
-function removeTier(tier) {
-  if (tier.isDefault) return
-  const rule = activeRule.value
-  const index = rule.tiers.indexOf(tier)
-  if (index < 0) return
-  beforeStructuralChange()
-  rule.tiers.splice(index, 1)
-}
-
-function moveTier(tier, direction) {
-  const rule = activeRule.value
-  const index = rule.tiers.indexOf(tier)
-  const target = index + direction
-  if (index < 0 || target < 0 || target >= rule.tiers.length) return
-  if (rule.tiers[target].isDefault) return
-
-  beforeStructuralChange()
-  rule.tiers.splice(index, 1)
-  rule.tiers.splice(target, 0, tier)
-}
-
-function copyPreviousCoefficients(tier) {
-  const rule = activeRule.value
-  const index = rule.tiers.indexOf(tier)
-  const source = rule.tiers[index - 1] ?? rule.tiers[0]
-  if (!source || source === tier) return
-  beforeStructuralChange()
-  tier.coefficients = JSON.parse(JSON.stringify(source.coefficients))
-}
-
-function addTierCondition(tier) {
-  beforeStructuralChange()
-  tier.conditions.push({ grade: 'S', operator: 'gte', count: 1 })
-}
-
-function removeTierCondition(tier, index) {
-  beforeStructuralChange()
-  tier.conditions.splice(index, 1)
-}
-
-// —— 手动策略：模式管理 ——
+// —— 手动策略 ——
 const manualSelection = ref([])
 const itemBySkuId = computed(() => {
   const map = new Map()
@@ -511,7 +408,7 @@ const danglingSkuIds = computed(() =>
   findDanglingSkuIds(stockingStore.manual, inventoryItems),
 )
 
-// 内置的两种行为必须各保留一个，其余自定义模式可删。
+// 内置的三种行为必须各保留一个，其余自定义模式可删。
 function isRequiredManualMode(mode) {
   if (!mode) return true
   const sameBehavior = manualModes.value.filter((entry) => entry.behavior === mode.behavior)
@@ -519,7 +416,7 @@ function isRequiredManualMode(mode) {
 }
 
 function nextManualModeName(behavior) {
-  const base = behavior === 'slow' ? '滞销模式' : '自定模式'
+  const base = DEFAULT_MANUAL_MODE_NAMES[behavior] ?? '自定系数模式'
   const used = new Set(manualModes.value.map((mode) => mode.name))
   if (!used.has(base)) return base
   let index = 2
@@ -571,6 +468,26 @@ async function clearManualRow(row) {
   await stockingStore.setManualEntry(row.skuId, null)
 }
 
+// 订单货模式在清单里只展示订单条数与订单明细，编辑在 SKU 弹窗里完成。
+function orderRowsText(row) {
+  const orders = row.entry.orders ?? []
+  return orders.length ? `订单货：${orders.length} 单` : '订单货：待填写订单'
+}
+
+function orderRowsTitle(row) {
+  const orders = row.entry.orders ?? []
+  if (!orders.length) return '在 SKU 弹窗里为该 SKU 添加订单'
+  return orders
+    .map((order) => {
+      const parts = [order.name || '未命名订单']
+      if (order.factory) parts.push(`厂家：${order.factory}`)
+      if (Number.isFinite(order.quantity)) parts.push(`数量：${order.quantity}`)
+      if (order.note) parts.push(`备注：${order.note}`)
+      return parts.join(' / ')
+    })
+    .join('\n')
+}
+
 async function clearManualSelection() {
   await stockingStore.removeManualEntries(manualSelection.value)
   manualSelection.value = []
@@ -583,8 +500,7 @@ async function clearDanglingEntries() {
 // —— 配置方案 ——
 function resetDraftFromStore() {
   configDraft.value = normalizeConfig(stockingStore.config)
-  selectedRuleId.value = autoModes.value[0]?.id ?? ''
-  pendingRuleDeleteId.value = ''
+  activeModeKey.value = autoModes.value[0]?.key ?? ''
   draftVersion.value += 1
   clearHistory()
 }
@@ -715,86 +631,11 @@ async function handleImportFile(event) {
   ElMessage.success('已导入配置方案')
 }
 
-// —— 按当前数据校准评分阈值 ——
-const calibrateVisible = ref(false)
-const calibrateRows = ref([])
-const calibrateRuleId = ref('')
-// 默认顺手把档位也按 S 个数重建为 3S / 2S / 1S / 默认档。
-const calibrateRebuildTiers = ref(true)
-const hasCalibration = computed(() =>
-  calibrateRows.value.some((row) => row.thresholds),
-)
-
-function formatThresholds(thresholds) {
-  if (!thresholds) return '—'
-  return GRADE_KEYS.map((grade) => thresholds[grade] ?? '—').join(' / ')
-}
-
-function openCalibration() {
-  const rule = activeRule.value
-  if (!rule) return
-  const fields = usedGradeFields(rule)
-  if (!fields.length) {
-    ElMessage.warning('请先添加评分因子，再按数据校准')
-    return
-  }
-  calibrateRuleId.value = rule.id
-  calibrateRows.value = calibrateGrades(inventoryItems, fields, rule.grades)
-  calibrateVisible.value = true
-}
-
-function applyCalibration() {
-  const rule = autoModes.value.find((entry) => entry.id === calibrateRuleId.value)
-  const rows = calibrateRows.value.filter((row) => row.thresholds)
-  if (!rule || !rows.length) {
-    calibrateVisible.value = false
-    ElMessage.warning('当前数据里没有可用的数值，未写入阈值')
-    return
-  }
-
-  beforeStructuralChange()
-  for (const row of rows) {
-    rule.grades[row.field] = { ...row.thresholds }
-  }
-
-  let rebuilt = false
-  if (calibrateRebuildTiers.value) {
-    rule.tiers = buildGradeTiers(Object.keys(rule.grades), {
-      ruleId: rule.id,
-      tiers: rule.tiers,
-    })
-    rebuilt = true
-  }
-
-  calibrateVisible.value = false
-  ElMessage.success(
-    rebuilt
-      ? `已写入 ${rows.length} 个因子阈值，并按 S 个数重建评分档（3S / 2S / 1S / 默认档）`
-      : `已写入 ${rows.length} 个因子阈值，保存后生效`,
-  )
-}
-
-// —— 保存 / 重置 / 导出 ——
+// —— 保存 / 放弃 / 恢复默认 ——
 async function confirmConfig() {
-  const result = validateConfig(configDraft.value)
-  if (!result.ok) {
-    ElMessage.error(result.errors[0]?.message ?? '配置有误，请先修正')
+  if (!validation.value.ok) {
+    ElMessage.error(`还有 ${validation.value.errors.length} 处配置错误，请先修正`)
     return
-  }
-
-  const conflictCount = distribution.value?.conflictCount ?? 0
-  if (conflictCount > 0) {
-    const samples = (distribution.value?.conflictSamples ?? [])
-      .map((item) => `${item.product}/${item.color}`)
-      .join('、')
-    const proceed = await ElMessageBox.confirm(
-      `有 ${conflictCount} 个 SKU 命中多条模式（如：${samples}），将按模式列表中靠前的一条处理。是否仍然保存？`,
-      '模式存在重叠',
-      { confirmButtonText: '仍然保存', cancelButtonText: '返回修改', type: 'warning' },
-    )
-      .then(() => true)
-      .catch(() => false)
-    if (!proceed) return
   }
 
   const saved = await stockingStore.apply(configDraft.value)
@@ -804,16 +645,12 @@ async function confirmConfig() {
   ElMessage.success(
     saved.written
       ? `「${activeProfileName.value}」已保存到 src/stocking/config.json`
-      : `「${activeProfileName.value}」已保存到本地缓存（部署环境无法写源文件，可点击“导出配置”覆盖）`,
+      : `「${activeProfileName.value}」已保存到本地缓存（部署环境无法写源文件，可点击“导出方案”覆盖）`,
   )
 }
 
 function discardChanges() {
-  configDraft.value = normalizeConfig(stockingStore.config)
-  selectedRuleId.value = autoModes.value[0]?.id ?? ''
-  pendingRuleDeleteId.value = ''
-  draftVersion.value += 1
-  clearHistory()
+  resetDraftFromStore()
 }
 
 async function restoreDefaults() {
@@ -828,8 +665,7 @@ async function restoreDefaults() {
 
   const saved = await stockingStore.restoreDefaults()
   configDraft.value = normalizeConfig(saved.config)
-  selectedRuleId.value = autoModes.value[0]?.id ?? ''
-  pendingRuleDeleteId.value = ''
+  activeModeKey.value = autoModes.value[0]?.key ?? ''
   draftVersion.value += 1
   clearHistory()
   ElMessage.success(`「${activeProfileName.value}」已恢复默认配置`)
@@ -840,183 +676,11 @@ function downloadConfig() {
   ElMessage.success('配置方案已导出，可覆盖 src/stocking/config.json')
 }
 
-// 备货策略四列：不显示"缺省"，直接把简短原因写进格子，悬停看完整说明。
-function formatStockCell(row, value) {
-  if (row.strategyAvailable) return formatQuantity(value)
-  return row.isProductGroup ? '子行缺省' : row.strategyIssueShort
-}
-
-function formatFactorCell(row) {
-  // 品名父行不展示系数（与改动前一致），只在子行缺失时给出提示。
-  if (row.isProductGroup) return row.strategyAvailable ? '' : '子行缺省'
-  return row.strategyAvailable ? formatFactors(row) : row.strategyIssueShort
-}
-
-function strategyCellTitle(row) {
-  return row.strategyAvailable ? '' : row.strategyIssue
-}
-
-// —— 备货详情表格 ——
-const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
-const selectedRowId = ref(null)
-const configTableRef = ref(null)
-const collapsingProductKeys = ref(new Set())
-const expandingProductKeys = ref(new Set())
-
-const inventoryLeafRows = computed(() => {
-  // 表格展示的是已生效配置的计算结果，未保存的草稿不影响这里。
-  const evaluator = createEvaluator(stockingStore.config)
-  return inventoryItems
-    .map((item) => calculateInventoryRow(evaluateItem(item, evaluator)))
-    .sort(
-      (first, second) =>
-        productCollator.compare(first.product, second.product) ||
-        Number(second.color === '黑色') - Number(first.color === '黑色') ||
-        productCollator.compare(first.color, second.color) ||
-        first.id - second.id,
-    )
-})
-
-const inventoryRows = computed(() => groupRowsByProduct(inventoryLeafRows.value))
-
-// 配置信息页仍用 ElTable（含展开行与下拉），3 万行无法一次渲染：
-// 行数小保持品名树形；行数大改为扁平分页。
-const CONFIG_FLAT_LIMIT = 500
-const CONFIG_FLAT_PAGE_SIZE = 60
-const CONFIG_PAGE_ROW_BUDGET = 300
-const configFlat = computed(() => inventoryLeafRows.value.length > CONFIG_FLAT_LIMIT)
-const configLeafPageCount = computed(() =>
-  Math.max(1, Math.ceil(inventoryLeafRows.value.length / CONFIG_FLAT_PAGE_SIZE)),
-)
-const pagedLeafRows = computed(() => {
-  const start = (configPage.value - 1) * CONFIG_FLAT_PAGE_SIZE
-  return inventoryLeafRows.value.slice(start, start + CONFIG_FLAT_PAGE_SIZE)
-})
-const configPage = ref(1)
-const configPages = computed(() => {
-  const pages = []
-  let currentPage = []
-  let rowCount = 0
-
-  for (const group of inventoryRows.value) {
-    const groupRowCount = group.children.length
-    if (currentPage.length > 0 && rowCount + groupRowCount > CONFIG_PAGE_ROW_BUDGET) {
-      pages.push(currentPage)
-      currentPage = []
-      rowCount = 0
-    }
-    currentPage.push(group)
-    rowCount += groupRowCount
-  }
-  if (currentPage.length > 0) pages.push(currentPage)
-  return pages.length > 0 ? pages : [[]]
-})
-const configPageCount = computed(() =>
-  configFlat.value ? configLeafPageCount.value : configPages.value.length,
-)
-const configTableRows = computed(() =>
-  configFlat.value
-    ? pagedLeafRows.value
-    : configPages.value[Math.min(configPage.value, configPages.value.length) - 1] ?? [],
-)
-
-watch(configPageCount, (pageCount) => {
-  if (configPage.value > pageCount) configPage.value = pageCount
-})
-
-const expandedProductKeys = ref(inventoryRows.value.map((row) => row.id))
-let knownProductKeys = new Set(expandedProductKeys.value)
-const productTransitionTimers = new Map()
-const productTransitionDuration = 120
-
-function clearProductTransition(productKey) {
-  const timer = productTransitionTimers.get(productKey)
-  if (timer) clearTimeout(timer)
-  productTransitionTimers.delete(productKey)
-  collapsingProductKeys.value.delete(productKey)
-  expandingProductKeys.value.delete(productKey)
-}
-
-function animateProductExpansion(productKey) {
-  clearProductTransition(productKey)
-  expandingProductKeys.value.add(productKey)
-  productTransitionTimers.set(
-    productKey,
-    setTimeout(() => {
-      expandingProductKeys.value.delete(productKey)
-      productTransitionTimers.delete(productKey)
-    }, productTransitionDuration),
-  )
-}
-
-function animateProductCollapse(row) {
-  const productKey = row.id
-  clearProductTransition(productKey)
-  collapsingProductKeys.value.add(productKey)
-  productTransitionTimers.set(
-    productKey,
-    setTimeout(() => {
-      configTableRef.value?.toggleRowExpansion(row, false)
-      collapsingProductKeys.value.delete(productKey)
-      productTransitionTimers.delete(productKey)
-    }, productTransitionDuration),
-  )
-}
-
-watch(inventoryRows, (groups) => {
-  const currentKeys = new Set(groups.map((row) => row.id))
-  const expandedKeys = new Set(expandedProductKeys.value.filter((key) => currentKeys.has(key)))
-  for (const group of groups) {
-    if (!knownProductKeys.has(group.id)) expandedKeys.add(group.id)
-  }
-  knownProductKeys = currentKeys
-  expandedProductKeys.value = [...expandedKeys]
-})
-
-function handleExpandChange(row, expanded) {
-  if (!row.isProductGroup) return
-  const keys = new Set(expandedProductKeys.value)
-  if (expanded) keys.add(row.id)
-  else keys.delete(row.id)
-  expandedProductKeys.value = [...keys]
-  if (expanded) animateProductExpansion(row.id)
-}
-
-function handleCellClick(row, column) {
-  if (!row.isProductGroup || column.property !== 'product') return
-
-  if (collapsingProductKeys.value.has(row.id)) {
-    clearProductTransition(row.id)
-    animateProductExpansion(row.id)
-    return
-  }
-
-  const isExpanded = expandedProductKeys.value.includes(row.id)
-  if (isExpanded) {
-    animateProductCollapse(row)
-    return
-  }
-
-  configTableRef.value?.toggleRowExpansion(row, true)
-}
-
-function getCellClassName({ row, column }) {
-  return row.isProductGroup && column.property === 'product' ? 'product-cell-clickable' : ''
-}
-
-function getRowClassName({ row }) {
-  return [
-    row.isProductGroup ? 'product-group-row' : 'product-color-row',
-    collapsingProductKeys.value.has(`product:${row.product}`) ? 'product-group-collapsing' : '',
-    expandingProductKeys.value.has(`product:${row.product}`) ? 'product-group-expanding' : '',
-    !row.isProductGroup && row.id === selectedRowId.value ? 'inventory-row-selected' : '',
-  ]
-    .filter(Boolean)
-    .join(' ')
-}
-
-function handleRowClick(row) {
-  selectedRowId.value = row.isProductGroup ? null : row.id
+// 「方案文件」下拉：导出 / 导入 / 恢复默认
+function handleFileCommand(command) {
+  if (command === 'export') downloadConfig()
+  else if (command === 'import') triggerImport()
+  else if (command === 'restore') restoreDefaults()
 }
 </script>
 
@@ -1025,434 +689,328 @@ function handleRowClick(row) {
     <div class="config-content">
       <PanelNavigation />
 
-      <header v-if="examplePanel" class="config-heading">
-        <div>
+      <div class="config-body">
+        <header class="config-heading">
           <h1>{{ configLabel }}</h1>
           <p>{{ panelDescription }}</p>
-        </div>
-      </header>
+        </header>
 
-      <section class="rule-config-section" aria-labelledby="rule-config-title">
-        <div class="rule-config-heading">
-          <h2 id="rule-config-title">模式与系数配置</h2>
-          <span class="rule-config-hint">
-            先选策略：自动策略按「模式 → 评分档」算系数；手动策略由人工给指定 SKU 归类，不参与自动判定。
-          </span>
-        </div>
-
-        <div class="profile-bar">
-          <span class="profile-bar__label">配置方案</span>
-          <ElSelect
-            v-model="profileSelection"
-            size="small"
-            class="profile-bar__select"
-            aria-label="配置方案"
-            @change="switchProfile"
-          >
-            <ElOption
-              v-for="profile in profiles"
-              :key="profile.id"
-              :label="profile.name"
-              :value="profile.id"
-            />
-          </ElSelect>
-          <ElButton size="small" @click="duplicateProfile">复制方案</ElButton>
-          <ElButton size="small" @click="renameProfile">重命名</ElButton>
-          <ElButton size="small" :disabled="profiles.length <= 1" @click="deleteProfile">
-            删除方案
-          </ElButton>
-          <span class="profile-bar__hint">
-            当前方案「{{ activeProfileName }}」独立保存，切换方案不影响其他方案的阈值与系数。
-          </span>
-        </div>
-
-        <div class="strategy-tabs" role="tablist" aria-label="策略">
-          <button
-            type="button"
-            role="tab"
-            class="strategy-tab"
-            :class="{ 'strategy-tab--active': activeStrategy === 'auto' }"
-            :aria-selected="activeStrategy === 'auto'"
-            @click="activeStrategy = 'auto'"
-          >
-            自动策略
-            <span class="strategy-tab__count">{{ autoModes.length }} 个模式</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            class="strategy-tab"
-            :class="{ 'strategy-tab--active': activeStrategy === 'manual' }"
-            :aria-selected="activeStrategy === 'manual'"
-            @click="activeStrategy = 'manual'"
-          >
-            手动策略
-            <span class="strategy-tab__count">{{ manualRows.length }} 个 SKU</span>
-          </button>
-        </div>
-
-        <template v-if="activeStrategy === 'auto'">
-        <div class="rule-tabs" role="tablist" aria-label="模式">
-          <button
-            v-for="rule in autoModes"
-            :key="rule.id"
-            type="button"
-            role="tab"
-            class="rule-tab"
-            :class="{
-              'rule-tab--active': rule.id === activeRule?.id,
-              'rule-tab--default': rule.isDefault,
-            }"
-            :aria-selected="rule.id === activeRule?.id"
-            @click="selectedRuleId = rule.id"
-          >
-            <span class="rule-tab__name">{{ rule.name }}</span>
-            <span v-if="distribution" class="rule-tab__count">
-              {{ ruleHitCount(rule.name) ?? 0 }}
-            </span>
-          </button>
-          <ElButton size="small" text class="rule-tab-add" @click="addRule">＋ 新增模式</ElButton>
-        </div>
-
-        <div
-          v-if="activeRule"
-          :key="`${activeRule.id}-${draftVersion}`"
-          class="rule-card"
-        >
-          <div class="rule-card__heading">
-            <ElInput
-              v-model="activeRule.name"
+        <!-- 工作条：方案切换 + 保存状态 + 保存动作，滚动时吸顶 -->
+        <div class="config-bar">
+          <div class="config-bar__group">
+            <span class="config-bar__label">配置方案</span>
+            <ElTooltip content="每个方案独立保存阈值与系数；切换方案不影响其他方案。" placement="top">
+              <span class="config-info">i</span>
+            </ElTooltip>
+            <ElSelect
+              v-model="profileSelection"
               size="small"
-              class="rule-name-input"
-              aria-label="模式名称"
-            />
-            <span v-if="activeRule.isDefault" class="rule-card__badge">兜底：无条件命中</span>
-            <span v-else class="rule-card__badge rule-card__badge--muted">
-              {{
-                activeRule.factors.length
-                  ? `命中 ${ruleHitCount(activeRule.name) ?? '--'} 个 SKU`
-                  : '未配置模式因子，暂不参与匹配'
-              }}
-            </span>
-            <span class="rule-card__spacer" />
-            <ElButton
-              size="small"
-              :type="pendingRuleDeleteId === activeRule.id ? 'danger' : 'default'"
-              :plain="pendingRuleDeleteId === activeRule.id"
-              :text="pendingRuleDeleteId !== activeRule.id"
-              :disabled="activeRule.isDefault"
-              class="rule-delete-button"
-              @click="requestRemoveRule(activeRule)"
+              class="profile-bar__select"
+              aria-label="配置方案"
+              @change="switchProfile"
             >
-              {{ pendingRuleDeleteId === activeRule.id ? '确认删除？' : '删除模式' }}
+              <ElOption
+                v-for="profile in profiles"
+                :key="profile.id"
+                :label="profile.name"
+                :value="profile.id"
+              />
+            </ElSelect>
+            <ElButton size="small" @click="duplicateProfile">复制</ElButton>
+            <ElButton size="small" @click="renameProfile">重命名</ElButton>
+            <ElButton size="small" :disabled="profiles.length <= 1" @click="deleteProfile">
+              删除
             </ElButton>
           </div>
 
-          <div v-if="!activeRule.isDefault" class="rule-block">
-            <div class="rule-block__heading">
-              <h3>① 模式因子</h3>
-              <span class="rule-block__hint">
-                每个字段一条范围：左空视为 0，右空视为正无穷；全部条件同时满足才算命中
-              </span>
-              <StockingFieldPicker
-                label="＋ 添加条件"
-                :used-fields="usedFactorFields(activeRule)"
-                @select="addRuleFactor"
-              />
-            </div>
-
-            <div v-if="activeRule.factors.length" class="rule-factor-list">
-              <div
-                v-for="(factor, index) in activeRule.factors"
-                :key="`${factor.field}-${index}`"
-                class="rule-factor-row"
-              >
-                <span class="rule-factor-row__label">{{ getFieldLabel(factor.field) }}</span>
-                <ElSelect
-                  v-if="isEnumField(factor.field)"
-                  v-model="factor.value"
-                  size="small"
-                  class="rule-factor-row__value"
-                >
-                  <ElOption
-                    v-for="option in getFieldMeta(factor.field).options"
-                    :key="option"
-                    :label="option"
-                    :value="option"
-                  />
-                </ElSelect>
-                <ElInput
-                  v-else-if="isTextField(factor.field)"
-                  v-model="factor.value"
-                  size="small"
-                  class="rule-factor-row__value"
-                  placeholder="精确匹配"
-                />
-                <div v-else class="rule-factor-row__range">
-                  <ElInputNumber
-                    v-model="factor.min"
-                    :controls="false"
-                    size="small"
-                    class="rule-factor-row__range-input"
-                    :placeholder="'0'"
-                    :aria-label="`${getFieldLabel(factor.field)}下限`"
-                  />
-                  <span class="rule-factor-row__range-dash">—</span>
-                  <ElInputNumber
-                    v-model="factor.max"
-                    :controls="false"
-                    size="small"
-                    class="rule-factor-row__range-input"
-                    placeholder="∞"
-                    :aria-label="`${getFieldLabel(factor.field)}上限`"
-                  />
-                </div>
-                <ElButton
-                  size="small"
-                  text
-                  type="danger"
-                  class="rule-row-remove"
-                  aria-label="移除条件"
-                  @click="removeRuleFactor(index)"
-                >
-                  <ElIcon><Delete /></ElIcon>
-                </ElButton>
-              </div>
-            </div>
-            <p v-else class="rule-block__empty">尚未配置条件，该模式不参与匹配。</p>
-          </div>
-
-          <div class="rule-block">
-            <div class="rule-block__heading">
-              <h3>② 评分因子与评分标准</h3>
-              <span class="rule-block__hint">
-                满足最高等级即取该等级；未达 C 阈值、缺值或未配置阈值记 Z
-              </span>
-              <StockingFieldPicker
-                label="＋ 添加因子"
-                :used-fields="usedGradeFields(activeRule)"
-                numeric-only
-                @select="addGradeField"
-              />
-              <ElTooltip
-                content="按当前已导入数据的分位重设该模式的 S/A/B/C 阈值"
-                placement="top"
-              >
-                <span class="config-action-wrap">
-                  <ElButton
-                    size="small"
-                    text
-                    class="rule-block__add"
-                    :disabled="!usedGradeFields(activeRule).length"
-                    @click="openCalibration"
-                  >
-                    按当前数据校准
-                  </ElButton>
-                </span>
-              </ElTooltip>
-            </div>
-
-            <div v-if="usedGradeFields(activeRule).length" class="grade-table">
-              <div class="grade-table__head">
-                <span>因子</span>
-                <span v-for="grade in GRADE_KEYS" :key="grade">{{ grade }} ≥</span>
-                <span />
-              </div>
-              <div
-                v-for="field in usedGradeFields(activeRule)"
-                :key="field"
-                class="grade-table__row"
-              >
-                <span class="grade-table__label">{{ getFieldLabel(field) }}</span>
-                <ElInputNumber
-                  v-for="grade in GRADE_KEYS"
-                  :key="grade"
-                  v-model="activeRule.grades[field][grade]"
-                  :controls="false"
-                  size="small"
-                  class="grade-table__input"
-                  :aria-label="`${getFieldLabel(field)} ${grade} 阈值`"
-                />
-                <ElButton
-                  size="small"
-                  text
-                  type="danger"
-                  class="rule-row-remove"
-                  aria-label="移除评分因子"
-                  @click="removeGradeField(field)"
-                >
-                  <ElIcon><Delete /></ElIcon>
-                </ElButton>
-              </div>
-            </div>
-            <p v-else class="rule-block__empty">尚未启用评分因子，所有 SKU 将记为 Z。</p>
-          </div>
-
-          <div class="rule-block">
-            <div class="rule-block__heading">
-              <h3>③ 评分档与系数</h3>
-              <span class="rule-block__hint">
-                按顺序取第一个满足条件的档位，默认档固定兜底；系数单位为周
-              </span>
-              <ElButton size="small" text class="rule-block__add" @click="addTier">
-                ＋ 添加档位
-              </ElButton>
-            </div>
-
-            <div class="tier-list">
-              <div
-                v-for="tier in activeRule.tiers"
-                :key="tier.id"
-                class="tier-card"
-                :class="{ 'tier-card--default': tier.isDefault }"
-              >
-                <div class="tier-card__heading">
-                  <ElInput
-                    v-model="tier.name"
-                    size="small"
-                    class="tier-name-input"
-                    aria-label="档位名称"
-                  />
-                  <span v-if="tier.isDefault" class="tier-card__badge">无条件兜底</span>
-                  <span v-else class="tier-card__badge tier-card__badge--muted">
-                    命中 {{ tierHitCount(activeRule.name, tier.name) ?? 0 }} 个
-                  </span>
-                  <span class="tier-card__spacer" />
-                  <template v-if="!tier.isDefault">
-                    <ElButton size="small" text @click="moveTier(tier, -1)">上移</ElButton>
-                    <ElButton size="small" text @click="moveTier(tier, 1)">下移</ElButton>
-                    <ElButton size="small" text @click="copyPreviousCoefficients(tier)">
-                      沿用上档系数
-                    </ElButton>
-                    <ElButton size="small" text type="danger" @click="removeTier(tier)">
-                      <ElIcon><Delete /></ElIcon>
-                    </ElButton>
-                  </template>
-                </div>
-
-                <div v-if="!tier.isDefault" class="tier-conditions">
-                  <div
-                    v-for="(condition, index) in tier.conditions"
-                    :key="index"
-                    class="tier-condition"
-                  >
-                    <ElSelect v-model="condition.grade" size="small" class="tier-condition__grade">
-                      <ElOption
-                        v-for="grade in ALL_GRADES"
-                        :key="grade"
-                        :label="grade"
-                        :value="grade"
-                      />
-                    </ElSelect>
-                    <ElSelect
-                      v-model="condition.operator"
-                      size="small"
-                      class="tier-condition__operator"
-                    >
-                      <ElOption
-                        v-for="operator in COMPARE_OPERATORS"
-                        :key="operator.value"
-                        :label="operator.label"
-                        :value="operator.value"
-                      />
-                    </ElSelect>
-                    <ElInputNumber
-                      v-model="condition.count"
-                      :min="0"
-                      :max="factorCountOf(activeRule)"
-                      :controls="false"
-                      size="small"
-                      class="tier-condition__count"
-                    />
-                    <span class="tier-condition__unit">个</span>
-                    <ElButton
-                      size="small"
-                      text
-                      type="danger"
-                      class="rule-row-remove"
-                      aria-label="移除条件"
-                      @click="removeTierCondition(tier, index)"
-                    >
-                      <ElIcon><Delete /></ElIcon>
-                    </ElButton>
-                  </div>
-                  <ElButton
-                    size="small"
-                    text
-                    class="rule-block__add"
-                    @click="addTierCondition(tier)"
-                  >
-                    ＋ 添加条件
-                  </ElButton>
-                </div>
-
-                <div class="tier-coefficients">
-                  <div v-for="category in CATEGORIES" :key="category" class="tier-coefficient-row">
-                    <span class="tier-coefficient-row__category">{{ category }}</span>
-                    <label
-                      v-for="coefficient in COEFFICIENT_KEYS"
-                      :key="coefficient.key"
-                      class="tier-coefficient-row__item"
-                    >
-                      <span>{{ coefficient.label }}</span>
-                      <ElInputNumber
-                        v-model="tier.coefficients[category][coefficient.key]"
-                        :min="0"
-                        :step="0.5"
-                        :precision="1"
-                        :controls="false"
-                        size="small"
-                        class="tier-coefficient-row__input"
-                        :aria-label="`${category}${coefficient.label}系数`"
-                      />
-                    </label>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div
-            v-if="validation.errors.length || validation.warnings.length"
-            class="rule-validation"
-          >
-            <p
-              v-for="error in validation.errors"
-              :key="error.message"
-              class="rule-validation__error"
+          <div class="config-bar__group config-bar__group--end">
+            <span class="config-bar__state" :class="{ 'config-bar__state--dirty': configDirty }">
+              {{ configDirty ? '有未保存的修改' : '已保存' }}
+            </span>
+            <ElButton size="small" :disabled="!canUndo" title="回退上一步改动（Ctrl+Z）" @click="undo">
+              撤销
+            </ElButton>
+            <ElButton
+              size="small"
+              :disabled="!canRedo"
+              title="恢复刚撤销的改动（Ctrl+Shift+Z）"
+              @click="redo"
             >
-              ✕ {{ error.message }}
-            </p>
-            <p
-              v-for="warning in validation.warnings"
-              :key="warning.message"
-              class="rule-validation__warning"
+              重做
+            </ElButton>
+            <ElButton
+              size="small"
+              :disabled="!configDirty"
+              title="放弃所有未保存的改动，回到上次保存的配置"
+              @click="discardChanges"
             >
-              ! {{ warning.message }}
-            </p>
+              放弃
+            </ElButton>
+            <ElDropdown trigger="click" @command="handleFileCommand">
+              <ElButton size="small">方案文件</ElButton>
+              <template #dropdown>
+                <ElDropdownMenu>
+                  <ElDropdownItem command="export">导出全部方案（JSON）</ElDropdownItem>
+                  <ElDropdownItem command="import">导入方案文件</ElDropdownItem>
+                  <ElDropdownItem command="restore" divided>当前方案恢复默认</ElDropdownItem>
+                </ElDropdownMenu>
+              </template>
+            </ElDropdown>
+            <ElButton size="small" type="primary" :disabled="!configDirty" @click="confirmConfig">
+              确定
+            </ElButton>
+            <input
+              ref="importInputRef"
+              type="file"
+              accept="application/json,.json"
+              class="profile-import-input"
+              @change="handleImportFile"
+            />
           </div>
         </div>
-        </template>
 
-        <template v-else>
-          <div class="manual-config">
-            <div class="rule-block">
-              <div class="rule-block__heading">
-                <h3>① 手动模式</h3>
-                <span class="rule-block__hint">
-                  行为由系统提供（自定系数 / 滞销），名称、说明与默认系数可自行调整；内置的两种行为各保留一个。
+        <section class="config-card config-card--open config-workspace">
+          <div class="config-card__head">
+            <div class="strategy-tabs" role="tablist" aria-label="策略">
+              <button
+                type="button"
+                role="tab"
+                class="strategy-tab"
+                :class="{ 'strategy-tab--active': activeStrategy === 'auto' }"
+                :aria-selected="activeStrategy === 'auto'"
+                @click="activeStrategy = 'auto'"
+              >
+                自动策略
+                <span class="strategy-tab__count">{{ autoModes.length }}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                class="strategy-tab"
+                :class="{ 'strategy-tab--active': activeStrategy === 'manual' }"
+                :aria-selected="activeStrategy === 'manual'"
+                @click="activeStrategy = 'manual'"
+              >
+                手动策略
+                <span class="strategy-tab__count">{{ manualRows.length }}</span>
+              </button>
+            </div>
+
+            <span class="config-workspace__hint">
+              {{ activeStrategy === 'auto' ? '按「月均条数」从高到低判定' : '人为指定，跨导入保留' }}
+            </span>
+            <ElTooltip :content="strategyIntro" placement="top">
+              <span class="config-info">i</span>
+            </ElTooltip>
+            <span class="config-card__spacer" />
+          </div>
+
+          <div v-if="activeStrategy === 'auto'" class="mode-workspace">
+            <nav class="mode-list" aria-label="模式">
+              <button
+                v-for="mode in autoModes"
+                :key="mode.key"
+                type="button"
+                class="mode-list__item"
+                :class="{ 'mode-list__item--active': mode.key === activeMode?.key }"
+                :aria-current="mode.key === activeMode?.key"
+                @click="activeModeKey = mode.key"
+              >
+                <span class="mode-list__name">{{ mode.name }}</span>
+                <span class="mode-list__count">{{ modeHitCount(mode.key) ?? 0 }}</span>
+                <span class="mode-list__metric">{{ metricBadge(mode) }}</span>
+              </button>
+            </nav>
+
+            <div v-if="activeMode" :key="`${activeMode.key}-${draftVersion}`" class="mode-editor">
+              <div class="mode-editor__head">
+                <ElInput
+                  v-model="activeMode.name"
+                  size="small"
+                  class="rule-name-input"
+                  aria-label="模式名称"
+                />
+                <ElTooltip :content="metricTitle(activeMode)" placement="top">
+                  <span class="mode-editor__badge">{{ metricBadge(activeMode) }}</span>
+                </ElTooltip>
+                <span class="config-card__spacer" />
+                <span class="mode-editor__badge mode-editor__badge--muted">
+                  命中 {{ modeHitCount(activeMode.key) ?? '--' }} 个 SKU<template
+                    v-if="activeMode.splitByCustomer"
+                  >（专属品 {{ exclusiveHitCount(activeMode.key) ?? 0 }}）</template>
                 </span>
-                <ElButton size="small" text class="rule-block__add" @click="addManualMode">
+              </div>
+
+              <div class="mode-editor__row">
+                <span class="mode-editor__label">月均条数</span>
+                <ElInputNumber
+                  v-model="activeMode.range.from"
+                  :min="0"
+                  :step="1"
+                  :precision="2"
+                  :controls="false"
+                  :value-on-clear="null"
+                  placeholder="不限"
+                  size="small"
+                  class="mode-threshold__input"
+                  :aria-label="`${activeMode.name}的月均条数下界`"
+                />
+                <span class="mode-editor__tilde">~</span>
+                <ElInputNumber
+                  v-model="activeMode.range.to"
+                  :min="0"
+                  :step="1"
+                  :precision="2"
+                  :controls="false"
+                  :value-on-clear="null"
+                  placeholder="不限"
+                  size="small"
+                  class="mode-threshold__input"
+                  :aria-label="`${activeMode.name}的月均条数上界`"
+                />
+                <span class="mode-editor__note">{{ thresholdHint(activeMode) }}</span>
+              </div>
+
+              <p v-if="!activeMode.participates" class="mode-editor__empty">
+                该模式不参与计算，只在主面板「模式」列标注。
+              </p>
+
+              <template v-else>
+                <div v-for="kind in coefficientKinds(activeMode)" :key="kind" class="coefficient-table">
+                  <div class="coefficient-table__title">
+                    {{ kind }}
+                    <span class="coefficient-table__unit">单位：{{ coefficientUnit(activeMode) }}</span>
+                  </div>
+                  <div class="coefficient-table__head">
+                    <span>色彩</span>
+                    <span v-for="coefficient in COEFFICIENT_KEYS" :key="coefficient.key">
+                      {{ coefficient.label }}
+                    </span>
+                  </div>
+                  <div v-for="category in CATEGORIES" :key="category" class="coefficient-table__row">
+                    <span class="coefficient-table__category">{{ category }}</span>
+                    <ElInputNumber
+                      v-for="coefficient in COEFFICIENT_KEYS"
+                      :key="coefficient.key"
+                      v-model="activeMode.coefficients[kind][category][coefficient.key]"
+                      :min="0"
+                      :step="1"
+                      :precision="1"
+                      :controls="false"
+                      size="small"
+                      class="coefficient-table__input"
+                      :aria-label="`${activeMode.name} ${kind} ${category} ${coefficient.label}系数`"
+                    />
+                  </div>
+                </div>
+                <p v-if="activeMode.splitByCustomer" class="mode-editor__empty">
+                  专属品（累计客户 = 1）不设系数，只在主面板标注。
+                </p>
+
+                <div v-if="activeMode.key === 'bulk'" class="bulk-score-rules">
+                  <div class="coefficient-table__title">
+                    健康度判定
+                    <span class="coefficient-table__unit">按量模式 · SKU 弹窗里的 2 项判定</span>
+                  </div>
+                  <div class="mode-editor__row">
+                    <span class="mode-editor__label">本次进销比</span>
+                    <ElInputNumber
+                      v-model="activeMode.healthScoring.ratio.normalFrom"
+                      :min="0"
+                      :step="1"
+                      :precision="1"
+                      :controls="false"
+                      size="small"
+                      class="mode-threshold__input"
+                      aria-label="本次进销比正常区间下界"
+                    />
+                    <span class="mode-editor__tilde">~</span>
+                    <ElInputNumber
+                      v-model="activeMode.healthScoring.ratio.normalTo"
+                      :min="0"
+                      :step="1"
+                      :precision="1"
+                      :controls="false"
+                      size="small"
+                      class="mode-threshold__input"
+                      aria-label="本次进销比正常区间上界"
+                    />
+                    <span class="mode-editor__note">
+                      % 为正常：低于下界低风险，高于上界高风险
+                    </span>
+                  </div>
+                  <div class="mode-editor__row">
+                    <span class="mode-editor__label">累积客户数</span>
+                    <ElInputNumber
+                      v-model="activeMode.healthScoring.customers.normalFrom"
+                      :min="0"
+                      :step="1"
+                      :precision="0"
+                      :controls="false"
+                      size="small"
+                      class="mode-threshold__input"
+                      aria-label="累积客户数中风险区间下界"
+                    />
+                    <span class="mode-editor__tilde">~</span>
+                    <ElInputNumber
+                      v-model="activeMode.healthScoring.customers.normalTo"
+                      :min="0"
+                      :step="1"
+                      :precision="0"
+                      :controls="false"
+                      size="small"
+                      class="mode-threshold__input"
+                      aria-label="累积客户数中风险区间上界"
+                    />
+                    <span class="mode-editor__note">
+                      个为中风险：少于下界高风险，多于上界低风险
+                    </span>
+                  </div>
+                </div>
+              </template>
+
+              <div v-if="validation.errors.length || validation.warnings.length" class="rule-validation">
+                <p v-for="error in validation.errors" :key="error.message" class="rule-validation__error">
+                  ✕ {{ error.message }}
+                </p>
+                <p
+                  v-for="warning in validation.warnings"
+                  :key="warning.message"
+                  class="rule-validation__warning"
+                >
+                  ! {{ warning.message }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="manual-config">
+            <div class="manual-block">
+              <div class="manual-block__head">
+                <h3>手动模式</h3>
+                <ElTooltip
+                  content="行为由系统提供（自定系数 / 排除 / 订单货），名称、说明与默认系数可自行调整；内置的三种行为各保留一个。"
+                  placement="top"
+                >
+                  <span class="config-info">i</span>
+                </ElTooltip>
+                <span class="config-card__spacer" />
+                <ElButton size="small" text class="config-card__action" @click="addManualMode">
                   ＋ 新增手动模式
                 </ElButton>
               </div>
 
               <div class="manual-mode-list">
-                <div
-                  v-for="mode in manualModes"
-                  :key="mode.id"
-                  class="manual-mode-row"
-                >
+                <div class="manual-mode-row manual-mode-row--head">
+                  <span>名称</span>
+                  <span>行为</span>
+                  <span>说明</span>
+                  <span>红线</span>
+                  <span>正常</span>
+                  <span>峰值</span>
+                  <span />
+                </div>
+                <div v-for="mode in manualModes" :key="mode.id" class="manual-mode-row">
                   <ElInput
                     v-model="mode.name"
                     size="small"
@@ -1460,7 +1018,7 @@ function handleRowClick(row) {
                     aria-label="手动模式名称"
                   />
                   <span class="manual-mode-row__behavior">
-                    {{ mode.behavior === 'slow' ? '滞销' : '自定系数' }}
+                    {{ MANUAL_MODE_BEHAVIOR_LABELS[mode.behavior] ?? '自定系数' }}
                   </span>
                   <ElInput
                     v-model="mode.description"
@@ -1475,13 +1033,18 @@ function handleRowClick(row) {
                       :key="coefficient.key"
                       v-model="mode.defaultCoefficients[coefficient.key]"
                       :min="0"
-                      :step="0.5"
+                      :step="1"
                       :precision="1"
                       :controls="false"
                       size="small"
                       class="manual-mode-row__coefficient"
-                      :aria-label="`${mode.name}默认${coefficient.label}系数`"
+                      :aria-label="`${mode.name}默认${coefficient.label}系数（公斤）`"
                     />
+                  </template>
+                  <template v-else>
+                    <span class="manual-mode-row__skip">不参与</span>
+                    <span class="manual-mode-row__skip" />
+                    <span class="manual-mode-row__skip" />
                   </template>
                   <ElButton
                     size="small"
@@ -1498,13 +1061,16 @@ function handleRowClick(row) {
               </div>
             </div>
 
-            <div class="rule-block">
-              <div class="rule-block__heading">
-                <h3>② 手动 SKU 清单</h3>
-                <span class="rule-block__hint">
-                  在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。
-                </span>
-                <span class="manual-list__spacer" />
+            <div class="manual-block">
+              <div class="manual-block__head">
+                <h3>手动 SKU 清单</h3>
+                <ElTooltip
+                  content="在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。自定系数按「公斤」比较；排除 / 订单货不参与备货策略，订单明细在 SKU 弹窗里维护。"
+                  placement="top"
+                >
+                  <span class="config-info">i</span>
+                </ElTooltip>
+                <span class="config-card__spacer" />
                 <ElButton
                   size="small"
                   :disabled="manualSelection.length === 0"
@@ -1516,7 +1082,7 @@ function handleRowClick(row) {
 
               <p v-if="danglingSkuIds.length" class="manual-list__dangling">
                 清单中有 {{ danglingSkuIds.length }} 个商品不在当前数据里（可能已下架或改号）。
-                <ElButton size="small" text class="rule-block__add" @click="clearDanglingEntries">
+                <ElButton size="small" text class="config-card__action" @click="clearDanglingEntries">
                   一键清理
                 </ElButton>
               </p>
@@ -1557,7 +1123,7 @@ function handleRowClick(row) {
                     </ElSelect>
                   </template>
                 </ElTableColumn>
-                <ElTableColumn label="系数（红 / 正 / 峰）" min-width="220">
+                <ElTableColumn label="系数（红线 / 正常 / 峰值，公斤）" min-width="220">
                   <template #default="{ row }">
                     <template v-if="row.mode?.behavior === 'custom'">
                       <ElInputNumber
@@ -1565,7 +1131,7 @@ function handleRowClick(row) {
                         :key="coefficient.key"
                         :model-value="row.entry.coefficients?.[coefficient.key] ?? null"
                         :min="0"
-                        :step="0.5"
+                        :step="1"
                         :precision="1"
                         :controls="false"
                         size="small"
@@ -1574,7 +1140,10 @@ function handleRowClick(row) {
                         @update:model-value="(value) => updateManualRowCoefficient(row, coefficient.key, value)"
                       />
                     </template>
-                    <span v-else class="manual-table__slow">滞销：不参与备货</span>
+                    <span v-else-if="row.mode?.behavior === 'order'" class="manual-table__orders" :title="orderRowsTitle(row)">
+                      {{ orderRowsText(row) }}
+                    </span>
+                    <span v-else class="manual-table__exclude">排除：不参与备货策略</span>
                   </template>
                 </ElTableColumn>
                 <ElTableColumn label="操作" width="96" align="center">
@@ -1583,236 +1152,86 @@ function handleRowClick(row) {
                   </template>
                 </ElTableColumn>
               </ElTable>
-              <p v-else class="rule-block__empty">
+              <p v-else class="manual-block__empty">
                 还没有手动 SKU。到主面板点击颜色单元格的 ⓘ 打开 SKU 弹窗，把策略切成「手动策略」即可。
               </p>
             </div>
           </div>
-        </template>
+        </section>
 
-        <div class="config-actions">
-          <span class="config-dirty">{{ configDirty ? '有未保存的修改' : '' }}</span>
-          <ElTooltip content="回退上一步改动（Ctrl+Z）" placement="top">
-            <span class="config-action-wrap">
-              <ElButton size="small" :disabled="!canUndo" @click="undo">撤销</ElButton>
-            </span>
-          </ElTooltip>
-          <ElTooltip content="恢复刚撤销的改动（Ctrl+Shift+Z）" placement="top">
-            <span class="config-action-wrap">
-              <ElButton size="small" :disabled="!canRedo" @click="redo">重做</ElButton>
-            </span>
-          </ElTooltip>
-          <ElTooltip content="放弃所有未保存的改动，回到上次保存的配置" placement="top">
-            <span class="config-action-wrap">
-              <ElButton size="small" :disabled="!configDirty" @click="discardChanges">
-                放弃修改
-              </ElButton>
-            </span>
-          </ElTooltip>
-          <ElTooltip
-            content="把全部配置方案导出为 JSON，用于覆盖 src/stocking/config.json"
-            placement="top"
-          >
-            <span class="config-action-wrap">
-              <ElButton size="small" @click="downloadConfig">导出方案</ElButton>
-            </span>
-          </ElTooltip>
-          <ElTooltip content="导入配置方案文件，会覆盖当前全部方案" placement="top">
-            <span class="config-action-wrap">
-              <ElButton size="small" @click="triggerImport">导入方案</ElButton>
-            </span>
-          </ElTooltip>
-          <input
-            ref="importInputRef"
-            type="file"
-            accept="application/json,.json"
-            class="profile-import-input"
-            @change="handleImportFile"
-          />
-          <ElTooltip content="仅把当前方案恢复为内置默认配置并立即写回配置文件" placement="top">
-            <span class="config-action-wrap">
-              <ElButton size="small" @click="restoreDefaults">恢复默认</ElButton>
-            </span>
-          </ElTooltip>
-          <span class="config-actions__spacer" />
-          <ElButton size="small" type="primary" :disabled="!configDirty" @click="confirmConfig">
-            确定
-          </ElButton>
-        </div>
-      </section>
+        <section class="config-card" :class="{ 'config-card--open': weightsOpen }">
+          <div class="config-card__head">
+            <button
+              type="button"
+              class="config-card__toggle"
+              :aria-expanded="weightsOpen"
+              @click="weightsOpen = !weightsOpen"
+            >
+              <span class="config-card__chevron">▾</span>
+              <span class="config-card__title">销量加权</span>
+              <span class="config-card__summary">{{ weightsSummary }}</span>
+            </button>
+            <ElTooltip :content="weightsIntro" placement="top">
+              <span class="config-info">i</span>
+            </ElTooltip>
+            <span class="config-card__spacer" />
+            <ElButton size="small" text class="config-card__action" @click="resetWeights">
+              恢复 50 / 30 / 20
+            </ElButton>
+          </div>
 
-      <div class="config-table-heading">
-        <h2>备货详情</h2>
-        <span class="config-record-count">{{ inventoryLeafRows.length }} 条库存记录</span>
-      </div>
-
-      <ElTable
-        ref="configTableRef"
-        class="config-table"
-        :data="configTableRows"
-        row-key="id"
-        :expand-row-keys="configFlat ? [] : expandedProductKeys"
-        :tree-props="{ children: 'children' }"
-        :cell-class-name="getCellClassName"
-        :row-class-name="getRowClassName"
-        @expand-change="handleExpandChange"
-        @cell-click="handleCellClick"
-        @row-click="handleRowClick"
-        border
-        table-layout="auto"
-      >
-        <ElTableColumn label="商品" align="center">
-          <ElTableColumn prop="product" label="品名" align="center">
-            <template #default="{ row }">
-              <span v-if="row.isProductGroup" class="config-product-name">{{ row.product }}</span>
-              <span v-else class="config-product-text" :title="row.product">
-                {{ row.product }}
+          <div v-show="weightsOpen" class="config-card__body">
+            <div class="sales-window">
+              <label v-for="field in WEIGHT_FIELDS" :key="field.key" class="sales-window__item">
+                <span class="sales-window__label">{{ field.label }}</span>
+                <ElInputNumber
+                  v-model="salesWeights[field.key]"
+                  :min="0"
+                  :max="1"
+                  :step="0.05"
+                  :precision="2"
+                  :controls="false"
+                  size="small"
+                  class="sales-window__input"
+                  :aria-label="`${field.label}权重`"
+                />
+                <span class="sales-window__value">{{ formatPercent(salesWeights[field.key]) }}</span>
+              </label>
+              <span
+                class="sales-window__total"
+                :class="{ 'sales-window__total--warn': !weightsBalanced }"
+              >
+                合计 {{ formatPercent(weightsTotal) }}
               </span>
-            </template>
-          </ElTableColumn>
-          <ElTableColumn prop="color" label="颜色" align="center">
-            <template #default="{ row }">
-              <span v-if="!row.isProductGroup" class="config-color-text" :title="row.color">
-                {{ row.color }}
+            </div>
+
+            <div class="sales-window__months">
+              <span v-for="(share, index) in monthWeights" :key="index" class="sales-window__month">
+                {{ index === 0 ? '最新月' : `${index + 1} 个月前` }}
+                <strong>{{ formatPercent(share) }}</strong>
               </span>
-            </template>
-          </ElTableColumn>
-        </ElTableColumn>
+            </div>
+          </div>
+        </section>
 
-        <ElTableColumn label="信息" align="center">
-          <ElTableColumn label="模式" align="center">
-            <template #default="{ row }">
-              <span v-if="!row.isProductGroup" class="config-heat-text">{{ row.ruleName }}</span>
-            </template>
-          </ElTableColumn>
-          <ElTableColumn label="评分档" align="center">
-            <template #default="{ row }">
-              <span v-if="!row.isProductGroup" class="config-heat-text">{{ row.tierName }}</span>
-            </template>
-          </ElTableColumn>
-          <ElTableColumn label="等级" align="center">
-            <template #default="{ row }">
-              <span
-                v-if="!row.isProductGroup"
-                class="config-heat-text"
-                title="各评分因子等级"
-              >{{ row.gradeSummary || '--' }}</span>
-            </template>
-          </ElTableColumn>
-          <ElTableColumn label="色彩" align="center">
-            <template #default="{ row }">
-              <span v-if="!row.isProductGroup" class="config-color-text" :title="row.category">
-                {{ row.category }}
-              </span>
-            </template>
-          </ElTableColumn>
-        </ElTableColumn>
+        <ScoringSettings :scoring="scoring" @apply="applyScoring" />
 
-        <ElTableColumn label="备货策略" align="center">
-          <ElTableColumn label="红线库存" align="center">
-            <template #default="{ row }">
-              <span
-                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
-                :title="strategyCellTitle(row)"
-              >{{ formatStockCell(row, row.redLineStock) }}</span>
-            </template>
-          </ElTableColumn>
-          <ElTableColumn label="正常库存" align="center">
-            <template #default="{ row }">
-              <span
-                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
-                :title="strategyCellTitle(row)"
-              >{{ formatStockCell(row, row.normalStock) }}</span>
-            </template>
-          </ElTableColumn>
-          <ElTableColumn label="峰值库存" align="center">
-            <template #default="{ row }">
-              <span
-                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
-                :title="strategyCellTitle(row)"
-              >{{ formatStockCell(row, row.peakStock) }}</span>
-            </template>
-          </ElTableColumn>
-          <ElTableColumn label="系数" align="center">
-            <template #default="{ row }">
-              <span
-                :class="{ 'config-strategy-issue': !row.strategyAvailable }"
-                :title="strategyCellTitle(row)"
-              >{{ formatFactorCell(row) }}</span>
-            </template>
-          </ElTableColumn>
-        </ElTableColumn>
-      </ElTable>
-
-      <div v-if="configPageCount > 1" class="config-pager">
-        <ElButton size="small" :disabled="configPage <= 1" @click="configPage -= 1">
-          上一页
-        </ElButton>
-        <span class="config-pager-info">第 {{ configPage }} / {{ configPageCount }} 页</span>
-        <ElButton size="small" :disabled="configPage >= configPageCount" @click="configPage += 1">
-          下一页
-        </ElButton>
+        <SpuGradeSettings :grades="spuGrades" :totals="spuMonthlyTotals" @apply="applySpuGrades" />
       </div>
     </div>
-
-    <ElDialog
-      v-model="calibrateVisible"
-      title="按当前数据校准评分阈值"
-      width="760px"
-      append-to-body
-    >
-      <p class="calibrate-hint">
-        用当前已导入的 {{ inventoryItems.length }} 条记录计算分位：S≈前 10%、A≈前 30%、B≈前 60%，C 固定为 0；
-        阈值不会超过样本最大值。只影响「{{ activeRule?.name }}」这个模式，确认后仍需点击右下角「确定」保存。
-      </p>
-      <ElTable :data="calibrateRows" border size="small" max-height="360">
-        <ElTableColumn prop="label" label="评分因子" width="120" />
-        <ElTableColumn label="样本数" width="80" align="center">
-          <template #default="{ row }">{{ row.sampleCount }}</template>
-        </ElTableColumn>
-        <ElTableColumn label="当前 S / A / B / C" min-width="150" align="center">
-          <template #default="{ row }">{{ formatThresholds(row.current) }}</template>
-        </ElTableColumn>
-        <ElTableColumn label="建议 S / A / B / C" min-width="170" align="center">
-          <template #default="{ row }">
-            {{ row.thresholds ? formatThresholds(row.thresholds) : '无有效数据' }}
-          </template>
-        </ElTableColumn>
-        <ElTableColumn label="建议阈值下的等级分布" min-width="190" align="center">
-          <template #default="{ row }">
-            <span v-if="row.distribution">
-              S {{ row.distribution.S }} · A {{ row.distribution.A }} · B
-              {{ row.distribution.B }} · C {{ row.distribution.C }}
-              <template v-if="row.distribution.Z"> · Z {{ row.distribution.Z }}</template>
-            </span>
-            <span v-else>—</span>
-          </template>
-        </ElTableColumn>
-      </ElTable>
-      <div class="calibrate-options">
-        <ElCheckbox v-model="calibrateRebuildTiers">
-          同时按 S 个数重建评分档（3S / 2S / 1S / 默认档）
-        </ElCheckbox>
-        <span class="calibrate-options__hint">
-          档条件依次为 S ≥ 3 / 2 / 1；同名档保留原系数，缺失档按默认档系数放大补齐。
-        </span>
-      </div>
-      <template #footer>
-        <ElButton size="small" @click="calibrateVisible = false">取消</ElButton>
-        <ElButton size="small" type="primary" :disabled="!hasCalibration" @click="applyCalibration">
-          应用到当前模式
-        </ElButton>
-      </template>
-    </ElDialog>
   </main>
 </template>
+
+
 
 <style scoped>
 .config-page {
   min-height: 100vh;
-  padding: 12px;
+  padding: 8px 0 24px;
   color: var(--industrial-text);
   background: var(--industrial-page);
+  /* 控件统一 28px 高，避免 24px 与 32px 混排 */
+  --el-component-size-small: 28px;
 }
 
 .config-content {
@@ -1823,130 +1242,122 @@ function handleRowClick(row) {
   box-sizing: border-box;
 }
 
+/* 规则区居中限宽：宽屏下不再把输入框拉成一整行 */
+.config-body {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
 .config-heading {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 12px;
+  align-items: baseline;
+  gap: 12px;
+  margin: 2px 0 10px;
 }
 
 .config-heading h1 {
-  margin: 0 0 4px;
-  font-size: 20px;
+  margin: 0;
+  font-size: 18px;
 }
 
 .config-heading p {
   margin: 0;
   color: var(--industrial-muted);
-  font-size: 13px;
-}
-
-.rule-config-section {
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--industrial-grid);
-  border-radius: 4px;
-  background: var(--industrial-surface);
-}
-
-.rule-config-heading {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  margin-bottom: 8px;
-}
-
-.rule-config-heading h2 {
-  margin: 0;
-  font-size: 15px;
-}
-
-.rule-config-hint {
-  flex: 1 1 320px;
-  color: var(--industrial-muted);
   font-size: 12px;
-  line-height: 1.6;
 }
 
-.profile-bar {
+/* —— 顶部工作条：方案 + 保存状态 + 保存动作 —— */
+.config-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 6px;
+  background: var(--industrial-surface);
+  box-shadow: 0 2px 8px rgba(47, 59, 67, 0.08);
+}
+
+.config-bar__group {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
-  padding: 6px 8px;
-  border: 1px dashed var(--industrial-grid);
-  border-radius: 4px;
-  background: var(--industrial-page);
 }
 
-.profile-bar__label {
-  font-size: 12px;
+.config-bar__group--end {
+  margin-left: auto;
+}
+
+.config-bar__label {
   color: var(--industrial-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.config-bar__state {
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: var(--industrial-muted);
+  background: rgba(47, 59, 67, 0.06);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.config-bar__state--dirty {
+  color: #fff;
+  background: var(--industrial-replenish);
 }
 
 .profile-bar__select {
-  width: 180px;
-}
-
-.profile-bar__hint {
-  flex: 1 1 260px;
-  color: var(--industrial-muted);
-  font-size: 12px;
+  width: 170px;
 }
 
 .profile-import-input {
   display: none;
 }
 
-.calibrate-hint {
-  margin: 0 0 10px;
+.config-bar + .config-card {
+  margin-top: 12px;
+}
+
+/* —— 策略 / 模式工作区 —— */
+.config-workspace {
+  overflow: hidden;
+}
+
+.config-workspace > .config-card__head {
+  background: var(--industrial-page);
+}
+
+.config-workspace__hint {
   color: var(--industrial-muted);
   font-size: 12px;
-  line-height: 1.7;
-}
-
-.calibrate-options {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
-  margin-top: 10px;
-}
-
-.calibrate-options__hint {
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.rule-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--industrial-grid-light);
 }
 
 .strategy-tabs {
   display: flex;
-  gap: 6px;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--industrial-grid);
+  gap: 4px;
+  padding: 4px;
+  border-radius: 6px;
+  background: rgba(47, 59, 67, 0.06);
 }
 
 .strategy-tab {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  border: 1px solid var(--industrial-grid);
+  gap: 6px;
+  padding: 4px 12px;
+  border: 0;
   border-radius: 4px;
   color: var(--industrial-text);
-  background: var(--industrial-page);
+  background: transparent;
+  font: inherit;
   font-size: 13px;
   cursor: pointer;
 }
@@ -1954,33 +1365,256 @@ function handleRowClick(row) {
 .strategy-tab--active {
   color: #fff;
   background: var(--industrial-primary);
-  border-color: var(--industrial-primary);
+  font-weight: 600;
 }
 
 .strategy-tab__count {
   padding: 0 6px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.1);
   font-size: 11px;
 }
 
+.mode-workspace {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px;
+}
+
+.mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mode-list__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 6px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-left: 3px solid transparent;
+  border-radius: 5px;
+  color: inherit;
+  background: var(--industrial-page);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mode-list__item:hover {
+  border-color: var(--industrial-grid-light);
+}
+
+.mode-list__item--active {
+  border-color: var(--industrial-grid-light);
+  border-left-color: var(--industrial-primary);
+  background: var(--industrial-surface);
+}
+
+.mode-list__name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mode-list__count {
+  padding: 0 6px;
+  border-radius: 9px;
+  color: var(--industrial-muted);
+  background: rgba(47, 59, 67, 0.08);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mode-list__metric {
+  grid-column: 1 / -1;
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.mode-editor {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 5px;
+}
+
+.mode-editor__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.rule-name-input {
+  width: 148px;
+}
+
+.mode-editor__badge {
+  padding: 1px 8px;
+  border-radius: 10px;
+  color: var(--industrial-primary);
+  background: var(--industrial-header);
+  font-size: 11px;
+}
+
+.mode-editor__badge--muted {
+  color: var(--industrial-muted);
+  background: rgba(47, 59, 67, 0.05);
+}
+
+.mode-editor__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.mode-editor__label,
+.mode-editor__note {
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.mode-editor__empty {
+  margin: 0 0 8px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.mode-threshold__input {
+  width: 96px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mode-editor__tilde {
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.coefficient-table + .coefficient-table {
+  margin-top: 10px;
+}
+
+/* 按量模式在系数表下方追加的两项健康度判定区间 */
+.bulk-score-rules {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--industrial-grid-light);
+}
+
+.bulk-score-rules .mode-editor__label {
+  min-width: 72px;
+}
+
+.coefficient-table__title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.coefficient-table__unit {
+  color: var(--industrial-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.coefficient-table__head,
+.coefficient-table__row {
+  display: grid;
+  grid-template-columns: 72px repeat(3, 118px);
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.coefficient-table__head {
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.coefficient-table__row + .coefficient-table__row {
+  border-top: 1px dashed var(--industrial-grid-light);
+}
+
+.coefficient-table__category {
+  font-size: 12px;
+}
+
+.coefficient-table__input {
+  width: 118px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rule-validation {
+  margin-top: 10px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--industrial-header);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.rule-validation__error {
+  margin: 0;
+  color: var(--industrial-danger);
+}
+
+.rule-validation__warning {
+  margin: 0;
+  color: var(--industrial-muted);
+}
+
+/* —— 手动策略 —— */
 .manual-config {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  padding: 10px;
+}
+
+.manual-block__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.manual-block__head h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.manual-block__empty {
+  margin: 0;
+  color: var(--industrial-muted);
+  font-size: 12px;
 }
 
 .manual-mode-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .manual-mode-row {
   display: grid;
-  grid-template-columns: 140px 78px minmax(0, 1fr) repeat(3, 76px) 24px;
+  grid-template-columns: 132px 72px minmax(0, 1fr) repeat(3, 76px) 28px;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+}
+
+.manual-mode-row--head {
+  color: var(--industrial-muted);
+  font-size: 11px;
 }
 
 .manual-mode-row__behavior {
@@ -1995,15 +1629,25 @@ function handleRowClick(row) {
   width: 100%;
 }
 
-.manual-list__spacer {
-  flex: 1 1 auto;
+.manual-mode-row__coefficient {
+  font-variant-numeric: tabular-nums;
+}
+
+.manual-mode-row__skip {
+  color: var(--industrial-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.rule-row-remove {
+  padding: 0;
+  color: var(--industrial-danger);
 }
 
 .manual-list__dangling {
   margin: 0 0 8px;
   padding: 6px 10px;
-  border-radius: 3px;
-  color: var(--industrial-text);
+  border-radius: 4px;
   background: var(--industrial-header);
   font-size: 12px;
 }
@@ -2017,401 +1661,100 @@ function handleRowClick(row) {
 }
 
 .manual-table__coefficient {
-  width: 64px;
+  width: 62px;
   margin-right: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
-.manual-table__slow {
+.manual-table__exclude {
   color: var(--industrial-muted);
   font-size: 12px;
 }
 
-.rule-tab {
-  display: inline-flex;
+.manual-table__orders {
+  color: var(--industrial-muted);
+  font-size: 12px;
+  cursor: help;
+}
+
+/* —— 折叠卡片里的文字操作 —— */
+.config-card__action {
+  padding: 0;
+  color: var(--industrial-primary);
+}
+
+/* —— 销量加权 —— */
+.sales-window {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border: 1px solid var(--industrial-grid);
-  border-radius: 14px;
+  gap: 8px 18px;
+}
+
+.sales-window__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--industrial-text);
-  background: var(--industrial-page);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.rule-tab--default {
-  border-style: dashed;
-}
-
-.rule-tab--active {
-  color: #fff;
-  background: var(--industrial-primary);
-  border-color: var(--industrial-primary);
-}
-
-.rule-tab__count {
-  padding: 0 6px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.08);
-  font-size: 11px;
-}
-
-.rule-tab-add {
-  padding: 0 6px;
-  color: var(--industrial-primary);
-}
-
-.rule-card {
-  margin-top: 10px;
-}
-
-.rule-card__heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.rule-name-input {
-  width: 160px;
-}
-
-.rule-card__badge {
-  padding: 1px 8px;
-  border-radius: 10px;
-  color: var(--industrial-primary);
-  background: var(--industrial-header);
-  font-size: 11px;
-}
-
-.rule-card__badge--muted {
-  color: var(--industrial-muted);
-}
-
-.rule-card__spacer,
-.tier-card__spacer {
-  flex: 1 1 auto;
-}
-
-/* 二次确认时文案变长，固定宽度避免按钮、布局抖动 */
-.rule-delete-button {
-  min-width: 92px;
-}
-
-.rule-block {
-  margin-bottom: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 3px;
-  background: var(--industrial-page);
-}
-
-.rule-block__heading {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  margin-bottom: 6px;
-}
-
-.rule-block__heading h3 {
-  margin: 0;
-  font-size: 13px;
-}
-
-.rule-block__hint {
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
-.rule-block__add {
-  padding: 0;
-  color: var(--industrial-primary);
-}
-
-.rule-block__empty {
-  margin: 0;
-  color: var(--industrial-muted);
   font-size: 12px;
 }
 
-.rule-factor-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.rule-factor-row {
-  display: grid;
-  grid-template-columns: 76px minmax(0, 240px) 24px;
-  align-items: center;
-  gap: 6px;
-}
-
-.rule-factor-row__range {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.rule-factor-row__range-input {
-  width: 100%;
-}
-
-.rule-factor-row__range-dash {
-  flex: 0 0 auto;
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.rule-factor-row__label {
-  font-size: 12px;
-}
-
-.rule-factor-row__value {
-  width: 100%;
-}
-
-.rule-row-remove {
-  padding: 0;
-  color: var(--industrial-danger);
-}
-
-.grade-table {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.grade-table__head,
-.grade-table__row {
-  display: grid;
-  grid-template-columns: 88px repeat(4, minmax(0, 1fr)) 24px;
-  align-items: center;
-  gap: 6px;
-}
-
-.grade-table__head {
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
-.grade-table__label {
-  font-size: 12px;
-}
-
-.grade-table__input {
-  width: 100%;
-}
-
-.tier-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.tier-card {
-  padding: 8px 10px;
-  border: 1px solid var(--industrial-grid);
-  border-radius: 4px;
-  background: var(--industrial-surface);
-}
-
-.tier-card--default {
-  background: var(--industrial-header);
-}
-
-.tier-card__heading {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.tier-name-input {
-  width: 140px;
-}
-
-.tier-card__badge {
-  padding: 1px 8px;
-  border-radius: 10px;
-  color: var(--industrial-primary);
-  background: rgba(0, 0, 0, 0.04);
-  font-size: 11px;
-}
-
-.tier-card__badge--muted {
-  color: var(--industrial-muted);
-}
-
-.tier-conditions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.tier-condition {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 3px;
-  background: var(--industrial-page);
-}
-
-.tier-condition__grade {
-  width: 60px;
-}
-
-.tier-condition__operator {
-  width: 64px;
-}
-
-.tier-condition__count {
-  width: 64px;
-}
-
-.tier-condition__unit {
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
-.tier-coefficients {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.tier-coefficient-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.tier-coefficient-row__category {
-  width: 32px;
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.tier-coefficient-row__item {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-}
-
-.tier-coefficient-row__input {
+.sales-window__input {
   width: 76px;
+  font-variant-numeric: tabular-nums;
 }
 
-.rule-validation {
-  margin-top: 8px;
-  padding: 6px 10px;
-  border-radius: 3px;
-  background: var(--industrial-header);
-  font-size: 12px;
-  line-height: 1.7;
-}
-
-.rule-validation__error {
-  margin: 0;
-  color: var(--industrial-out-of-stock, #b44242);
-}
-
-.rule-validation__warning {
-  margin: 0;
+.sales-window__value {
+  min-width: 50px;
   color: var(--industrial-muted);
+  font-variant-numeric: tabular-nums;
 }
 
-.config-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--industrial-grid-light);
-}
-
-/* 禁用状态的按钮不触发鼠标事件，外面包一层 span 才能让 tooltip 正常显示 */
-.config-action-wrap {
-  display: inline-flex;
-}
-
-.config-actions__spacer {
-  flex: 1 1 auto;
-}
-
-.config-dirty {
-  margin-right: 4px;
-  color: var(--industrial-muted);
+.sales-window__total {
+  color: var(--industrial-normal);
   font-size: 12px;
 }
 
-.config-table-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.config-table-heading h2 {
-  margin: 0;
-  font-size: 15px;
-}
-
-.config-record-count {
-  color: var(--industrial-muted);
-  font-size: 13px;
-}
-
-.config-table {
-  width: 100%;
-}
-
-.config-product-name {
-  font-weight: 600;
-}
-
-.config-product-text,
-.config-color-text,
-.config-heat-text {
-  display: inline-block;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.config-strategy-issue {
+.sales-window__total--warn {
   color: var(--industrial-danger);
+}
+
+.sales-window__months {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--industrial-muted);
   font-size: 11px;
 }
 
-.config-pager {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  margin-top: 10px;
-}.config-pager-info {
-  color: var(--industrial-muted);
-  font-size: 12px;
+.sales-window__month {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--industrial-page);
+  font-variant-numeric: tabular-nums;
 }
 
-:deep(.product-cell-clickable) {
-  cursor: pointer;
-}
+@media (max-width: 720px) {
+  .mode-workspace {
+    grid-template-columns: 1fr;
+  }
 
-:deep(.product-group-row) {
-  background: var(--industrial-header);
-}
+  .mode-list {
+    flex-direction: row;
+    overflow-x: auto;
+  }
 
-:deep(.inventory-row-selected) {
-  background: rgba(47, 59, 67, 0.06);
+  .mode-list__item {
+    min-width: 120px;
+  }
+
+  .manual-mode-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .manual-mode-row--head {
+    display: none;
+  }
 }
 </style>

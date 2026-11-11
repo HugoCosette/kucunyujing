@@ -1,4 +1,4 @@
-import { HEAT_METRIC_FIELDS } from '@/stocking/fields'
+import { HEAT_METRIC_FIELDS } from '@/stocking/constants'
 
 // 唯一标识：总表与销售表共有的 SKU 关联键，不参与任何因子。
 export const SKU_ID_FIELD = 'skuId'
@@ -8,12 +8,12 @@ export const SKU_ID_LABEL = '唯一标识'
 export const QUANTITY_FIELDS = [
   { field: 'producing', label: '生产中' },
   { field: 'backorder', label: '欠货' },
-  { field: 'weeklyUsage', label: '周消耗' },
+  { field: 'weeklySales', label: '周销量' },
   { field: 'warehouseStock', label: '在仓库存' },
   { field: 'inTransitStock', label: '在途库存' },
   { field: 'turnoverIn', label: '周转入' },
   { field: 'totalOutbound', label: '总出库数量' },
 ]
 
-// 动销指标：由销售表提供，是评分因子最常用的 4 个字段。
+// 动销指标：由销售表提供；其中月均条数决定模式归属，其余仅展示与统计。
 export const HEAT_FACTOR_FIELDS = HEAT_METRIC_FIELDS

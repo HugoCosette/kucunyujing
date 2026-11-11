@@ -26,9 +26,11 @@ const CONFIG = {
     '品名',
     '颜色',
     '色彩',
+    '出码率', // 品名维度的「码/公斤」，来自可选的「出码率」表
+    '公斤系数', // 每 1 个数量单位 = ? 公斤：码 → 1/出码率，公斤 → 1，其他留空
     '生产中', // 暂无数据源（排单导出缺生产状态列）
     '欠货',
-    '周消耗', // 由「月均条数 ÷ 4」算出，月均条数本身只进销售表
+    '周销量', // 月均销量（公斤）÷ 4
     '周转入', // 暂无数据源（出入库明细无周转入单据）
     '在途库存',
     '在仓库存',
@@ -39,18 +41,51 @@ const CONFIG = {
 /** 唯一标识含这些词即算「黑白」，其余算「彩色」 */
 const MONOCHROME_WORDS = ['本白', '大白', '黑白', '黑色']
 
-/** 基准表：决定总表的行集合（左连接主表） */
+/** 能否换算成公斤：公斤单位直接可用，码单位必须带出码率；条/件/米/空单位无法换算 */
+function isKilogramConvertible(row) {
+  const unit = cellText(row['单位'])
+  if (unit === '公斤') return true
+  if (unit === '码') return toNumber(row['出码率']) > 0
+  return false
+}
+
+/** 基准表：决定总表的行集合（左连接主表）。
+ *  只保留能换算成公斤的 SKU：公斤单位直接用，码单位必须有出码率，其余（条/件/米/无单位）一律剔除。 */
 const BASE = {
   label: '产品资料',
+  rowFilter: (row) => isKilogramConvertible(row),
   columns: [
     '品名',
     '颜色',
+    { field: '单位', as: '单位' },
     {
       as: '色彩',
       derive: ({ key }) =>
         MONOCHROME_WORDS.some((word) => key.includes(word)) ? '黑白' : '彩色',
     },
+    // 出码率不在产品资料里，由「出码率」表按品名注入（见 runCleaning）
+    { as: '出码率', type: 'number' },
+    {
+      as: '公斤系数',
+      derive: ({ values }) => {
+        const unit = cellText(values['单位'])
+        const rate = toNumber(values['出码率'])
+        if (unit === '公斤') return 1
+        if (unit === '码' && rate > 0) return Math.round((1 / rate) * 1000000) / 1000000
+        return ''
+      },
+    },
   ],
+}
+
+/** 出码率（可选）：品名 → 码/公斤。只用于把「码」换算成「公斤」，不参与关联 */
+const RATES = {
+  id: 'rates',
+  label: '出码率',
+  match: ['出码率'],
+  optional: true,
+  keyFields: [{ field: '品名' }],
+  columns: [{ field: '品名' }, { field: '出码率', type: 'number' }],
 }
 
 /** 分表：每张表按唯一标识并入总表 */
@@ -61,39 +96,48 @@ const JOINS = [
     rowFilter: (row) => toNumber(row['出库数量']) > 0,
     columns: [
       { field: '出库数量', as: '总出库数量' },
-      // 累积条数 = 总出库数量 ÷ 单位换算系数（码→100、公斤→20；件/条等无规则的记 0），即该 SKU 历史出货多少条
+      // 累积条数 = 总出库数量 ÷ 单位换算系数（码→100、公斤→20；件/条等无规则的记 0），只用于判定模式与 SPU 展示
       {
         field: '出库数量',
         as: '累积条数',
         divideBy: { field: '单位', map: { 码: 100, 公斤: 20 } },
         digits: 0,
       },
-      // 月均条数 = 累积条数 ÷ 动销月份（最长连续动销段），四舍五入保留 2 位
-      { as: '月均条数', divideFrom: { column: '累积条数', byColumn: '动销月份' }, digits: 2 },
-      // 周消耗 = 月均条数 ÷ 4（一个月按 4 周计），备货红线/正常/峰值都由它乘系数得到
-      { as: '周消耗', divideFrom: { column: '月均条数', by: 4 }, digits: 2 },
+      // 累积销量 = 全历史出库换算成公斤（码 ÷ 出码率；公斤原值；无出码率的记 0）
+      { field: '出库数量', as: '累积销量', toKilogram: true, digits: 2 },
+      // 月均销量 = 累积销量 ÷ 动销月份（最长连续动销段）
+      { as: '月均销量', divideFrom: { column: '累积销量', byColumn: '动销月份' }, digits: 2 },
+      // 周销量 = 月均销量 ÷ 4（一个月按 4 周计）
+      { as: '周销量', divideFrom: { column: '月均销量', by: 4 }, digits: 2 },
       { as: '订单总数', agg: 'rows' }, // 1 行 = 1 单
       { field: '做账日期', as: '动销月份', agg: 'months' }, // 最长连续月份数
-      // 动销客户 = 该 SKU 的去重客户数；明细表没有客户列时整列按 0 处理（optional）
-      { field: '客户', as: '动销客户', agg: 'distinct', optional: true },
+      // 累计客户 = 该 SKU 的去重客户数；明细表没有客户列时整列按 0 处理（optional）
+      { field: '客户', as: '累计客户', agg: 'distinct', optional: true },
+      // 客户CR5率 = 销量前 5 的客户占该 SKU 总销量的比例（0~1）；明细表没有客户列时整列按 0 处理
+      {
+        field: '出库数量',
+        as: '客户CR5率',
+        agg: 'topShare',
+        top: 5,
+        customerField: '客户',
+        digits: 4,
+        optional: true,
+      },
     ],
     monthlyColumns: {
       dateField: '做账日期',
       // year 留空：按数据里最新的年份统计月份
       year: null,
       columns: [
+        // 月条数：出库数量 ÷ 单位换算系数（码 100 / 公斤 20），只做展示与折线图
         {
           field: '出库数量',
           as: '{月}月条数',
           divideBy: { field: '单位', map: { 码: 100, 公斤: 20 } },
           digits: 0,
         },
-        {
-          field: '出库数量',
-          as: '{月}月重量',
-          onlyUnits: { field: '单位', include: ['公斤'] },
-          digits: 2,
-        },
+        // 月销量（公斤）：码 → 出库码数 ÷ 出码率；公斤 → 原值
+        { field: '出库数量', as: '{月}月销量', toKilogram: true, digits: 2 },
         // 该月订单数 = 该月有效行数（1 行 = 1 单，与订单总数同口径）
         { as: '{月}月订单数', agg: 'rows' },
       ],
@@ -136,12 +180,13 @@ export const OUTPUTS = [
       '唯一标识',
       '品名',
       '颜色',
-      '月均条数',
+      '累计客户', // 出入库明细「客户」列去重计数
       '订单总数',
       '动销月份',
-      '动销客户', // 出入库明细「客户」列去重计数
-      '累积条数',
-      MONTHLY_TOKEN,
+      '累积条数', // 只用于判定模式与 SPU 展示
+      '累积销量', // 全历史出库换算成公斤，评分「进销比」的分母
+      '客户CR5率', // 出入库明细「客户」列的前 5 名销量占比（0~1）
+      MONTHLY_TOKEN, // 每月：条数 + 销量（公斤）+ 订单数
     ],
   },
 ]
@@ -189,9 +234,10 @@ function expandMonthlyColumns(config, role) {
 }
 
 function normalizeKeyFields(keyFields) {
-  return (keyFields || []).map((keyField) =>
-    typeof keyField === 'string' ? { field: keyField, aliases: [] } : keyField,
-  )
+  return (keyFields || []).map((keyField) => {
+    if (typeof keyField === 'string') return { field: keyField, aliases: [] }
+    return { ...keyField, aliases: keyField.aliases ?? [] }
+  })
 }
 
 function normalizeSource(sourceConfig, role) {
@@ -199,6 +245,7 @@ function normalizeSource(sourceConfig, role) {
     ...sourceConfig,
     id: sourceConfig.id ?? sourceConfig.label,
     role,
+    optional: Boolean(sourceConfig.optional),
     match: sourceConfig.match ?? [sourceConfig.label],
     keyFields: normalizeKeyFields(sourceConfig.keyFields ?? CONFIG.keyFields),
     columns: [
@@ -208,20 +255,23 @@ function normalizeSource(sourceConfig, role) {
   }
 }
 
-/** 合并 BASE 与 JOINS，并在调用时读取，便于运行期增删分表 */
+/** 合并 BASE / JOINS / 出码率，并在调用时读取，便于运行期增删分表 */
 export function normalizeSources() {
   return [
     normalizeSource(BASE, 'base'),
     ...JOINS.map((config) => normalizeSource(config, 'join')),
+    normalizeSource(RATES, 'lookup'),
   ]
 }
 
-/** 页面用：分表清单（名称、文件关键字、是否基准表），与清洗配置同源 */
+/** 页面用：分表清单（名称、文件关键字、是否基准表、是否可选），与清洗配置同源 */
 export function getSplitSourceRoles() {
   return normalizeSources().map((source) => ({
     id: source.id,
     label: source.label,
     isBase: source.role === 'base',
+    optional: source.optional,
+    role: source.role,
     keywords: source.match,
   }))
 }
@@ -283,7 +333,16 @@ function normalizeKeyText(key) {
   return key.normalize('NFKC').toLowerCase()
 }
 
-const NUMERIC_AGGS = new Set(['sum', 'count', 'rows', 'months', 'min', 'max', 'distinct'])
+const NUMERIC_AGGS = new Set([
+  'sum',
+  'count',
+  'rows',
+  'months',
+  'min',
+  'max',
+  'distinct',
+  'topShare',
+])
 
 function columnDefault(column) {
   if (column.default !== undefined) return column.default
@@ -377,12 +436,26 @@ function resolveDivisor(divideBy, context) {
   return Number.isFinite(divideBy.default) && divideBy.default !== 0 ? divideBy.default : null
 }
 
-function initState(column) {
-  switch (column.agg || 'sum') {
+/** 把一行出库数量换算成公斤：码 ÷ 出码率；公斤取原值；其他单位无换算关系记 0 */
+function toKilogram(row, column) {
+  const amount = toNumber(row[column.field])
+  if (!amount) return 0
+  const unit = textValue(row['单位'])
+  if (unit === '公斤') return amount
+  if (unit === '码') {
+    const rate = toNumber(row['出码率'])
+    return rate > 0 ? amount / rate : 0
+  }
+  return 0
+}
+
+function initState(column) {  switch (column.agg || 'sum') {
     case 'concat':
     case 'months':
     case 'distinct':
       return new Set()
+    case 'topShare':
+      return new Map() // 客户 → 销量合计
     case 'count':
     case 'rows':
     case 'sum':
@@ -397,6 +470,8 @@ function updateState(column, state, row) {
   const value = row[column.field]
   switch (agg) {
     case 'sum':
+      // 公斤口径：码 ÷ 出码率，公斤取原值，其他单位无换算关系记 0
+      if (column.toKilogram) return state + toKilogram(row, column)
       return state + toNumber(value)
     case 'count':
     case 'rows':
@@ -420,6 +495,14 @@ function updateState(column, state, row) {
       if (text) state.add(text)
       return state
     }
+    // 按客户累加销量，供集中度取前 N 名；没有客户名的行不参与
+    case 'topShare': {
+      const customer = textValue(row[column.customerField])
+      const amount = toNumber(value)
+      if (!customer || !(amount > 0)) return state
+      state.set(customer, (state.get(customer) || 0) + amount)
+      return state
+    }
     case 'last': {
       const text = textValue(value)
       return text ? value : state
@@ -440,6 +523,17 @@ function finalizeState(column, state, context) {
       return [...state].join(column.separator || '、')
     case 'distinct':
       return state.size
+    // 集中度：销量前 N 名客户合计 ÷ 总销量，四舍五入到 digits 位
+    case 'topShare': {
+      if (!state.size) return columnDefault(column)
+      const amounts = [...state.values()].sort((a, b) => b - a)
+      const total = amounts.reduce((sum, amount) => sum + amount, 0)
+      if (!(total > 0)) return columnDefault(column)
+      const top = Math.max(1, column.top ?? 5)
+      const share =
+        amounts.slice(0, top).reduce((sum, amount) => sum + amount, 0) / total
+      return round(share, column.digits ?? 4)
+    }
     case 'months':
       return longestConsecutiveMonths(state)
     case 'sum': {
@@ -472,6 +566,7 @@ function sourceFields(source) {
   }
   for (const column of source.columns) {
     if (column.sourceField) fields.add(column.sourceField)
+    if (column.customerField) fields.add(column.customerField)
     if (column.divideBy?.field) fields.add(column.divideBy.field)
     if (column.onlyUnits?.field) fields.add(column.onlyUnits.field)
     if (column.monthDateField) fields.add(column.monthDateField)
@@ -492,7 +587,13 @@ export function assertSourceHeader(source, labels) {
   const missingValueColumns = source.columns
     .filter((column) => column.sourceField && !column.optional && !present.has(column.sourceField))
     .map((column) => column.sourceField)
-  const problems = [...new Set([...missing, ...missingValueColumns])]
+  // 分组/去重依据列（如 客户）同样校验；标记 optional 的列缺失时按 0 处理，不报错
+  const missingGroupColumns = source.columns
+    .filter(
+      (column) => column.customerField && !column.optional && !present.has(column.customerField),
+    )
+    .map((column) => column.customerField)
+  const problems = [...new Set([...missing, ...missingValueColumns, ...missingGroupColumns])]
   if (problems.length) {
     throw new Error(
       `「${source.label}」表头缺少列：${problems.join('、')}，请确认第一行是表头且列名未改动`,
@@ -521,10 +622,16 @@ function createBaseBuilder(source) {
   const lookup = new Map()
   const looseIndex = new Map()
   let duplicatedRows = 0
+  let skippedRows = 0
 
   const add = (row) => {
     const key = makeKey(row, source.keyFields)
     if (!key) return
+    if (source.rowFilter && !source.rowFilter(row)) {
+      // 例如缺出码率的「码」单位 SKU：无法换算成公斤，直接从基准里剔除
+      skippedRows += 1
+      return
+    }
     if (index.has(key)) {
       duplicatedRows += 1
       return
@@ -553,7 +660,7 @@ function createBaseBuilder(source) {
       if (!looseIndex.has(prefix)) looseIndex.set(prefix, [])
       looseIndex.get(prefix).push({ key, tail: parts[parts.length - 1] })
     }
-    return { keys, index, lookup, looseIndex, duplicatedRows }
+    return { keys, index, lookup, looseIndex, duplicatedRows, skippedRows }
   }
 
   return { add, finish }
@@ -747,8 +854,9 @@ function clampRatio(value) {
 export async function runCleaning({ readRecords, onProgress } = {}) {
   if (typeof readRecords !== 'function') throw new Error('runCleaning 需要传入 readRecords')
   const sources = normalizeSources()
-  const baseSource = sources[0]
-  const joinSourcesList = sources.slice(1)
+  const baseSource = sources.find((source) => source.role === 'base')
+  const lookupSourcesList = sources.filter((source) => source.role === 'lookup')
+  const joinSourcesList = sources.filter((source) => source.role === 'join')
   const totalSteps = sources.length
   let step = 0
 
@@ -760,9 +868,40 @@ export async function runCleaning({ readRecords, onProgress } = {}) {
       message,
     })
 
+  // 0. 出码率（可选）：品名 → 码/公斤。缺失时所有「码」单位的重量类字段记 0
+  const ratesByProduct = new Map()
+  for (const source of lookupSourcesList) {
+    await readRecords(
+      source,
+      sourceFields(source),
+      (row) => {
+        const name = normalizeKeyText(cellText(row['品名']))
+        const rate = toNumber(row['出码率'])
+        if (name && rate > 0) ratesByProduct.set(name, rate)
+      },
+      (ratio) => report(source, ratio, `读取 ${source.label}`),
+    )
+    step += 1
+  }
+
+  // 读表时按品名注入出码率：产品资料与出入库明细都要用它把「码」换算成公斤
+  const readWithRate = (source, fields, handle, onProgressOfSource) => {
+    if (source.role === 'lookup') return readRecords(source, fields, handle, onProgressOfSource)
+    return readRecords(
+      source,
+      fields,
+      (row) => {
+        const name = normalizeKeyText(cellText(row['品名'] ?? row['产品名']))
+        row['出码率'] = ratesByProduct.get(name) ?? null
+        handle(row)
+      },
+      onProgressOfSource,
+    )
+  }
+
   // 1. 基准表：决定总表的行集合
   const baseBuilder = createBaseBuilder(baseSource)
-  await readRecords(
+  await readWithRate(
     baseSource,
     sourceFields(baseSource),
     baseBuilder.add,
@@ -782,7 +921,7 @@ export async function runCleaning({ readRecords, onProgress } = {}) {
 
     if (prescan) {
       const dateField = source.monthlyColumns.dateField
-      await readRecords(
+      await readWithRate(
         source,
         [dateField],
         (row) => {
@@ -794,7 +933,7 @@ export async function runCleaning({ readRecords, onProgress } = {}) {
       aggregator.setMonthlyYear(monthlyYear)
     }
 
-    await readRecords(
+    await readWithRate(
       source,
       sourceFields(source),
       aggregator.add,
@@ -837,6 +976,19 @@ export async function runCleaning({ readRecords, onProgress } = {}) {
   const header = ['唯一标识', ...columnOrder]
   const lines = joinSources(base, baseSource.columns, joins, columnOrder)
 
+  // 兜底：欠货 / 生产排单会追加基准里没有的 SKU，无法换算成公斤的一并剔除，
+  // 保证总表里每一行都能算出公斤（公斤单位或带出码率的码单位）。
+  const factorAt = header.indexOf('公斤系数')
+  let appendedDropped = 0
+  const keptLines =
+    factorAt < 0
+      ? lines
+      : lines.filter((line) => {
+          const convertible = cellText(line[factorAt]) !== ''
+          if (!convertible) appendedDropped += 1
+          return convertible
+        })
+
   const tables = {}
   for (const output of resolvedOutputs) {
     const indexes = output.columns.map((name) => {
@@ -846,18 +998,31 @@ export async function runCleaning({ readRecords, onProgress } = {}) {
     })
     tables[output.sheet] = {
       columns: output.columns,
-      rows: lines.map((line) => indexes.map((at) => line[at])),
+      rows: keptLines.map((line) => indexes.map((at) => line[at])),
     }
   }
+
+  // 被剔除的 SKU 都发生在基准阶段（追加行另有 appendedDropped 兜底）
+  const missingRateSkuCount = base.skippedRows
 
   return {
     tables,
     stats: {
-      rowCount: lines.length,
-      base: { label: baseSource.label, keyCount: base.keys.length, duplicatedRows: base.duplicatedRows },
+      rowCount: keptLines.length,
+      base: {
+        label: baseSource.label,
+        keyCount: base.keys.length,
+        duplicatedRows: base.duplicatedRows,
+        // 因无法换算成公斤（缺出码率的码单位、条/件/米等）被剔除的 SKU
+        skippedRows: base.skippedRows,
+      },
       joins: joinStats,
       // 基准里没有、被追加成新行的 SKU 数量
-      appendedRows: lines.length - base.keys.length,
+      appendedRows: keptLines.length - base.keys.length,
+      // 追加行里因为无法换算成公斤又被剔除的数量
+      appendedDropped,
+      // 出码率：命中品名数 + 需要换算但没有出码率的 SKU 数
+      rates: { productCount: ratesByProduct.size, missingSkuCount: missingRateSkuCount },
     },
   }
 }

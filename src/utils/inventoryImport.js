@@ -4,21 +4,24 @@ import {
   SKU_ID_FIELD,
   SKU_ID_LABEL,
 } from '@/data/quantityFields'
-import { getFieldMeta } from '@/stocking/fields'
+import { CATEGORIES, LEGACY_METRIC_LABELS } from '@/stocking/constants'
 import { normalizeProductName, normalizeSkuId } from './inventory.js'
 
 // 总表模板列：SKU 关联键 + 基本面信息 + 备货计算所需的全部数量列。
+// 「出码率 / 公斤系数」把库存（码或公斤）换算成公斤，缺失时该行不参与计算。
 export const IMPORT_TEMPLATE_COLUMNS = [
   SKU_ID_LABEL,
   '色彩',
   '品名',
   '颜色',
   ...QUANTITY_FIELDS.map((entry) => entry.label),
+  '出码率',
+  '公斤系数',
 ]
 
 export const IMPORT_TEMPLATE_SAMPLE_ROWS = [
-  ['NO-0001', '黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0, 12000],
-  ['NO-0002', '彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0, 8600],
+  ['NO-0001', '黑白', '挪威网', '1#黑色', 3443, 280, 940, 3217, 3443, 0, 12000, 34, 0.029412],
+  ['NO-0002', '彩色', '挪威网', '193#浅咖', 1735, 260, 1160, 2871, 1735, 0, 8600, 34, 0.029412],
 ]
 
 const HEADER_ALIASES = new Map([
@@ -31,6 +34,9 @@ const HEADER_ALIASES = new Map([
   ['色彩', 'category'],
   ['色彩类别', 'category'],
   ...QUANTITY_FIELDS.map((entry) => [entry.label, entry.field]),
+  ['公斤系数', 'kgFactor'],
+  ['出码率', 'unitRate'],
+  ['单位', 'unit'],
   // 以下列已不参与总表导入，只用于统计并提示。
   ['评分档', 'stockingType'],
   ['热度', 'stockingType'],
@@ -38,11 +44,22 @@ const HEADER_ALIASES = new Map([
   ['备货分类', 'stockingType'],
   ['需安排', 'planned'],
   ...HEAT_FACTOR_FIELDS.map((entry) => [entry.label, entry.field]),
+  ...LEGACY_METRIC_LABELS,
 ])
 
-const CATEGORIES = getFieldMeta('category').options
 const EMPTY_QUANTITY_TOKENS = new Set(['', '--', '-', '—', '缺省', 'null'])
 const HEADER_SCAN_ROWS = 10
+
+// 公斤系数优先取显式列；缺列时用「出码率」反推（码单位），再退回按「单位」推断。
+function resolveKgFactor(rawFactor, rawRate, rawUnit) {
+  const factor = Number(String(rawFactor ?? '').trim().replace(/,/g, ''))
+  if (Number.isFinite(factor) && factor > 0) return factor
+  const rate = Number(String(rawRate ?? '').trim().replace(/,/g, ''))
+  if (Number.isFinite(rate) && rate > 0) return 1 / rate
+  const unit = String(rawUnit ?? '').trim()
+  if (unit === '公斤') return 1
+  return null
+}
 
 function normalizeHeader(value) {
   return String(value ?? '')
@@ -183,7 +200,19 @@ export function parseInventorySheet(rows) {
 
     seenSkuIds.set(skuId, row.rowNumber)
     seenNames.set(nameKey, row.rowNumber)
-    items.push({ skuId, product, color, category, ...quantities })
+    items.push({
+      skuId,
+      product,
+      color,
+      category,
+      kgFactor: resolveKgFactor(
+        readCell('kgFactor'),
+        readCell('unitRate'),
+        readCell('unit'),
+      ),
+      unitRate: Number(String(readCell('unitRate') ?? '').trim().replace(/,/g, '')) || null,
+      ...quantities,
+    })
   }
 
   if (!items.length) {

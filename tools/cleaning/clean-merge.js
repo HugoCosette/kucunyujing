@@ -324,7 +324,9 @@ function printColumnPlan(entries, outputs) {
     }
   }
   if (missing.size) console.warn(`以下几列暂时没有数据来源，整列填 0：${[...missing].join("、")}`);
-  const dropped = [...available].filter((name) => !used.has(name));
+  const dropped = [...available].filter(
+    (name) => !used.has(name) && !["单位", "累积销量", "月均销量"].includes(name),
+  );
   if (dropped.length) console.warn(`以下列已在数据源里配置，但没有输出到任何表：${dropped.join("、")}`);
 }
 

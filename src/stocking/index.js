@@ -1,43 +1,40 @@
-// 备货模式模块门面：字段注册表、配置读写、校验、计算能力都从这里对外暴露。
+// 备货模式模块门面：配置读写、校验、计算能力都从这里对外暴露。
 export {
-  ALL_GRADES,
-  COMPARE_OPERATORS,
-  FIELD_GROUPS,
-  GRADES,
+  CATEGORIES,
+  COEFFICIENT_KEYS,
+  CUSTOMER_EXCLUSIVE,
+  CUSTOMER_FLOW,
   HEAT_METRIC_FIELDS,
-  STOCKING_FIELDS,
-  UNGRADED,
-  createThresholds,
-  getFieldLabel,
-  getFieldMeta,
-  getFieldsByGroup,
-  operatorLabel,
-  operatorsFor,
-} from './fields.js'
+  LEGACY_METRIC_LABELS,
+  MODE_KEYS,
+  MODE_METRICS,
+  SALES_WINDOW_DEFAULTS,
+  expandMonthWeights,
+} from './constants.js'
 
 export {
   BUILTIN_MANUAL_MODES,
   BUILTIN_STRATEGIES,
+  CONFIG_VERSION,
+  DEFAULT_MANUAL_MODE_NAMES,
   DEFAULT_PROFILE_ID,
   DEFAULT_PROFILE_NAME,
   MANUAL_BEHAVIORS,
-  createDefaultCoefficients,
+  createDefaultAutoModes,
   createDefaultConfig,
   createDefaultManualMode,
   createDefaultProfileFile,
-  createDefaultRule,
-  createDefaultTier,
 } from './defaults.js'
 
 export {
   PROFILE_FILE_VERSION,
-  detectRuleOverlap,
   findManualMode,
   getActiveProfile,
   getAutoModes,
   getAutoStrategy,
   getManualModes,
   getManualStrategy,
+  getSalesWeights,
   normalizeConfig,
   normalizeProfile,
   normalizeProfileFile,
@@ -45,17 +42,42 @@ export {
 } from './validate.js'
 
 export {
-  CALIBRATION_QUANTILES,
-  TIER_S_LEVELS,
-  buildGradeTiers,
-  calibrateGrades,
-} from './calibrate.js'
-
-export {
   createEvaluator,
   evaluateItem,
+  findBaselineMonth,
   summarizeEvaluation,
+  weightedMonthlySales,
 } from './engine.js'
+
+export {
+  BULK_SCORING_DEFAULTS,
+  BULK_SCORING_DIMENSIONS,
+  SCORING_DIMENSIONS,
+  SCORING_TIERS,
+  SCORING_TIER_LABELS,
+  SCORING_TIER_TONES,
+  computeGrowthRate,
+  createDefaultScoring,
+  describeScoringBand,
+  describeScoringRanges,
+  evaluateBulkScoring,
+  evaluateScoring,
+  normalizeBulkScoring,
+  normalizeScoring,
+  resolveGrowthMonths,
+  validateBulkScoring,
+  validateScoring,
+} from './scoring.js'
+
+export {
+  SPU_GRADE_TIERS,
+  SPU_GRADE_TONES,
+  createDefaultSpuGrades,
+  describeSpuGradeThresholds,
+  normalizeSpuGrades,
+  resolveSpuGrade,
+  validateSpuGrades,
+} from './spuGrades.js'
 
 export {
   CONFIG_FILE_NAME,
@@ -86,3 +108,5 @@ export {
   saveManualSkus,
   setManualRuntime,
 } from './manual.js'
+
+export { createDemoProfile, DEMO_PROFILE_DISABLED } from './demoProfile.js'

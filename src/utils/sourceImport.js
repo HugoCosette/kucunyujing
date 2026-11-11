@@ -1,18 +1,23 @@
 import { HEAT_FACTOR_FIELDS, QUANTITY_FIELDS, SKU_ID_LABEL } from '@/data/quantityFields'
-import { getFieldMeta } from '@/stocking/fields'
+import { LEGACY_METRIC_LABELS } from '@/stocking/constants'
 
 // 一次只能导入总表 + 销售表两个文件：按表头识别角色，销售标识统一是“唯一标识”。
 const PRODUCT_HEADERS = new Set(['品名', '产品名称'])
 const COLOR_HEADERS = new Set(['颜色', '色号'])
 const SKU_ID_HEADERS = new Set([SKU_ID_LABEL, '唯一编码'])
-const METRIC_HEADERS = new Set(HEAT_FACTOR_FIELDS.map((entry) => entry.label))
+const METRIC_HEADERS = new Set([
+  ...HEAT_FACTOR_FIELDS.map((entry) => entry.label),
+  // 旧销售表的「动销客户」仍算动销指标列
+  ...LEGACY_METRIC_LABELS.keys(),
+])
 // 总表特有的库存列：出现任意一列即视为库存数据。
 const INVENTORY_HEADERS = new Set([
   '色彩',
   '色彩类别',
+  '公斤系数',
   ...QUANTITY_FIELDS.map((entry) => entry.label),
 ])
-const MONTH_COLUMN_PATTERN = /^(\d{1,2})月(条数|重量)$/
+const MONTH_COLUMN_PATTERN = /^(\d{1,2})月(销量|条数|重量|订单数)$/
 const HEADER_SCAN_ROWS = 10
 
 function normalizeHeader(value) {
@@ -46,7 +51,7 @@ export function analyzeSourceSheet(rows) {
 // 表头校验提示：缺唯一标识时两个表都不可导入。
 export function describeMissingColumns(roles) {
   if (!roles) {
-    return `无法识别：表头需包含“${getFieldMeta('product').label}”“${getFieldMeta('color').label}”`
+    return '无法识别：表头需包含“品名”“颜色”'
   }
   if (!roles.hasSkuId) return `缺少“${SKU_ID_LABEL}”列，总表与销售表都必须提供`
   if (!roles.hasInventoryColumns && !roles.hasSalesColumns) {
