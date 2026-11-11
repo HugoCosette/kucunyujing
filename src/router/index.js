@@ -2,6 +2,8 @@ import { createRouter, createWebHistory } from 'vue-router'
 import InventoryPanelView from '../views/InventoryPanelView.vue'
 import SalesPanelView from '../views/SalesPanelView.vue'
 import ConfigView from '../views/ConfigView.vue'
+import PurchaseOrderView from '../views/PurchaseOrderView.vue'
+import PurchaseSettingsView from '../views/PurchaseSettingsView.vue'
 import { inventoryPanels } from '@/data/panels'
 
 const router = createRouter({
@@ -21,6 +23,22 @@ const router = createRouter({
               path: panel.allPath,
               name: panel.allRouteName,
               component: SalesPanelView,
+              props: { panelKey: panel.key },
+            },
+          ]
+        : []),
+      ...(panel.purchasePath
+        ? [
+            {
+              path: panel.purchasePath,
+              name: panel.purchaseRouteName,
+              component: PurchaseOrderView,
+              props: { panelKey: panel.key },
+            },
+            {
+              path: panel.purchaseSettingsPath,
+              name: panel.purchaseSettingsRouteName,
+              component: PurchaseSettingsView,
               props: { panelKey: panel.key },
             },
           ]

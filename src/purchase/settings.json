@@ -1,0 +1,220 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-11T00:00:00.000Z",
+  "dyeFactories": [
+    {
+      "id": "df-1",
+      "name": "连江东禾晟",
+      "enabled": true
+    },
+    {
+      "id": "df-2",
+      "name": "福清长福",
+      "enabled": true
+    },
+    {
+      "id": "df-3",
+      "name": "长乐华鹤",
+      "enabled": true
+    },
+    {
+      "id": "df-4",
+      "name": "汕头兴滨染厂",
+      "enabled": true
+    },
+    {
+      "id": "df-5",
+      "name": "清远千百丽",
+      "enabled": true
+    },
+    {
+      "id": "df-6",
+      "name": "连江俊诚(华阳)",
+      "enabled": true
+    },
+    {
+      "id": "df-7",
+      "name": "久顺",
+      "enabled": true
+    },
+    {
+      "id": "df-8",
+      "name": "长乐力宏",
+      "enabled": true
+    }
+  ],
+  "treeCategories": [
+    {
+      "name": "欧根纱成品",
+      "assignees": [
+        "阿婷",
+        "刘玉红"
+      ]
+    },
+    {
+      "name": "小凤-薄布类",
+      "assignees": [
+        "小凤"
+      ]
+    },
+    {
+      "name": "印花",
+      "assignees": [
+        "刘玉红",
+        "钟秋兰"
+      ]
+    },
+    {
+      "name": "植绒",
+      "assignees": [
+        "刘燕"
+      ]
+    },
+    {
+      "name": "小良-厚布类（厚布、大网、提花）",
+      "assignees": [
+        "小良"
+      ]
+    },
+    {
+      "name": "小婷-氨纶类",
+      "assignees": [
+        "阿婷"
+      ]
+    },
+    {
+      "name": "外调成品",
+      "assignees": [
+        "钟秋兰"
+      ]
+    },
+    {
+      "name": "多道工艺",
+      "assignees": [
+        "刘玉红",
+        "刘燕"
+      ]
+    },
+    {
+      "name": "车",
+      "assignees": [
+        "小凤"
+      ]
+    },
+    {
+      "name": "压花",
+      "assignees": [
+        "小良"
+      ]
+    },
+    {
+      "name": "委外加工成品",
+      "assignees": [
+        "钟秋兰",
+        "阿婷"
+      ]
+    },
+    {
+      "name": "钉珠",
+      "assignees": [
+        "刘燕"
+      ]
+    },
+    {
+      "name": "烫膜",
+      "assignees": [
+        "小凤"
+      ]
+    },
+    {
+      "name": "冲片",
+      "assignees": [
+        "小良"
+      ]
+    },
+    {
+      "name": "滴塑",
+      "assignees": [
+        "刘玉红"
+      ]
+    },
+    {
+      "name": "印粉",
+      "assignees": [
+        "阿婷"
+      ]
+    },
+    {
+      "name": "粉+胶",
+      "assignees": [
+        "钟秋兰"
+      ]
+    },
+    {
+      "name": "印胶",
+      "assignees": [
+        "刘燕"
+      ]
+    },
+    {
+      "name": "烫钻",
+      "assignees": [
+        "小凤"
+      ]
+    },
+    {
+      "name": "绣花、勾花",
+      "assignees": [
+        "小良"
+      ]
+    },
+    {
+      "name": "压折",
+      "assignees": [
+        "刘玉红"
+      ]
+    },
+    {
+      "name": "其他",
+      "assignees": [
+        "刘玉红",
+        "阿婷",
+        "小凤",
+        "钟秋兰",
+        "刘燕",
+        "小良"
+      ]
+    },
+    {
+      "name": "成品",
+      "assignees": [
+        "阿婷"
+      ]
+    },
+    {
+      "name": "复合",
+      "assignees": [
+        "小良"
+      ]
+    },
+    {
+      "name": "珠光",
+      "assignees": [
+        "刘燕"
+      ]
+    },
+    {
+      "name": "所有产品",
+      "assignees": [
+        "刘玉红",
+        "阿婷",
+        "小凤",
+        "钟秋兰",
+        "刘燕",
+        "小良"
+      ]
+    }
+  ],
+  "skuFactories": {},
+  "skuCategoryOverrides": {}
+}

@@ -62,10 +62,12 @@ import { exampleNavEntries, mainNavEntries } from '@/data/panels'
 }
 
 .page-navigation-link {
+  flex-shrink: 0;
   padding: 9px 16px;
   color: var(--industrial-muted);
   border-bottom: 2px solid transparent;
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .page-navigation-link:hover,

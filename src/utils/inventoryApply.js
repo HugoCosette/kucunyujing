@@ -38,6 +38,7 @@ export function applyImportedInventory(store, importedItems, { salesBySku = null
       product: entry.product,
       color: entry.color,
       category: entry.category,
+      treeCategory: entry.treeCategory ?? '',
       planned: previous?.planned ?? null,
       producing: entry.producing,
       backorder: entry.backorder,
@@ -78,6 +79,7 @@ export function applyImportedInventory(store, importedItems, { salesBySku = null
     nextPurchaseList.push({
       ...purchaseItem,
       id: nextId,
+      skuId: item.skuId,
       product: item.product,
       color: item.color,
       planned: item.planned ?? 0,

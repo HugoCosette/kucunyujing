@@ -15,6 +15,24 @@ const MANUAL_SKUS_FILE = path.resolve(
   'src/stocking/manualSkus.json',
 )
 
+const PURCHASE_SETTINGS_FILE = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  'src/purchase/settings.json',
+)
+
+const PURCHASE_ORDERS_FILE = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  'src/purchase/orders.json',
+)
+
+// 清单类 JSON：保存后不触发 HMR，避免编辑下单数据把已导入的库存整页刷掉。
+const WATCHED_CONFIG_FILES = [
+  STOCKING_CONFIG_FILE,
+  MANUAL_SKUS_FILE,
+  PURCHASE_SETTINGS_FILE,
+  PURCHASE_ORDERS_FILE,
+]
+
 // 把 src/stocking/*.json 当成可写配置：开发态由页面直接落盘；
 // 同时屏蔽这两个文件的 HMR，避免保存配置触发整页刷新丢掉已导入的库存数据。
 function stockingConfigFilePlugin() {
@@ -22,8 +40,7 @@ function stockingConfigFilePlugin() {
     name: 'stocking-config-file',
     configureServer(server) {
       // 配置文件只在页面启动时读取：取消监听，避免保存后触发 HMR 重建页面组件。
-      server.watcher.unwatch(STOCKING_CONFIG_FILE)
-      server.watcher.unwatch(MANUAL_SKUS_FILE)
+      for (const file of WATCHED_CONFIG_FILES) server.watcher.unwatch(file)
 
       function registerSaveRoute(route, target) {
         server.middlewares.use(route, (request, response, next) => {
@@ -51,9 +68,11 @@ function stockingConfigFilePlugin() {
 
       registerSaveRoute('/__stocking-config/save', STOCKING_CONFIG_FILE)
       registerSaveRoute('/__stocking-manual/save', MANUAL_SKUS_FILE)
+      registerSaveRoute('/__purchase-settings/save', PURCHASE_SETTINGS_FILE)
+      registerSaveRoute('/__purchase-orders/save', PURCHASE_ORDERS_FILE)
     },
     handleHotUpdate(context) {
-      if (context.file === STOCKING_CONFIG_FILE || context.file === MANUAL_SKUS_FILE) return []
+      if (WATCHED_CONFIG_FILES.includes(context.file)) return []
       return undefined
     },
   }

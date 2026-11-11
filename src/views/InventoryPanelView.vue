@@ -18,10 +18,13 @@ import ImportSourcesDialog from '@/components/ImportSourcesDialog.vue'
 import ImportSplitTablesDialog from '@/components/ImportSplitTablesDialog.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
+import SkuOrderDialog from '@/components/SkuOrderDialog.vue'
 import VirtualList from '@/components/VirtualList.vue'
 import { useSourceImport } from '@/composables/useSourceImport'
 import { useSplitImport } from '@/composables/useSplitImport'
 import { useInventoryStore } from '@/stores/inventory'
+import { usePurchaseStore } from '@/stores/purchase'
+import { categoryForSku, findFactoryById } from '@/purchase'
 import { groupRowsByProduct } from '@/utils/productGroups'
 import {
   calculateInventoryRow,
@@ -68,6 +71,8 @@ const spuGradeThresholds = computed(() => describeSpuGradeThresholds(spuGrades.v
 const inventoryItems = inventoryStore.inventoryItems
 const purchaseList = inventoryStore.purchaseList
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
+// 采购下单模块：分订单以唯一标识为键，采购清单只负责"哪些 SKU 要下、下多少"。
+const purchaseStore = usePurchaseStore()
 const purchaseListRows = computed(() =>
   purchaseList.map((purchaseItem) => {
     const item = itemById.value.get(purchaseItem.id)
@@ -78,6 +83,19 @@ const purchaseListRows = computed(() =>
     return { ...purchaseItem, product: item.product, color: item.color }
   }),
 )
+
+function purchaseRowSkuId(row) {
+  return String(row?.skuId ?? itemById.value.get(row?.id)?.skuId ?? '').trim()
+}
+
+function purchaseRowCategory(row) {
+  const item = itemById.value.get(row?.id)
+  return categoryForSku(purchaseStore.settings, purchaseRowSkuId(row), item?.treeCategory)
+}
+
+function purchaseRowOrders(row) {
+  return purchaseStore.orderSummary(purchaseRowSkuId(row))
+}
 const plannedDrafts = reactive({})
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const selectedWarningTones = ref([])
@@ -123,10 +141,13 @@ function showImportToast(message) {
 const urgentPlanDialogVisible = ref(false)
 const urgentPlanRows = ref([])
 const purchaseListDialogVisible = ref(false)
+// 单个 SKU 的分订单弹窗：清单里点「去下单」时打开。
+const purchaseOrderDialogVisible = ref(false)
+const purchaseOrderItem = ref(null)
 // 弹窗里的长列表按虚拟滚动渲染：上万个紧急 SKU / 采购条目时
 // 直接 v-for 会把主线程卡住十几秒。
 const URGENT_PLAN_ROW_HEIGHT = 48
-const PURCHASE_LIST_ROW_HEIGHT = 44
+const PURCHASE_LIST_ROW_HEIGHT = 48
 const flyingPurchaseIcon = ref(null)
 const purchaseListPulse = ref(false)
 // 批量确认补货：先落成可编辑的「需安排」清单，确认后覆盖写入并进入采购清单。
@@ -646,13 +667,14 @@ function applyRestockPlans(plans) {
       purchaseIndexById.set(item.id, purchaseList.length)
       purchaseList.push({
         id: item.id,
+        skuId: item.skuId,
         product: item.product,
         color: item.color,
         planned: item.planned ?? 0,
-        actualPlan: null,
       })
     } else {
       const purchaseItem = purchaseList[purchaseIndex]
+      purchaseItem.skuId = item.skuId
       purchaseItem.product = item.product
       purchaseItem.color = item.color
       purchaseItem.planned = item.planned ?? 0
@@ -713,14 +735,15 @@ function syncPurchaseItem(item) {
   if (purchaseIndex === -1) {
     purchaseList.push({
       id: item.id,
+      skuId: item.skuId,
       product: item.product,
       color: item.color,
       planned: item.planned ?? 0,
-      actualPlan: null,
     })
     return
   }
 
+  purchaseList[purchaseIndex].skuId = item.skuId
   purchaseList[purchaseIndex].product = item.product
   purchaseList[purchaseIndex].color = item.color
   purchaseList[purchaseIndex].planned = item.planned ?? 0
@@ -736,9 +759,19 @@ function restorePurchaseItem(id, previousPurchaseItem) {
   }
 }
 
-function updatePurchaseActualPlan(id, value) {
-  const purchaseItem = purchaseList.find((entry) => entry.id === id)
-  if (purchaseItem) purchaseItem.actualPlan = value
+// 清单里的「去下单」：把当前 SKU 交给分订单弹窗（染厂 / 分单人员 / 数量）。
+function openPurchaseOrder(row) {
+  const item = itemById.value.get(row.id)
+  if (!item) return
+  purchaseOrderItem.value = {
+    id: row.id,
+    skuId: purchaseRowSkuId(row),
+    product: item.product,
+    color: item.color,
+    treeCategory: purchaseRowCategory(row),
+    planned: row.planned ?? 0,
+  }
+  purchaseOrderDialogVisible.value = true
 }
 
 function acceptPlannedDraft(row) {
@@ -1117,16 +1150,8 @@ function exportInventoryToExcel() {
   }
 }
 
-function exportPurchaseListToExcel() {
-  const rows = [
-    ['品名', '颜色', '需安排', '实际计划'],
-    ...purchaseListRows.value.map((item) => [
-      item.product,
-      item.color,
-      item.planned,
-      item.actualPlan ?? '',
-    ]),
-  ]
+// 采购清单与分单明细各一张工作表：清单给采购看总量，明细给染厂/跟单看分单。
+function buildPurchaseSheetXml(rows, columnWidths) {
   const worksheetRows = rows
     .map((row, rowIndex) => {
       const cells = row
@@ -1138,16 +1163,72 @@ function exportPurchaseListToExcel() {
       return `<row r="${rowIndex + 1}">${cells}</row>`
     })
     .join('')
-  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="24" customWidth="1"/><col min="2" max="2" width="14" customWidth="1"/><col min="3" max="4" width="16" customWidth="1"/></cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A1:D${rows.length}"/></worksheet>`
+  const cols = columnWidths
+    .map(
+      (width, index) =>
+        `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`,
+    )
+    .join('')
+  const lastColumn = getExcelColumnName(rows[0].length - 1)
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${cols}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A1:${lastColumn}${rows.length}"/></worksheet>`
+}
+
+function exportPurchaseListToExcel() {
+  const rows = [
+    ['品名', '颜色', '树形分类', '需安排', '已下单', '分单数量'],
+    ...purchaseListRows.value.map((item) => {
+      const orders = purchaseRowOrders(item)
+      return [
+        item.product,
+        item.color,
+        purchaseRowCategory(item),
+        item.planned ?? 0,
+        orders.total,
+        orders.count,
+      ]
+    }),
+  ]
+
+  const detailRows = [['品名', '颜色', '树形分类', '染厂', '分单人员', '数量（公斤）', '备注']]
+  for (const item of purchaseListRows.value) {
+    const skuId = purchaseRowSkuId(item)
+    if (!skuId) continue
+    const category = purchaseRowCategory(item)
+    for (const entry of purchaseStore.orderEntries(skuId)) {
+      const factoryName =
+        entry.factoryName ||
+        findFactoryById(purchaseStore.settings, entry.factoryId)?.name ||
+        ''
+      detailRows.push([
+        item.product,
+        item.color,
+        category,
+        factoryName,
+        entry.assignee,
+        entry.quantity,
+        entry.note,
+      ])
+    }
+  }
+
+  const worksheetXml = buildPurchaseSheetXml(rows, [24, 14, 18, 12, 12, 10])
+  const detailSheetXml = buildPurchaseSheetXml(detailRows, [24, 14, 18, 16, 12, 14, 24])
   const styleXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FF2F3B43"/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF3F6F8"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
-  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="本次采购清单" sheetId="1" r:id="rId1"/></sheets></workbook>`
+  const workbookXml = detailRows.length > 1
+    ? `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="本次采购清单" sheetId="1" r:id="rId1"/><sheet name="分单明细" sheetId="2" r:id="rId2"/></sheets></workbook>`
+    : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="本次采购清单" sheetId="1" r:id="rId1"/></sheets></workbook>`
+  // 采购清单工作簿：有分单时追加「分单明细」工作表。
+  const hasDetailSheet = detailRows.length > 1
   const files = {
-    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>${hasDetailSheet ? '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' : ''}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
     '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
     'xl/workbook.xml': workbookXml,
-    'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    'xl/_rels/workbook.xml.rels': hasDetailSheet
+      ? `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+      : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
     'xl/worksheets/sheet1.xml': worksheetXml,
     'xl/styles.xml': styleXml,
+    ...(hasDetailSheet ? { 'xl/worksheets/sheet2.xml': detailSheetXml } : {}),
   }
 
   try {
@@ -1853,14 +1934,14 @@ function downloadImportTemplate() {
     <ElDialog
       v-model="purchaseListDialogVisible"
       title="本次采购清单"
-      width="680px"
+      width="880px"
       class="purchase-list-dialog"
       :close-on-click-modal="false"
       destroy-on-close
       align-center
     >
       <p class="purchase-list-hint">
-        已采纳的需安排会加入清单；同一商品颜色只保留一条。实际计划仅作采购记录，不影响库存计算。
+        已采纳的需安排会加入清单；同一商品颜色只保留一条。「已下单」是分订单数量合计，点「去下单」按染厂拆单。
       </p>
       <div class="purchase-list-table" role="table" aria-label="本次采购清单">
         <VirtualList
@@ -1873,8 +1954,10 @@ function downloadImportTemplate() {
             <div class="purchase-list-header" role="row">
               <span role="columnheader">品名</span>
               <span role="columnheader">颜色</span>
+              <span role="columnheader">树形分类</span>
               <span role="columnheader">需安排</span>
-              <span role="columnheader">实际计划</span>
+              <span role="columnheader">已下单</span>
+              <span role="columnheader">操作</span>
             </div>
           </template>
           <template #default="{ item: row }">
@@ -1883,18 +1966,28 @@ function downloadImportTemplate() {
                 {{ row.product }}
               </span>
               <span role="cell">{{ row.color }}</span>
+              <span
+                class="purchase-list-category"
+                role="cell"
+                :title="purchaseRowCategory(row)"
+              >
+                {{ purchaseRowCategory(row) || '—' }}
+              </span>
               <span role="cell">{{ formatQuantity(row.planned) }}</span>
+              <span
+                role="cell"
+                class="purchase-list-ordered"
+                :class="{ 'purchase-list-ordered--done': purchaseRowOrders(row).total > 0 }"
+              >
+                {{ formatQuantity(purchaseRowOrders(row).total) }}
+                <em v-if="purchaseRowOrders(row).count">
+                  （{{ purchaseRowOrders(row).count }} 张）
+                </em>
+              </span>
               <span role="cell">
-                <ElInputNumber
-                  :model-value="row.actualPlan"
-                  :min="0"
-                  :precision="0"
-                  :controls="false"
-                  size="small"
-                  class="purchase-list-actual-input"
-                  :aria-label="`${row.product} ${row.color} 实际计划`"
-                  @update:model-value="updatePurchaseActualPlan(row.id, $event)"
-                />
+                <ElButton size="small" text type="primary" @click="openPurchaseOrder(row)">
+                  去下单
+                </ElButton>
               </span>
             </div>
           </template>
@@ -1904,7 +1997,8 @@ function downloadImportTemplate() {
         </div>
       </div>
       <template #footer>
-        <div class="dialog-footer">
+        <div class="dialog-footer purchase-list-footer">
+          <RouterLink class="purchase-list-link" to="/purchase">进入采购下单页 →</RouterLink>
           <ElButton @click="purchaseListDialogVisible = false">关闭</ElButton>
           <ElButton
             type="primary"
@@ -1916,6 +2010,8 @@ function downloadImportTemplate() {
         </div>
       </template>
     </ElDialog>
+
+    <SkuOrderDialog v-model:visible="purchaseOrderDialogVisible" :item="purchaseOrderItem" />
 
     <SkuDetailDialog
       v-model:visible="skuDetailVisible"
@@ -2214,7 +2310,7 @@ function downloadImportTemplate() {
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
   --el-fill-color-blank: var(--industrial-surface);
-  width: min(680px, calc(100vw - 32px));
+  width: min(880px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
   display: flex;
   flex-direction: column;
@@ -2250,12 +2346,14 @@ function downloadImportTemplate() {
 .purchase-list-row {
   display: grid;
   grid-template-columns:
-    minmax(150px, 1.6fr)
-    minmax(80px, 1fr)
-    minmax(80px, 1fr)
-    minmax(120px, 1fr);
+    minmax(130px, 1.5fr)
+    minmax(80px, 0.9fr)
+    minmax(110px, 1.2fr)
+    minmax(80px, 0.8fr)
+    minmax(100px, 1fr)
+    minmax(76px, 0.6fr);
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 0 12px;
   text-align: center;
 }
@@ -2280,14 +2378,47 @@ function downloadImportTemplate() {
   text-overflow: ellipsis;
 }
 
+.purchase-list-category {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.purchase-list-ordered {
+  color: var(--industrial-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.purchase-list-ordered--done {
+  color: var(--industrial-primary);
+  font-weight: 600;
+}
+
+.purchase-list-ordered em {
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 400;
+}
+
 .purchase-list-empty {
   padding: 28px 12px;
   color: var(--industrial-muted);
   text-align: center;
 }
 
-.purchase-list-actual-input {
-  width: 120px;
+.purchase-list-footer {
+  justify-content: flex-end;
+}
+
+.purchase-list-link {
+  margin-right: auto;
+  color: var(--industrial-primary);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.purchase-list-link:hover {
+  text-decoration: underline;
 }
 
 .urgent-plan-hint {

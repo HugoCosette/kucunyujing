@@ -33,6 +33,7 @@ const HEADER_ALIASES = new Map([
   ['色号', 'color'],
   ['色彩', 'category'],
   ['色彩类别', 'category'],
+  ['树形分类', 'treeCategory'],
   ...QUANTITY_FIELDS.map((entry) => [entry.label, entry.field]),
   ['公斤系数', 'kgFactor'],
   ['出码率', 'unitRate'],
@@ -205,6 +206,8 @@ export function parseInventorySheet(rows) {
       product,
       color,
       category,
+      // 采购下单按树形分类取分单人员；总表没有该列时为空，可在下单设置里补。
+      treeCategory: String(readCell('treeCategory') ?? '').trim(),
       kgFactor: resolveKgFactor(
         readCell('kgFactor'),
         readCell('unitRate'),

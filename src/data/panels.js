@@ -10,6 +10,13 @@ export const MAIN_PANEL = {
   allLabel: '销售表',
   allPath: '/sales',
   allRouteName: 'sales',
+  // 采购下单：在本次采购清单的基础上按染厂拆分订单；下单设置维护染厂、分单人员与 SKU 可选染厂。
+  purchaseLabel: '采购下单',
+  purchasePath: '/purchase',
+  purchaseRouteName: 'purchase',
+  purchaseSettingsLabel: '下单设置',
+  purchaseSettingsPath: '/purchase/settings',
+  purchaseSettingsRouteName: 'purchaseSettings',
   configLabel: '配置信息',
   configPath: '/config',
   configRouteName: 'config',
@@ -34,6 +41,19 @@ function toNavEntries(panel) {
   // 只有声明了 allPath 的面板才提供“销售表”入口（目前仅主面板）。
   if (panel.allPath) {
     entries.push({ key: `${panel.key}-all`, label: panel.allLabel, path: panel.allPath })
+  }
+  // 采购下单与下单设置只挂在声明了 purchasePath 的面板下（目前仅主面板）。
+  if (panel.purchasePath) {
+    entries.push({
+      key: `${panel.key}-purchase`,
+      label: panel.purchaseLabel,
+      path: panel.purchasePath,
+    })
+    entries.push({
+      key: `${panel.key}-purchase-settings`,
+      label: panel.purchaseSettingsLabel,
+      path: panel.purchaseSettingsPath,
+    })
   }
   entries.push({
     key: `${panel.key}-config`,
