@@ -642,12 +642,15 @@ onBeforeUnmount(() => {
 }
 
 .sales-vtable__cell--color {
-  gap: 2px;
+  gap: 4px;
 }
 
+/* 颜色文本占满剩余宽度，详情按钮自然贴到单元格右边缘 */
 .sales-vtable__color {
+  flex: 1 1 auto;
   overflow: hidden;
   min-width: 0;
+  text-align: center;
   text-overflow: ellipsis;
 }
 

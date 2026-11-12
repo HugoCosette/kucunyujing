@@ -1,4 +1,4 @@
-﻿import { createEvaluator, evaluateItem, findBaselineMonth } from '../src/stocking/engine.js'
+import { createEvaluator, evaluateItem, findBaselineMonth } from '../src/stocking/engine.js'
 import { createDefaultConfig } from '../src/stocking/defaults.js'
 import { validateConfig, normalizeConfig } from '../src/stocking/validate.js'
 import { calculateInventoryRow } from '../src/utils/inventory.js'

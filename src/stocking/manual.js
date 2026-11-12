@@ -15,23 +15,6 @@ function toNumber(value) {
   return Number.isFinite(number) ? number : null
 }
 
-function normalizeOrder(entry) {
-  if (!entry || typeof entry !== 'object') return null
-  const name = String(entry.name ?? '').trim()
-  const factory = String(entry.factory ?? '').trim()
-  const note = String(entry.note ?? '').trim()
-  const quantity = toNumber(entry.quantity)
-  // 四个字段全空的占位行直接丢弃。
-  if (!name && !factory && !note && quantity === null) return null
-  return { name, factory, quantity, note }
-}
-
-// 订单货：一个 SKU 可以挂多张订单（订单名 / 订单厂家 / 数量 / 备注）。
-function normalizeOrders(orders) {
-  if (!Array.isArray(orders)) return []
-  return orders.map(normalizeOrder).filter(Boolean)
-}
-
 function normalizeEntry(entry, config) {
   if (!entry || typeof entry !== 'object') return null
   const modeId = mapLegacyManualModeId(String(entry.modeId ?? '').trim())
@@ -42,7 +25,6 @@ function normalizeEntry(entry, config) {
   if (!mode) return null
 
   if (mode.behavior === 'exclude') return { modeId }
-  if (mode.behavior === 'order') return { modeId, orders: normalizeOrders(entry.orders) }
 
   const source = entry.coefficients ?? mode.defaultCoefficients ?? {}
   const coefficients = {

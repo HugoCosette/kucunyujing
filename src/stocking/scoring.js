@@ -226,15 +226,14 @@ function readMonthSales(counts, month) {
 }
 
 // 环比增长率 = (本期 - 上期) ÷ 上期；一个月的数据缺失时返回 null。
-// 上期为 0、本期有销量按 +100% 处理；上期有销量、本期为 0 按 0% 处理；
-// 两期都为 0 时没有比较基础，仍按无数据处理。
+// 上期为 0、本期有销量按 +100% 处理（起量）；上期有销量、本期为 0 不特判，
+// 按公式得 -100%（跌到底，落高风险区间）；两期都为 0 时没有比较基础，按无数据处理。
 export function computeGrowthRate(counts, now = new Date()) {
   const { current, previous } = resolveGrowthMonths(now)
   const currentValue = readMonthSales(counts, current)
   const previousValue = readMonthSales(counts, previous)
   if (currentValue === null || previousValue === null) return null
   if (previousValue === 0) return currentValue > 0 ? 100 : null
-  if (currentValue === 0) return 0
   return ((currentValue - previousValue) / previousValue) * 100
 }
 
@@ -263,7 +262,7 @@ function describeGrowth(counts, now) {
     )} 公斤）`
   }
   if (currentValue === 0) {
-    return `${current} 月 vs ${previous} 月：0%（${current} 月销量为 0，按 0% 计；${previous} 月 ${formatNumber(
+    return `${current} 月 vs ${previous} 月：-100%（${current} 月销量为 0，按 -100% 计；${previous} 月 ${formatNumber(
       previousValue,
       2,
     )} 公斤）`

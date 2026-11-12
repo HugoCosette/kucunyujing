@@ -164,12 +164,6 @@
                 "name": "排除模式",
                 "behavior": "exclude",
                 "description": "不参与备货策略：不计预警、不进紧急补货、不给建议值"
-              },
-              {
-                "id": "manual-order",
-                "name": "订单货模式",
-                "behavior": "order",
-                "description": "为特定厂家订做、需求不明晰：不参与备货策略，按订单记录订单名 / 厂家 / 数量 / 备注"
               }
             ]
           }

@@ -39,9 +39,11 @@ import {
   createEvaluator,
   describeSpuGradeThresholds,
   evaluateItem,
+  getAutoModes,
   normalizeSpuGrades,
   resolveSpuGrade,
 } from '@/stocking'
+import { evaluateRowHealth } from '@/utils/skuHealth'
 import { IMPORT_TEMPLATE_COLUMNS, IMPORT_TEMPLATE_SAMPLE_ROWS } from '@/utils/inventoryImport'
 
 const props = defineProps({
@@ -65,6 +67,53 @@ const stockingEvaluator = computed(() =>
     baselineMonth: baselineMonth.value,
   }),
 )
+// 「评分」列直接复用 SKU 弹窗的健康度评分口径：5 维加权综合分；按量模式只做 2 项判定，没有综合分。
+const bulkHealthScoring = computed(
+  () =>
+    getAutoModes(stockingStore.config).find((mode) => mode.key === 'bulk')?.healthScoring ?? null,
+)
+// 行对象在导入 / 改配置时整体重建，按行缓存不会读到旧分；salesSheet / scoring 再各校验一次。
+const rowHealthCache = new WeakMap()
+function getRowHealth(row) {
+  if (!row || row.isProductGroup) return null
+  const salesSheet = inventoryStore.salesSheet
+  const scoringConfig = stockingStore.config.scoring
+  const cached = rowHealthCache.get(row)
+  if (cached && cached.salesSheet === salesSheet && cached.scoringConfig === scoringConfig) {
+    return cached.health
+  }
+  const health = evaluateRowHealth({
+    row,
+    salesEntry: row.skuId ? salesSheet?.bySku?.get(row.skuId) ?? null : null,
+    config: scoringConfig,
+    bulkHealthScoring: bulkHealthScoring.value,
+  })
+  rowHealthCache.set(row, { salesSheet, scoringConfig, health })
+  return health
+}
+
+function scoreCellText(row) {
+  const health = getRowHealth(row)
+  if (!health) return ''
+  if (!health.participates) return '不参与'
+  if (health.mode === 'bulk') return '—'
+  return health.totalText ?? '--'
+}
+
+function scoreCellTone(row) {
+  const health = getRowHealth(row)
+  if (!health || !health.participates || health.mode === 'bulk') return 'unavailable'
+  return health.tone
+}
+
+function scoreCellTitle(row) {
+  const health = getRowHealth(row)
+  if (!health) return ''
+  if (!health.participates) return health.toneLabel || '不参与备货计算，不做健康度评分'
+  if (health.mode === 'bulk') return '按量模式：弹窗里只做 2 项判定，不算综合评分'
+  return `综合评分 ${health.totalText ?? '--'}（${health.toneLabel}），点颜色旁的详情按钮看逐项明细`
+}
+
 // SPU 等级只按「该品名全部 SKU 的月均条数合计」判定，与备货模式 / 系数无关，改配置立刻生效。
 const spuGrades = computed(() => normalizeSpuGrades(stockingStore.config.spuGrades))
 const spuGradeThresholds = computed(() => describeSpuGradeThresholds(spuGrades.value))
@@ -214,21 +263,7 @@ const leafRowIndexById = new Map()
 // 模式列悬停说明：该模式怎么比较、为什么可能不参与计算。
 function modeTitle(row) {
   if (!row) return ''
-  if (row.strategy === 'manual') {
-    const orders = row.manualOrders ?? []
-    if (!orders.length) return `手动策略 · ${row.modeLabel}`
-    const lines = orders.map((order) =>
-      [
-        order.name || '未命名订单',
-        order.factory ? `厂家：${order.factory}` : '',
-        Number.isFinite(order.quantity) ? `数量：${order.quantity}` : '',
-        order.note ? `备注：${order.note}` : '',
-      ]
-        .filter(Boolean)
-        .join(' / '),
-    )
-    return [`手动策略 · ${row.modeLabel}`, ...lines].join('\n')
-  }
+  if (row.strategy === 'manual') return `手动策略 · ${row.modeLabel}`
   if (row.exclusive) return `${row.modeLabel}：累计客户为 1，不参与备货计算`
   if (!row.modeParticipates) return `${row.modeLabel}：不参与备货计算，仅做标注`
   return row.modeMetric === 'days'
@@ -505,7 +540,8 @@ const TABLE_OVERSCAN = 8
 const TABLE_COLUMNS = [
   // 批量补货勾选列：表头是全选（作用于当前筛选结果），品名父行勾选连带其下所有 SKU。
   { key: 'select', label: '选择', width: 44, group: '选择' },
-  { key: 'rule', label: '模式', width: 96, group: '信息' },
+  { key: 'rule', label: '模式', width: 78, group: '信息' },
+  { key: 'score', label: '评分', width: 58, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
   { key: 'color', label: '颜色', width: 132, group: '商品' },
   { key: 'urgency', label: '预警', width: 44, group: '商品' },
@@ -1599,6 +1635,17 @@ function downloadImportTemplate() {
                   :title="modeTitle(row)"
                 >
                   {{ row.modeLabel }}
+                </span>
+              </div>
+              <div class="inventory-vtable__cell inventory-vtable__cell--score">
+                <span
+                  v-if="!row.isProductGroup"
+                  class="score-badge"
+                  :class="`score-badge--${scoreCellTone(row)}`"
+                  :title="scoreCellTitle(row)"
+                  :aria-label="scoreCellTitle(row)"
+                >
+                  {{ scoreCellText(row) }}
                 </span>
               </div>
               <div
@@ -2726,7 +2773,8 @@ function downloadImportTemplate() {
 }
 
 .inventory-vtable__cell--color {
-  gap: 2px;
+  gap: 4px;
+  padding-right: 4px;
 }
 
 .inventory-vtable__cell--product {
@@ -2760,6 +2808,45 @@ function downloadImportTemplate() {
 
 .stocking-text--manual {
   color: var(--industrial-primary);
+}
+
+/* 评分列：与 SKU 弹窗的综合评分同口径（红 / 黄 / 绿三档底色），不参与与按量模式显示灰底。 */
+.inventory-vtable__cell--score {
+  padding: 0 2px;
+}
+
+.score-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 20px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.score-badge--red {
+  color: #a64f49;
+  background: #faf2f1;
+}
+
+.score-badge--yellow {
+  color: #8a6a2f;
+  background: #faf6ed;
+}
+
+.score-badge--green {
+  color: #5b7460;
+  background: #f3f7f4;
+}
+
+.score-badge--unavailable {
+  color: var(--industrial-muted);
+  background: #f2f5f6;
+  font-weight: 400;
 }
 
 /* SPU 汇总行模式列里的等级徽标：字大一点、底色很浅、不描硬边，避免在汇总行里过于抢眼。 */
@@ -2951,8 +3038,9 @@ function downloadImportTemplate() {
   margin-right: 14px;
 }
 
+/* 颜色文本占满剩余宽度，详情按钮（24px）自然贴到单元格右边缘 */
 .inventory-vtable :deep(.color-name-text) {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
 }
 
 .inventory-vtable :deep(.editable-select) {

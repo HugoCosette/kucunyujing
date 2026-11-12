@@ -12,7 +12,8 @@
       <nav class="nav" aria-label="页面导航">
         <button class="nav__item is-active" data-screen="inventory">主面板</button>
         <button class="nav__item" data-screen="sales">销售表</button>
-        <button class="nav__item" data-screen="config">配置信息</button>
+        <button class="nav__item" data-screen="purchase">采购下单</button>
+        <button class="nav__item" data-screen="config">设置</button>
       </nav>
 
       <!-- 示例数据区：位置与提示保留 -->
@@ -34,10 +35,10 @@
             <button class="btn" data-demo="选择 5 张分表，清洗后导入">导入分表</button>
             <button class="btn btn--primary" data-demo="选择总表 + 销售表">导入 Excel</button>
             <button class="btn btn--danger" data-demo="打开紧急补货弹窗">
-              紧急补货 <span class="btn__count">36</span>
+              紧急补货 <span class="btn__count" id="urgentCount">0</span>
             </button>
             <button class="btn" data-demo="打开本次采购清单">
-              采购清单 <span class="btn__count" style="background: #e1e6e9; color: #2f3b43">12</span>
+              采购清单 <span class="btn__count" id="purchaseCount" style="background: #e1e6e9; color: #2f3b43">0</span>
             </button>
           </div>
         </div>
@@ -115,15 +116,30 @@
       </div>
     </section>
 
-    <!-- ===================== 配置信息 ===================== -->
+    <!-- ===================== 采购下单（本次不重画） ===================== -->
+    <section class="screen" id="screen-purchase" hidden>
+      <div class="page">
+        <div class="page-head">
+          <h1 class="page-title">采购下单</h1>
+        </div>
+        <div class="table-card" style="padding: 28px 20px">
+          <p class="meta" style="margin: 0">
+            采购下单页沿用现有实现，本次只调整「设置」的入口结构，这一屏不重画。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 设置 ===================== -->
     <section class="screen" id="screen-config" hidden>
       <div class="page page--config">
-        <div class="config-bar">
-          <h1 class="config-bar__title">配置信息</h1>
+        <div class="config-bar" data-domain-bar="stocking">
+          <h1 class="config-bar__title">设置</h1>
+          <span class="config-bar__domain">备货配置</span>
 
           <div class="menu-anchor">
             <button class="btn btn--plan" id="profileBtn">
-              生产配置
+              标准备货
               <svg class="btn__caret" viewBox="0 0 12 12" fill="none" aria-hidden="true">
                 <path d="M3 4.5 6 7.5l3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
@@ -161,40 +177,72 @@
           </div>
         </div>
 
+        <div class="config-bar" data-domain-bar="purchase" hidden>
+          <h1 class="config-bar__title">设置</h1>
+          <span class="config-bar__domain">下单配置</span>
+          <span class="state" id="purchaseState">已保存</span>
+
+          <div class="config-bar__end">
+            <button class="btn btn--sm" data-demo="选择下单设置 JSON">导入设置文件</button>
+            <button class="btn btn--sm" data-demo="导出下单设置 JSON">导出设置文件</button>
+            <span class="config-bar__divider"></span>
+            <button class="btn btn--text" id="purchaseDiscard" disabled>放弃</button>
+            <button class="btn btn--primary" id="purchaseOk" disabled>确定</button>
+          </div>
+        </div>
+
         <div class="config-layout">
           <aside class="rail">
-            <button class="rail__item is-active" data-panel="strategy">
-              <span class="rail__title">策略与模式</span>
-              <span class="rail__meta">5 个模式 · 命中 21</span>
-            </button>
-            <button class="rail__item" data-panel="weights">
-              <span class="rail__title">销量加权</span>
-              <span class="rail__meta">50 / 30 / 20</span>
-            </button>
-            <button class="rail__item" data-panel="scoring">
-              <span class="rail__title">健康度评分</span>
-              <span class="rail__meta">5 个维度</span>
-            </button>
-            <button class="rail__item" data-panel="spu">
-              <span class="rail__title">SPU 分级</span>
-              <span class="rail__meta">6 档</span>
-            </button>
+            <div class="rail__group">
+              <div class="rail__group-title">备货配置</div>
+              <button class="rail__item is-active" data-panel="strategy">
+                <span class="rail__title">策略与模式</span>
+                <span class="rail__meta" id="railStrategyMeta">5 个模式</span>
+              </button>
+              <button class="rail__item" data-panel="weights">
+                <span class="rail__title">销量加权</span>
+                <span class="rail__meta" id="railWeightMeta">50 / 30 / 20</span>
+              </button>
+              <button class="rail__item" data-panel="scoring">
+                <span class="rail__title">健康度评分</span>
+                <span class="rail__meta" id="railScoringMeta">5 个维度</span>
+              </button>
+              <button class="rail__item" data-panel="spu">
+                <span class="rail__title">SPU 分级</span>
+                <span class="rail__meta" id="railSpuMeta">6 档</span>
+              </button>
+            </div>
+
+            <div class="rail__group">
+              <div class="rail__group-title">下单配置</div>
+              <button class="rail__item" data-panel="factories">
+                <span class="rail__title">染厂清单</span>
+                <span class="rail__meta" id="railFactoryMeta">4 家 · 3 家启用</span>
+              </button>
+              <button class="rail__item" data-panel="people">
+                <span class="rail__title">分类与分单人员</span>
+                <span class="rail__meta" id="railPeopleMeta">4 个分类</span>
+              </button>
+              <button class="rail__item" data-panel="sku-factories">
+                <span class="rail__title">SKU 可选染厂</span>
+                <span class="rail__meta" id="railSkuMeta">3 个 SKU 有约束</span>
+              </button>
+            </div>
           </aside>
 
-          <div>
+          <div class="config-panels">
             <!-- 策略与模式 -->
             <section class="panel" data-panel-view="strategy">
               <div class="panel__head">
                 <h2 class="panel__title">策略与模式</h2>
-              </div>
-
-              <div class="subtabs" role="tablist" aria-label="策略">
-                <button class="subtab is-active" data-strategy="auto" role="tab">
-                  自动策略 <span class="subtab__count">5</span>
-                </button>
-                <button class="subtab" data-strategy="manual" role="tab">
-                  手动策略 <span class="subtab__count">2</span>
-                </button>
+                <div class="segmented" role="tablist" aria-label="策略">
+                  <button class="segmented__btn is-active" data-strategy="auto" role="tab" aria-selected="true">
+                    自动策略
+                  </button>
+                  <button class="segmented__btn" data-strategy="manual" role="tab" aria-selected="false">
+                    手动策略
+                  </button>
+                </div>
               </div>
 
               <div class="master" id="autoStrategy">
@@ -202,113 +250,55 @@
                 <div class="mode-editor" id="modeEditor"></div>
               </div>
 
-              <div class="panel__body" id="manualStrategy" hidden>
-                <div class="manual-section">
-                  <div class="manual-section__head">
-                    <h3 class="manual-section__title">手动模式</h3>
-                    <div class="manual-section__actions">
-                      <button class="btn btn--sm" data-demo="新增手动模式">新增模式</button>
-                    </div>
+              <div id="manualStrategy" hidden>
+                <div class="tbl-block">
+                  <div class="tbl-cap">
+                    <span class="tbl-cap__title">手动模式</span>
+                    <span class="tbl-cap__meta" id="manualModeMeta"></span>
                   </div>
-                  <table class="plain-table">
+                  <table class="score-table">
                     <thead>
                       <tr>
-                        <th style="width: 170px">名称</th>
-                        <th style="width: 84px">行为</th>
+                        <th style="width: 168px">名称</th>
+                        <th style="width: 92px">行为</th>
                         <th>说明</th>
-                        <th style="width: 92px">红线（条）</th>
-                        <th style="width: 92px">正常（条）</th>
-                        <th style="width: 92px">峰值（条）</th>
-                        <th style="width: 42px"></th>
+                        <th style="width: 70px" class="is-num">红线</th>
+                        <th style="width: 70px" class="is-num">正常</th>
+                        <th style="width: 70px" class="is-num">峰值</th>
+                        <th style="width: 64px" class="is-num">操作</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      <tr>
-                        <td><input class="input" value="自定模式" style="width: 100%" /></td>
-                        <td class="meta">自定系数</td>
-                        <td><input class="input" value="人工指定红线 / 正常 / 峰值" style="width: 100%" /></td>
-                        <td><input class="coef-input" value="20.0" /></td>
-                        <td><input class="coef-input" value="40.0" /></td>
-                        <td><input class="coef-input" value="60.0" /></td>
-                        <td class="row-actions">
-                          <button class="icon-btn" disabled title="内置行为必须保留一个">
-                            <svg viewBox="0 0 16 16" fill="none">
-                              <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
-                            </svg>
-                          </button>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td><input class="input" value="滞销模式" style="width: 100%" /></td>
-                        <td class="meta">滞销</td>
-                        <td><input class="input" value="不计预警、不进紧急补货" style="width: 100%" /></td>
-                        <td colspan="3" class="coef-table__skip">不参与计算</td>
-                        <td class="row-actions">
-                          <button class="icon-btn" disabled title="内置行为必须保留一个">
-                            <svg viewBox="0 0 16 16" fill="none">
-                              <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
-                            </svg>
-                          </button>
-                        </td>
-                      </tr>
-                    </tbody>
+                    <tbody id="manualModeBody"></tbody>
                   </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint">系数单位：条</span>
+                    <button class="btn btn--sm" data-add="manual-mode">新增</button>
+                  </div>
                 </div>
 
-                <div class="manual-section">
-                  <div class="manual-section__head">
-                    <h3 class="manual-section__title">手动 SKU 清单</h3>
-                    <div class="manual-section__actions">
-                      <button class="btn btn--sm" data-demo="把选中行恢复自动">恢复自动（0）</button>
-                    </div>
+                <div class="tbl-block tbl-block--gap">
+                  <div class="tbl-cap">
+                    <span class="tbl-cap__title">手动 SKU</span>
+                    <span class="tbl-cap__meta" id="manualSkuMeta"></span>
                   </div>
-                  <table class="plain-table">
+                  <table class="score-table">
                     <thead>
                       <tr>
-                        <th style="width: 30px"><span class="cbx"><input type="checkbox" /><span></span></span></th>
-                        <th style="width: 150px">唯一标识</th>
-                        <th>品名</th>
-                        <th style="width: 150px">颜色</th>
-                        <th style="width: 130px">模式</th>
-                        <th style="width: 260px">系数（红线 / 正常 / 峰值，条）</th>
-                        <th style="width: 88px"></th>
+                        <th style="width: 32px"><span class="cbx"><input type="checkbox" id="manualAll" /><span></span></span></th>
+                        <th style="width: 146px">唯一标识</th>
+                        <th>品名 / 颜色</th>
+                        <th style="width: 118px">模式</th>
+                        <th style="width: 176px" class="is-num">红线 / 正常 / 峰值</th>
+                        <th style="width: 64px" class="is-num">操作</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      <tr>
-                        <td><span class="cbx"><input type="checkbox" /><span></span></span></td>
-                        <td class="meta">NB-193#KC-0021</td>
-                        <td>挪威网</td>
-                        <td>193#浅咖</td>
-                        <td>
-                          <select class="input" style="width: 100%">
-                            <option>自定模式</option>
-                            <option>滞销模式</option>
-                          </select>
-                        </td>
-                        <td>
-                          <input class="coef-input" value="20.0" />
-                          <input class="coef-input" value="40.0" />
-                          <input class="coef-input" value="60.0" />
-                        </td>
-                        <td class="row-actions"><button class="btn btn--text btn--sm" data-demo="恢复自动判定">恢复自动</button></td>
-                      </tr>
-                      <tr>
-                        <td><span class="cbx"><input type="checkbox" /><span></span></span></td>
-                        <td class="meta">9090-33#SH-0014</td>
-                        <td>9090网布</td>
-                        <td>33#深灰</td>
-                        <td>
-                          <select class="input" style="width: 100%">
-                            <option>滞销模式</option>
-                            <option>自定模式</option>
-                          </select>
-                        </td>
-                        <td class="coef-table__skip">不参与计算</td>
-                        <td class="row-actions"><button class="btn btn--text btn--sm" data-demo="恢复自动判定">恢复自动</button></td>
-                      </tr>
-                    </tbody>
+                    <tbody id="manualSkuBody"></tbody>
                   </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint" id="manualSkuHint"></span>
+                    <button class="btn btn--text btn--sm" id="manualBulkBtn" hidden>恢复自动</button>
+                    <button class="btn btn--sm" data-add="manual-sku">新增</button>
+                  </div>
                 </div>
               </div>
             </section>
@@ -319,48 +309,21 @@
                 <h2 class="panel__title">销量加权</h2>
               </div>
               <div class="panel__body">
-                <table class="score-table weight-table">
-                  <thead>
-                    <tr>
-                      <th>统计区间</th>
-                      <th style="width: 132px">权重</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>近 1 个月</td>
-                      <td>
-                        <label class="cell-field">
-                          <input class="num-input" type="number" min="0" max="100" step="5" data-weight="m1" />
-                          <span>%</span>
-                        </label>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>近 3 个月月均</td>
-                      <td>
-                        <label class="cell-field">
-                          <input class="num-input" type="number" min="0" max="100" step="5" data-weight="m3" />
-                          <span>%</span>
-                        </label>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td>近 12 个月月均</td>
-                      <td>
-                        <label class="cell-field">
-                          <input class="num-input" type="number" min="0" max="100" step="5" data-weight="m12" />
-                          <span>%</span>
-                        </label>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-                <div class="score-foot">
-                  <span class="weight-total" id="weightTotal"></span>
-                  <button class="btn btn--text btn--sm panel__foot-action" data-reset-weights title="恢复为 50 / 30 / 20">
-                    恢复默认
-                  </button>
+                <div class="tbl-block">
+                  <table class="score-table">
+                    <thead>
+                      <tr>
+                        <th>统计区间</th>
+                        <th style="width: 120px" class="is-num">权重</th>
+                      </tr>
+                    </thead>
+                    <tbody id="weightBody"></tbody>
+                    <tfoot id="weightFoot"></tfoot>
+                  </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint" id="weightHint"></span>
+                    <button class="btn btn--sm" data-edit="weights">编辑</button>
+                  </div>
                 </div>
               </div>
             </section>
@@ -371,25 +334,23 @@
                 <h2 class="panel__title">健康度评分</h2>
               </div>
               <div class="panel__body">
-                <table class="score-table">
-                  <thead>
-                    <tr>
-                      <th style="width: 130px">维度</th>
-                      <th style="width: 66px">权重</th>
-                      <th>低风险</th>
-                      <th>中风险</th>
-                      <th>高风险</th>
-                    </tr>
-                  </thead>
-                  <tbody id="scoringBody"></tbody>
-                </table>
-
-                <div class="score-foot">
-                  <span>三档得分 <b>低 80 / 中 60 / 高 40</b></span>
-                  <span>综合分档 <b>&lt; 50 红 · 50–70 黄 · &gt; 70 绿</b></span>
-                  <button class="btn btn--text btn--sm panel__foot-action" data-demo="打开评分规则编辑">
-                    编辑规则
-                  </button>
+                <div class="tbl-block">
+                  <table class="score-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 132px">维度</th>
+                        <th style="width: 64px" class="is-num">权重</th>
+                        <th>低风险</th>
+                        <th>中风险</th>
+                        <th>高风险</th>
+                      </tr>
+                    </thead>
+                    <tbody id="scoringBody"></tbody>
+                  </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint" id="scoringHint"></span>
+                    <button class="btn btn--sm" data-edit="scoring">编辑</button>
+                  </div>
                 </div>
               </div>
             </section>
@@ -400,21 +361,118 @@
                 <h2 class="panel__title">SPU 分级</h2>
               </div>
               <div class="panel__body">
-                <table class="score-table spu-table">
-                  <thead>
-                    <tr>
-                      <th style="width: 80px">等级</th>
-                      <th>月均条数阈值</th>
-                      <th style="width: 90px" class="is-num">命中 SPU</th>
-                    </tr>
-                  </thead>
-                  <tbody id="gradeBody"></tbody>
-                </table>
-                <div class="score-foot">
-                  <span>从高到低判定，命中第一个「月均 ≥ 下限」的等级</span>
-                  <button class="btn btn--text btn--sm panel__foot-action" data-demo="打开 SPU 分级编辑">
-                    编辑分级
-                  </button>
+                <div class="tbl-block">
+                  <table class="score-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 82px">等级</th>
+                        <th>月均条数</th>
+                        <th style="width: 96px" class="is-num">命中 SPU</th>
+                      </tr>
+                    </thead>
+                    <tbody id="gradeBody"></tbody>
+                  </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint">从高到低判定，末档兜底</span>
+                    <button class="btn btn--sm" data-edit="spu">编辑</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 染厂清单 -->
+            <section class="panel" data-panel-view="factories" hidden>
+              <div class="panel__head">
+                <h2 class="panel__title">染厂清单</h2>
+              </div>
+              <div class="panel__body">
+                <div class="tbl-block">
+                  <table class="score-table">
+                    <thead>
+                      <tr>
+                        <th>染厂名称</th>
+                        <th style="width: 84px">状态</th>
+                        <th style="width: 64px" class="is-num">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="factoryBody"></tbody>
+                  </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint" id="factoryHint"></span>
+                    <button class="btn btn--text btn--sm" data-demo="从 Excel 导入染厂名单（只补名单，不动启用状态）">
+                      从 Excel 导入
+                    </button>
+                    <button class="btn btn--sm" data-add="factory">新增</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 分类与分单人员 -->
+            <section class="panel" data-panel-view="people" hidden>
+              <div class="panel__head">
+                <h2 class="panel__title">分类与分单人员</h2>
+              </div>
+              <div class="panel__body">
+                <div class="tbl-block">
+                  <table class="score-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 168px">树形分类</th>
+                        <th>分单人员</th>
+                        <th style="width: 64px" class="is-num">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="peopleBody"></tbody>
+                  </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint" id="peopleHint"></span>
+                    <button class="btn btn--text btn--sm" data-demo="从产品资料导入分类">从产品资料导入</button>
+                    <button class="btn btn--sm" data-add="people">新增</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- SKU 可选染厂 -->
+            <section class="panel" data-panel-view="sku-factories" hidden>
+              <div class="panel__head">
+                <h2 class="panel__title">SKU 可选染厂</h2>
+              </div>
+              <div class="panel__body">
+                <div class="tbl-block tbl-block--wide">
+                  <div class="tbl-toolbar">
+                    <label class="field">
+                      <svg class="field__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <circle cx="7" cy="7" r="4.2" stroke="currentColor" stroke-width="1.3" />
+                        <path d="m10.4 10.4 3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+                      </svg>
+                      <input
+                        class="input input--search"
+                        id="skuFactorySearch"
+                        placeholder="搜索唯一标识 / 品名 / 颜色"
+                        style="width: 232px"
+                      />
+                    </label>
+                    <span class="tbl-toolbar__meta" id="skuFactoryCount"></span>
+                  </div>
+
+                  <table class="score-table score-table--wide">
+                    <thead>
+                      <tr>
+                        <th style="width: 148px">唯一标识</th>
+                        <th style="width: 188px">品名 / 颜色</th>
+                        <th style="width: 110px">树形分类</th>
+                        <th>可选染厂</th>
+                        <th style="width: 64px" class="is-num">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="skuFactoryBody"></tbody>
+                  </table>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint" id="skuFactoryHint"></span>
+                    <button class="btn btn--sm" data-add="sku-factory">新增</button>
+                  </div>
                 </div>
               </div>
             </section>
@@ -428,6 +486,32 @@
       <span class="batchbar__text">已选 <strong id="batchCount">0</strong> 个 SKU</span>
       <button class="batchbar__clear" id="batchClear">清空</button>
       <button class="btn btn--primary" data-demo="打开确认补货弹窗">确认补货</button>
+    </div>
+
+    <!-- ===================== 设置弹窗（所有编辑共用） ===================== -->
+    <div class="overlay" id="formOverlay" hidden>
+      <div class="modal modal--form" role="dialog" aria-modal="true" aria-labelledby="formTitle">
+        <div class="modal__head">
+          <h2 class="modal__title" id="formTitle">编辑</h2>
+          <button class="icon-btn modal__close" id="formClose" aria-label="关闭">
+            <svg viewBox="0 0 16 16" fill="none">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal__body">
+          <p class="form__note" id="formNote" hidden></p>
+          <div class="form" id="formBody"></div>
+          <p class="form__error" id="formError" hidden></p>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--text btn--sm" id="formReset" hidden>恢复默认</button>
+          <div class="modal__foot-actions">
+            <button class="btn" id="formCancel">取消</button>
+            <button class="btn btn--primary" id="formOk">确定</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ===================== SKU 详情 ===================== -->

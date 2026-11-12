@@ -13,7 +13,6 @@ import {
   createDefaultAutoModes,
   createDefaultConfig,
   createDefaultManualMode,
-  DEFAULT_MANUAL_MODE_NAMES,
   mapLegacyManualModeId,
   normalizeManualBehavior,
 } from './defaults.js'
@@ -124,10 +123,10 @@ function normalizeManualMode(mode, index) {
   const behavior = normalizeManualBehavior(source.behavior)
   const id = mapLegacyManualModeId(String(source.id ?? '').trim()) || nextId(`manual-${behavior}`)
   const rawName = String(source.name ?? '').trim()
-  const fallbackName = DEFAULT_MANUAL_MODE_NAMES[behavior]
+  const fallbackName = behavior === 'exclude' ? '排除模式' : '自定系数模式'
   // 旧版内置名跟随改名（「滞销模式」→「排除模式」、「自定模式」→「自定系数模式」）；其它自定义名称原样保留。
-  const legacyName = behavior === 'exclude' ? '滞销模式' : behavior === 'custom' ? '自定模式' : ''
-  const name = rawName && rawName === legacyName ? fallbackName : rawName || fallbackName
+  const legacyName = behavior === 'exclude' ? '滞销模式' : '自定模式'
+  const name = rawName === legacyName ? fallbackName : rawName || fallbackName
   const result = {
     id,
     name,
@@ -145,7 +144,7 @@ function normalizeManualMode(mode, index) {
   return result
 }
 
-// 手动策略：三种内置行为（custom / exclude / order）各保留一个，其余为用户自定义的模式。
+// 手动策略：两种内置行为（custom / exclude）各保留一个，其余为用户自定义的模式。
 function normalizeManualModes(modes) {
   const list = (Array.isArray(modes) ? modes : []).map((mode, index) =>
     normalizeManualMode(mode, index),

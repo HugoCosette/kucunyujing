@@ -66,7 +66,34 @@ const TONES = {
   none: { label: '不参与', dot: 'none' },
 }
 
-const TONE_COUNTS = { all: 21, urgent: 2, replenish: 6, normal: 7, overstock: 3, none: 3 }
+function toneCounts() {
+  const counts = { all: 0, urgent: 0, replenish: 0, normal: 0, overstock: 0, none: 0 }
+  INVENTORY.forEach((group) =>
+    group.children.forEach((child) => {
+      const draft = child.draft === undefined ? undefined : Number(child.draft) || 0
+      const tone = derive(child, draft).tone
+      counts.all += 1
+      if (tone in counts) counts[tone] += 1
+    }),
+  )
+  return counts
+}
+
+// 顶部两个计数跟着表格走：紧急补货 = 红色行，采购清单 = 已采纳行
+function syncCounts() {
+  const counts = toneCounts()
+  const urgent = $('#urgentCount')
+  const purchase = $('#purchaseCount')
+  if (urgent) urgent.textContent = String(counts.urgent)
+  if (purchase) {
+    const accepted = INVENTORY.reduce(
+      (sum, group) => sum + group.children.filter((child) => Number(child.planned) > 0).length,
+      0,
+    )
+    purchase.textContent = String(accepted)
+  }
+  renderToneFilters()
+}
 
 const MODES = [
   {
@@ -112,21 +139,60 @@ const MODES = [
   { key: 'slow', name: '滞销', min: 0, metric: 'none', hits: 1, participates: false, split: false, rows: [] },
 ]
 
-const SCORING_ROWS = [
-  { label: '客户数 CR5', weight: 15, low: '0 – 40%', mid: '40 – 60%', high: '60% 以上' },
-  { label: '累计客户数', weight: 10, low: '21 以上', mid: '11 – 20', high: '0 – 10' },
-  { label: '销售环比率', weight: 20, low: '10% 以上', mid: '-10% – 10%', high: '-10% 以下' },
-  { label: '本次进销比', weight: 30, low: '0 – 20%', mid: '20 – 30%', high: '30% 以上' },
-  { label: '预估月消耗', weight: 25, low: '0 以下', mid: '等于 0', high: '0 以上' },
+// 评分区间用 from / to 存数，展示文案由 rangeText() 生成，避免显示串与数值两套数据。
+// 三档在弹窗里按数值从小到大排成一条「分档刻度条」，只填两个分界值，相邻两档共用。
+let SCORING_ROWS = [
+  { key: 'cr5', label: '客户数 CR5', unit: '%', weight: 15, low: { from: 0, to: 40 }, mid: { from: 40, to: 60 }, high: { from: 60, to: null } },
+  { key: 'customers', label: '累计客户数', unit: '个', weight: 10, low: { from: 21, to: null }, mid: { from: 11, to: 20 }, high: { from: 0, to: 10 } },
+  { key: 'mom', label: '销售环比率', unit: '%', weight: 20, low: { from: 10, to: null }, mid: { from: -10, to: 10 }, high: { from: null, to: -10 } },
+  { key: 'inout', label: '本次进销比', unit: '%', weight: 30, low: { from: 0, to: 20 }, mid: { from: 20, to: 30 }, high: { from: 30, to: null } },
+  { key: 'consumption', label: '预估月消耗', unit: '条', weight: 25, low: { from: null, to: 0 }, mid: { from: 0, to: 0 }, high: { from: 0, to: null } },
 ]
 
-const SPU_GRADES = [
-  { label: 'S+', tone: 'splus', threshold: '≥ 2500', count: 1 },
-  { label: 'S', tone: 's', threshold: '≥ 300', count: 2 },
-  { label: 'A', tone: 'a', threshold: '≥ 100', count: 0 },
-  { label: 'B', tone: 'b', threshold: '≥ 30', count: 1 },
-  { label: 'C', tone: 'c', threshold: '≥ 1', count: 1 },
-  { label: 'Z', tone: 'z', threshold: '< 1', count: 0 },
+// 三档得分与综合分档，评分弹窗与 SKU 弹窗共用
+let SCORING_SCORES = { low: 80, mid: 60, high: 40 }
+let SCORING_TOTAL = { midFrom: 50, midTo: 70 }
+
+let SPU_GRADES = [
+  { key: 'splus', label: 'S+', tone: 'splus', min: 2500, count: 1 },
+  { key: 's', label: 'S', tone: 's', min: 300, count: 2 },
+  { key: 'a', label: 'A', tone: 'a', min: 100, count: 0 },
+  { key: 'b', label: 'B', tone: 'b', min: 30, count: 1 },
+  { key: 'c', label: 'C', tone: 'c', min: 1, count: 1 },
+  { key: 'z', label: 'Z', tone: 'z', min: null, count: 0 },
+]
+
+// 下单配置：主数据。原型里直接落数组，落到 Vue 时对应 src/purchase/settings.json
+let MANUAL_MODES = [
+  { id: 'mm-custom', name: '自定模式', behavior: '自定系数', desc: '人工指定红线 / 正常 / 峰值', participates: true, builtin: true, redLine: 20, normal: 40, peak: 60 },
+  { id: 'mm-slow', name: '滞销模式', behavior: '滞销', desc: '不计预警、不进紧急补货', participates: false, builtin: true },
+]
+
+let MANUAL_SKUS = [
+  { id: 'NB-193#KC-0021', product: '挪威网', color: '193#浅咖', modeId: 'mm-custom', redLine: 20, normal: 40, peak: 60 },
+  { id: '9090-33#SH-0014', product: '9090网布', color: '33#深灰', modeId: 'mm-slow' },
+]
+
+let FACTORIES = [
+  { id: 'f1', name: '江苏恒泰染整', enabled: true, orders: 12 },
+  { id: 'f2', name: '绍兴越新印染', enabled: true, orders: 8 },
+  { id: 'f3', name: '福建华源纺织', enabled: true, orders: 5 },
+  { id: 'f4', name: '广东锦丰染厂', enabled: false, orders: 0 },
+]
+
+const STAFF_POOL = ['张伟', '李四', '王芳', '赵敏', '陈立', '孙倩']
+
+let PEOPLE = [
+  { id: 'p1', category: '涤纶网布', people: ['张伟', '李四', '王芳'] },
+  { id: 'p2', category: '锦纶网布', people: ['张伟', '赵敏'] },
+  { id: 'p3', category: '交织网布', people: ['陈立'] },
+  { id: 'p4', category: '瑞士网', people: ['王芳', '孙倩'] },
+]
+
+let SKU_FACTORIES = [
+  { id: 'NB-193#KC-0021', product: '挪威网', color: '193#浅咖', category: '涤纶网布', factories: ['江苏恒泰染整', '绍兴越新印染'] },
+  { id: '9090-33#SH-0014', product: '9090网布', color: '33#深灰', category: '锦纶网布', factories: ['福建华源纺织'] },
+  { id: '40D-87#MH-0007', product: '40D锦安', color: '87#米黄S', category: '瑞士网', factories: ['绍兴越新印染', '福建华源纺织'] },
 ]
 
 const DIM_SCORES = [
@@ -152,6 +218,9 @@ const state = {
   salesKeyword: '',
   history: [],
   redo: [],
+  dirty: false,
+  dirtyPanels: new Set(),
+  manualSelected: new Set(),
 }
 
 /* ---------------- 工具 ---------------- */
@@ -171,13 +240,84 @@ function toast(message) {
   }, 2000)
 }
 
-function derive(sku) {
-  const theoretical = sku.warehouse + sku.inTransit + sku.producing - sku.backorder - sku.planned
-  const projected = theoretical - Math.round(sku.weekly)
-  const days = sku.weekly > 0 ? projected / (sku.weekly / 7) : null
-  const shortage = sku.planned
-  const rate = shortage > 0 ? shortage / (shortage + Math.max(projected, 0)) : 0
-  return { theoretical, projected, days, shortage, rate }
+// 原型近似 calculateInventoryRow：理论库存是事实层，预计库存才叠加「需安排」。
+function colorCategory(color) {
+  return /黑白|黑|本白|米白|灰白/.test(color) ? '黑白' : '彩色'
+}
+
+function bandFor(sku) {
+  const mode = MODES.find((item) => item.name === sku.mode)
+  if (!mode || !mode.participates || !mode.rows.length) return null
+  const row = mode.split ? mode.rows.find((item) => item.color === colorCategory(sku.color)) : mode.rows[0]
+  if (!row) return null
+  // 天数模式：系数（天）× 日销量；按量模式：系数本身就是数量
+  const dailySales = sku.weekly / 7
+  return mode.metric === 'days'
+    ? { red: row.redLine * dailySales, normal: row.normal * dailySales, peak: row.peak * dailySales }
+    : { red: row.redLine, normal: row.normal, peak: row.peak }
+}
+
+function derive(sku, plannedValue) {
+  const planned = plannedValue ?? sku.planned ?? 0
+  const theoretical = sku.warehouse + sku.inTransit + sku.producing - sku.backorder
+  const projected = theoretical + planned
+  const band = bandFor(sku)
+  const dailySales = sku.weekly / 7
+  const days = band && dailySales > 0 ? projected / dailySales : null
+  const shortage = band ? Math.round(band.normal - projected) : null
+  const rate = band && band.normal > 0 ? shortage / band.normal : null
+  const tone = !band
+    ? 'none'
+    : projected < band.red
+      ? 'urgent'
+      : projected < band.normal
+        ? 'replenish'
+        : projected > band.peak
+          ? 'overstock'
+          : 'normal'
+  // 建议需安排 = 补到正常库存（绿色带中位）的差额
+  const suggest = band ? Math.max(0, Math.ceil(band.normal - projected)) : 0
+  return { theoretical, projected, days, shortage, rate, tone, suggest, band, planned }
+}
+
+function childByKey(key) {
+  const [product, color] = key.split('|')
+  const group = INVENTORY.find((item) => item.product === product)
+  return { group, child: group?.children.find((item) => item.color === color) }
+}
+
+// 种子数据按「期望的预警状态」反推库存：保证每个色带都有样本，且建议值与状态自洽
+// 只留两行「已采纳」样本（补货后已回到正常带），其余清空需安排，让建议值占位可见
+const SEED_ACCEPTED = new Set(['挪威网|193#浅咖', '40D锦安|25#酒红（固色）'])
+
+function normalizeSeed() {
+  INVENTORY.forEach((group) => {
+    group.children.forEach((child) => {
+      const key = `${group.product}|${child.color}`
+      const accepted = SEED_ACCEPTED.has(key)
+      child.planned = accepted ? child.planned ?? 0 : 0
+
+      const band = bandFor(child)
+      if (!band) return
+
+      // 已采纳的行：按「补到正常水位」摆；其余按期望状态摆
+      const target = accepted
+        ? band.normal * 1.02
+        : child.tone === 'urgent'
+          ? band.red * 0.72
+          : child.tone === 'replenish'
+            ? band.red + (band.normal - band.red) * 0.45
+            : child.tone === 'overstock'
+              ? band.peak * 1.3
+              : band.normal + (band.peak - band.normal) * 0.5
+
+      // 由「预计库存 = 目标」反推在仓 / 在途 / 生产中，保证与预警带一致
+      const theoretical = Math.max(0, Math.round(target) - child.planned)
+      child.producing = Math.round(theoretical * 0.45)
+      child.inTransit = Math.round(theoretical * 0.3)
+      child.warehouse = Math.max(0, theoretical - child.producing - child.inTransit + child.backorder)
+    })
+  })
 }
 
 /* ---------------- 导航 ---------------- */
@@ -209,7 +349,7 @@ function renderToneFilters() {
     <button class="chip ${state.tone === item.key ? 'is-active' : ''}" data-tone="${item.key}">
       ${item.dot ? `<i class="chip__dot dot--${item.dot}"></i>` : ''}
       ${item.label}
-      <span class="chip__count">${TONE_COUNTS[item.key]}</span>
+      <span class="chip__count">${toneCounts()[item.key]}</span>
     </button>`,
   ).join('')
 }
@@ -220,7 +360,7 @@ const INV_COLS = [
   { key: 'product', label: '品名', w: 144, group: '商品', left: true },
   { key: 'color', label: '颜色', w: 132, group: '商品', left: true },
   { key: 'urgency', label: '预警', w: 52, group: '商品' },
-  { key: 'planned', label: '需安排', w: 138, group: '补货计划' },
+  { key: 'planned', label: '需安排', w: 152, group: '补货计划' },
   { key: 'producing', label: '生产中', w: 72, group: '补货计划', num: true },
   { key: 'backorder', label: '欠货', w: 64, group: '出货需求', num: true },
   { key: 'weekly', label: '周销量', w: 72, group: '出货需求', num: true },
@@ -230,8 +370,8 @@ const INV_COLS = [
   { key: 'theoretical', label: '理论库存', w: 76, group: '库存（公斤）', num: true },
   { key: 'projected', label: '预计库存', w: 76, group: '库存（公斤）', num: true },
   { key: 'days', label: '日库销比', w: 72, group: '数据反馈', num: true },
-  { key: 'shortage', label: '缺口量', w: 68, group: '数据反馈', num: true },
-  { key: 'rate', label: '缺口率', w: 68, group: '数据反馈', num: true },
+  { key: 'shortage', label: '缺口量', w: 76, group: '数据反馈', num: true },
+  { key: 'rate', label: '缺口率', w: 72, group: '数据反馈', num: true },
 ]
 
 function visibleGroups() {
@@ -303,9 +443,8 @@ function renderGroupRow(group) {
     } else if (col.key === 'planned') {
       content = total > 0 ? fmt(total) : '—'
     } else if (col.key === 'urgency') {
-      const worst = ['urgent', 'replenish', 'overstock', 'normal', 'none'].find((key) =>
-        group.children.some((child) => child.tone === key),
-      ) || 'none'
+      const tones = derived.map((item) => item.tone)
+      const worst = ['urgent', 'replenish', 'overstock', 'normal', 'none'].find((key) => tones.includes(key)) || 'none'
       content = `<span class="urgency urgency--${worst}" title="组内最低状态：${TONES[worst].label}"><i class="urgency__dot"></i></span>`
     } else if (col.key === 'weekly') {
       content = fmt(sum((child) => child.weekly))
@@ -330,11 +469,14 @@ function renderGroupRow(group) {
 }
 
 function renderChildRow(group, child) {
-  const d = derive(child)
   const key = skuKey(group.product, child.color)
+  // 草稿值参与预演：填了数字就按「填完之后」算预计库存与预警色
+  const draft = child.draft === undefined ? undefined : Number(child.draft) || 0
+  const d = derive(child, draft)
   const selected = state.selected.has(key)
-  const tone = TONES[child.tone]
+  const tone = TONES[d.tone]
   const inactive = child.mode === '尾货' || child.mode === '滞销'
+  const accepted = Number(child.planned) > 0
 
   const cells = INV_COLS.map((col) => {
     let content = ''
@@ -349,19 +491,40 @@ function renderChildRow(group, child) {
     } else if (col.key === 'urgency') {
       content = `<span class="urgency urgency--${tone.dot}" title="${tone.label}" aria-label="${tone.label}"><i class="urgency__dot"></i></span>`
     } else if (col.key === 'planned') {
-      content = `<div class="planned"><input class="planned__input" data-planned="${key}" value="${
-        child.planned || ''
-      }" placeholder="待填" /><span class="planned__unit">条</span><button class="planned__accept" data-accept="${key}">采纳</button></div>`
+      const suggested = d.suggest > 0 ? d.suggest : ''
+      const title = accepted
+        ? '已采纳，点击「撤销」后可修改'
+        : suggested
+          ? `建议填写 ${fmt(suggested)}：补到正常库存（绿色带中位）后的差额，不会自动采纳`
+          : '预计库存已达正常水位，无需安排'
+      content = `<div class="planned ${accepted ? 'planned--locked' : ''}">
+        <input class="planned__input" data-planned="${key}" inputmode="numeric"
+          value="${accepted ? fmt(child.planned) : child.draft ?? ''}"
+          placeholder="${suggested ? fmt(suggested) : ''}"
+          title="${title}" ${accepted ? 'disabled' : ''} />
+        ${
+          accepted
+            ? `<svg class="planned__lock" viewBox="0 0 16 16" fill="none" title="已采纳并锁定">
+                 <path d="M4.5 6V4.75a3.5 3.5 0 0 1 7 0V6m-8 0h9a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm4.5 3v2"
+                   stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+               </svg>`
+            : ''
+        }
+        <span class="planned__unit">公斤</span>
+        <button class="planned__accept ${accepted ? 'planned__accept--undo' : ''}" data-accept="${key}" ${
+          accepted || Number(child.draft) > 0 ? '' : 'disabled'
+        }>${accepted ? '撤销' : '采纳'}</button>
+      </div>`
     } else if (col.key === 'days') {
-      content = inactive ? '—' : d.days.toFixed(1)
+      content = inactive || d.days === null ? '—' : d.days.toFixed(1)
     } else if (col.key === 'rate') {
-      content = inactive ? '—' : `${(d.rate * 100).toFixed(0)}%`
+      content = inactive || d.rate === null ? '—' : `${(d.rate * 100).toFixed(0)}%`
     } else if (col.key === 'theoretical') {
       content = fmt(d.theoretical)
     } else if (col.key === 'projected') {
       content = fmt(d.projected)
     } else if (col.key === 'shortage') {
-      content = inactive ? '—' : fmt(d.shortage)
+      content = inactive || d.shortage === null ? '—' : fmt(d.shortage)
     } else if (col.key === 'turnover') {
       content = '0'
     } else {
@@ -373,7 +536,15 @@ function renderChildRow(group, child) {
     }">${content}</div>`
   }).join('')
 
-  return `<div class="gt-row ${selected ? 'is-selected' : ''}" data-sku-row="${key}">${cells}</div>`
+  return `<div class="gt-row ${selected ? 'is-selected' : ''} ${accepted ? 'gt-row--accepted' : ''}" data-sku-row="${key}" data-tone="${d.tone}">${cells}</div>`
+}
+
+// 只重画一行：输入时保留焦点，不整表重建
+function refreshRow(key) {
+  const rowEl = $(`[data-sku-row="${key}"]`, $('#invTable'))
+  const { group, child } = childByKey(key)
+  if (!rowEl || !child) return
+  rowEl.outerHTML = renderChildRow(group, child)
 }
 
 function renderInventory() {
@@ -413,6 +584,7 @@ function renderInventory() {
   const allExpanded = groups.length > 0 && groups.every((group) => state.expanded.has(group.product))
   $('#toggleAll').textContent = allExpanded ? '全部收起' : '全部展开'
   syncBatchBar()
+  syncCounts()
 }
 
 $('#invTable').addEventListener('click', (event) => {
@@ -426,16 +598,30 @@ $('#invTable').addEventListener('click', (event) => {
   const accept = event.target.closest('[data-accept]')
   if (accept) {
     event.stopPropagation()
-    const input = $(`[data-planned="${accept.dataset.accept}"]`, $('#invTable'))
-    const value = Number(input?.value)
-    if (!Number.isFinite(value) || value <= 0) {
-      toast('请先填写需安排数量')
-      return
+    const key = accept.dataset.accept
+    const { child } = childByKey(key)
+    if (!child) return
+
+    // 已采纳 = 锁定状态，按钮变「撤销」：回退到采纳前的值
+    if (Number(child.planned) > 0) {
+      child.planned = child.prevPlanned ?? 0
+      delete child.prevPlanned
+      toast(`已撤销 ${key.replace('|', ' · ')} 的需安排`)
+    } else {
+      const raw = String(child.draft ?? '').replace(/[^\d.]/g, '')
+      const value = Math.round(Number(raw))
+      if (!Number.isFinite(value) || value <= 0) {
+        toast('请先填写需安排数量')
+        return
+      }
+      child.prevPlanned = 0
+      child.planned = value
+      delete child.draft
+      toast(`已采纳 ${fmt(value)} 公斤，加入本次采购清单`)
     }
-    const [product, color] = accept.dataset.accept.split('|')
-    const target = INVENTORY.find((item) => item.product === product)?.children.find((item) => item.color === color)
-    if (target) target.planned = value
-    toast(`已采纳 ${fmt(value)} 条`)
+
+    refreshRow(key)
+    syncCounts()
     return
   }
 
@@ -454,6 +640,26 @@ $('#invTable').addEventListener('click', (event) => {
     else state.expanded.add(product)
     renderInventory()
   }
+})
+
+// 需安排草稿：边填边预演该行的预计库存与预警色（与原组件 plannedPreviewTones 同义）
+$('#invTable').addEventListener('input', (event) => {
+  const input = event.target.closest('[data-planned]')
+  if (!input) return
+  const key = input.dataset.planned
+  const { child } = childByKey(key)
+  if (!child) return
+
+  child.draft = input.value
+  refreshRow(key)
+
+  const next = $(`[data-planned="${key}"]`, $('#invTable'))
+  if (next) {
+    next.focus()
+    const end = next.value.length
+    next.setSelectionRange?.(end, end)
+  }
+  syncCounts()
 })
 
 $('#invTable').addEventListener('change', (event) => {
@@ -657,10 +863,10 @@ function openSku(key) {
       </div>
       <div class="manual-box__row">
         <span>系数</span>
-        <input class="coef-input" value="20.0" aria-label="红线" />
-        <input class="coef-input" value="40.0" aria-label="正常" />
-        <input class="coef-input" value="60.0" aria-label="峰值" />
-        <span>红线 / 正常 / 峰值（条）</span>
+        <input class="input input--num" value="20" aria-label="红线" />
+        <input class="input input--num" value="40" aria-label="正常" />
+        <input class="input input--num" value="60" aria-label="峰值" />
+        <span class="num-field__unit">条</span>
       </div>
     </div>`
 
@@ -1039,21 +1245,229 @@ $('#salesToggleAll').addEventListener('click', () => {
 })
 
 /* ---------------- 配置：分区 ---------------- */
+// 设置壳：分区归属两个域，工具条随域切换（备货=方案制，下单=单套确定）
+const PANEL_DOMAIN = {
+  strategy: 'stocking',
+  weights: 'stocking',
+  scoring: 'stocking',
+  spu: 'stocking',
+  factories: 'purchase',
+  people: 'purchase',
+  'sku-factories': 'purchase',
+}
+
 function switchPanel(panel) {
+  const domain = PANEL_DOMAIN[panel] ?? 'stocking'
   $$('.rail__item').forEach((item) => item.classList.toggle('is-active', item.dataset.panel === panel))
   $$('[data-panel-view]').forEach((view) => {
     view.hidden = view.dataset.panelView !== panel
+  })
+  $$('[data-domain-bar]').forEach((bar) => {
+    bar.hidden = bar.dataset.domainBar !== domain
   })
 }
 
 $$('.rail__item').forEach((item) => item.addEventListener('click', () => switchPanel(item.dataset.panel)))
 
-/* ---------------- 配置：策略与模式 ---------------- */
+/* ---------------- 设置：统一表单 ---------------- */
+// 设置页只有两种交互：表格只读展示 + 一个弹窗改值。
+// 弹窗结构、宽度、单位位置、底部按钮顺序全部固定，避免每处各写一套。
+
+let formSpec = null
+
+function esc(text) {
+  return String(text ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+}
+
+function formRow(label, control, hint = '') {
+  return `<div class="form__row"><span class="form__row-label">${label}</span><span class="form__row-ctrl">${control}${
+    hint ? `<span class="form__row-hint">${hint}</span>` : ''
+  }</span></div>`
+}
+
+function numField(key, value, unit = '', opts = {}) {
+  const { min, max, step = 1, placeholder = '' } = opts
+  return `<span class="num-field"><input class="input input--num" type="number" inputmode="decimal" data-key="${key}"
+    value="${value ?? ''}"${min !== undefined ? ` min="${min}"` : ''}${max !== undefined ? ` max="${max}"` : ''}
+    step="${step}"${placeholder ? ` placeholder="${placeholder}"` : ''} />${
+    unit ? `<span class="num-field__unit">${unit}</span>` : ''
+  }</span>`
+}
+
+function textField(key, value, opts = {}) {
+  return `<input class="input" data-key="${key}" value="${esc(value ?? '')}"${
+    opts.placeholder ? ` placeholder="${esc(opts.placeholder)}"` : ''
+  }${opts.readonly ? ' readonly' : ''} />`
+}
+
+function selectField(key, value, options) {
+  return `<select class="input" data-key="${key}">${options
+    .map((opt) => `<option value="${esc(opt.value)}"${opt.value === value ? ' selected' : ''}>${esc(opt.label)}</option>`)
+    .join('')}</select>`
+}
+
+function switchField(key, on) {
+  return `<button type="button" class="switch ${on ? 'is-on' : ''}" data-switch="${key}" data-value="${on ? 1 : 0}" aria-pressed="${on ? 'true' : 'false'}"></button>`
+}
+
+function tagsField(key, items, options, placeholder = '添加') {
+  return `<span class="tags" data-tags="${key}">
+    ${items.map((item) => `<span class="tags__item" data-tag="${esc(item)}">${esc(item)}<button type="button" class="tags__del" data-tag-del aria-label="移除">×</button></span>`).join('')}
+    <input class="input tags__input" list="tag-options-${key}" data-tag-input placeholder="${placeholder}" />
+    <datalist id="tag-options-${key}">${options.map((opt) => `<option value="${esc(opt)}"></option>`).join('')}</datalist>
+  </span>`
+}
+
+function readForm() {
+  // 从初始结构深拷贝：这样 rows / tiers 这类「行结构」在提交时仍然拿得到
+  const values = formSpec?.values ? JSON.parse(JSON.stringify(formSpec.values)) : {}
+  $$('[data-key]', $('#formBody')).forEach((el) => {
+    const key = el.dataset.key
+    if (el.type === 'number') values[key] = el.value === '' ? null : Number(el.value)
+    else values[key] = el.value
+  })
+  $$('[data-switch]', $('#formBody')).forEach((el) => {
+    values[el.dataset.switch] = el.dataset.value === '1'
+  })
+  $$('[data-tags]', $('#formBody')).forEach((wrap) => {
+    values[wrap.dataset.tags] = $$('[data-tag]', wrap).map((chip) => chip.dataset.tag)
+  })
+  return values
+}
+
+function validateForm(show = true) {
+  if (!formSpec) return true
+  const values = readForm()
+  formSpec.onInput?.(values)
+  const message = formSpec.validate?.(values) || null
+  const error = $('#formError')
+  error.hidden = !(message && show)
+  error.textContent = message || ''
+  // 首次打开不拦确定；一旦开始输入，错误即时提示并禁用确定
+  $('#formOk').disabled = Boolean(message) && show
+  return !message
+}
+
+function openForm(spec) {
+  formSpec = spec
+  $('#formTitle').textContent = spec.title || '编辑'
+  const modal = $('#formOverlay').querySelector('.modal')
+  modal.classList.toggle('modal--wide', Boolean(spec.wide))
+  modal.classList.toggle('modal--narrow', Boolean(spec.narrow))
+  modal.classList.toggle('modal--mid', Boolean(spec.mid))
+  const note = $('#formNote')
+  note.hidden = !spec.note
+  note.textContent = spec.note || ''
+  $('#formBody').innerHTML = spec.render(spec.values)
+  $('#formReset').hidden = !spec.reset
+  const ok = $('#formOk')
+  ok.textContent = spec.okText || '确定'
+  ok.classList.toggle('btn--danger-solid', Boolean(spec.danger))
+  $('#formOverlay').hidden = false
+  validateForm(false)
+  const first = $('#formBody input:not([readonly]), #formBody select')
+  first?.focus()
+}
+
+function closeForm() {
+  $('#formOverlay').hidden = true
+  formSpec = null
+}
+
+function submitForm() {
+  if (!formSpec || !validateForm(true)) return
+  const values = readForm()
+  formSpec.onSubmit?.(values)
+  closeForm()
+}
+
+function openConfirm({ title, note, okText = '删除', onOk }) {
+  openForm({
+    title,
+    note,
+    values: {},
+    render: () => '',
+    okText,
+    danger: true,
+    narrow: true,
+    onSubmit: () => onOk(),
+  })
+}
+
+$('#formOk').addEventListener('click', submitForm)
+$('#formCancel').addEventListener('click', closeForm)
+$('#formClose').addEventListener('click', closeForm)
+$('#formReset').addEventListener('click', () => {
+  if (!formSpec?.reset) return
+  const spec = formSpec
+  openForm({ ...spec, values: spec.reset() })
+})
+
+$('#formBody').addEventListener('input', (event) => {
+  validateForm()
+})
+
+// 开关：点一下就地切换，不依赖原生 checkbox
+$('#formBody').addEventListener('click', (event) => {
+  const sw = event.target.closest('[data-switch]')
+  if (sw) {
+    const on = sw.dataset.value !== '1'
+    sw.dataset.value = on ? '1' : '0'
+    sw.classList.toggle('is-on', on)
+    sw.setAttribute('aria-pressed', String(on))
+    validateForm()
+    return
+  }
+  const del = event.target.closest('[data-tag-del]')
+  if (del) {
+    del.closest('[data-tag]').remove()
+    validateForm()
+  }
+})
+
+// 标签：回车添加，去重；输入框保留焦点方便连续录入
+$('#formBody').addEventListener('keydown', (event) => {
+  const input = event.target.closest('[data-tag-input]')
+  if (!input || event.key !== 'Enter') return
+  event.preventDefault()
+  const value = input.value.trim()
+  if (!value) return
+  const wrap = input.closest('[data-tags]')
+  if ($$('[data-tag]', wrap).some((chip) => chip.dataset.tag === value)) {
+    input.value = ''
+    return
+  }
+  const chip = document.createElement('span')
+  chip.className = 'tags__item'
+  chip.dataset.tag = value
+  chip.innerHTML = `${esc(value)}<button type="button" class="tags__del" data-tag-del aria-label="移除">×</button>`
+  wrap.insertBefore(chip, input)
+  input.value = ''
+  validateForm()
+})
+
+document.addEventListener('keydown', (event) => {
+  if ($('#formOverlay').hidden) return
+  if (event.key === 'Escape') {
+    event.stopPropagation()
+    closeForm()
+  }
+  if (event.key === 'Enter' && !event.target.closest('[data-tags]')) {
+    event.preventDefault()
+    submitForm()
+  }
+})
+
+/* ---------------- 设置：策略与模式 ---------------- */
+function currentMode() {
+  return MODES.find((item) => item.key === state.activeMode) || MODES[0]
+}
+
 function modeRange(mode) {
   const index = MODES.findIndex((item) => item.key === mode.key)
   const above = MODES[index - 1]
   if (!mode.participates) return mode.key === 'slow' ? '月均 = 0' : '0 < 月均 < 3'
-  return above ? `${mode.min} – ${above.min} 条/月` : `≥ ${mode.min} 条/月`
+  return above ? `${mode.min} ~ ${above.min} 条/月` : `≥ ${mode.min} 条/月`
 }
 
 function renderModeList() {
@@ -1067,67 +1481,944 @@ function renderModeList() {
       <span class="mode-item__range">${modeRange(mode)}</span>
     </button>`,
   ).join('')
+  $('#railStrategyMeta').textContent = `${MODES.length} 个模式`
 }
 
-function renderCoefficients(mode) {
-  if (!mode.participates) {
-    return '<div class="table-empty">该模式不参与计算</div>'
-  }
+function coefTableReadonly(mode, unit) {
+  const cell = (row) => `
+    <td class="is-num">${row.redLine.toFixed(1)}</td>
+    <td class="is-num">${row.normal.toFixed(1)}</td>
+    <td class="is-num">${row.peak.toFixed(1)}</td>`
 
-  const unit = mode.metric === 'days' ? '天' : '条'
-  const rowHtml = (row, first) => `
-    <tr>
-      ${first ? '<td class="coef-table__cat" rowspan="2">流通品</td>' : ''}
-      <td class="coef-table__color">${row.color}</td>
-      <td class="is-num"><input class="coef-input" data-coef="${row.color}-redLine" value="${row.redLine.toFixed(1)}" /></td>
-      <td class="is-num"><input class="coef-input" data-coef="${row.color}-normal" value="${row.normal.toFixed(1)}" /></td>
-      <td class="is-num"><input class="coef-input" data-coef="${row.color}-peak" value="${row.peak.toFixed(1)}" /></td>
-    </tr>`
-
-  return `
-    <table class="coef-table">
-      <thead>
-        <tr>
-          <th class="coef-table__cat">客户类别</th>
-          <th class="coef-table__color">色彩</th>
-          <th class="is-num">红线（${unit}）</th>
-          <th class="is-num">正常（${unit}）</th>
-          <th class="is-num">峰值（${unit}）</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rowHtml(mode.rows[0], true)}
-        ${rowHtml(mode.rows[1], false)}
-        ${
-          mode.split
-            ? `<tr><td class="coef-table__cat">专属品</td><td colspan="4" class="coef-table__skip">不设系数</td></tr>`
-            : ''
-        }
-      </tbody>
-    </table>`
+  return `<table class="coef-table">
+    <thead>
+      <tr>
+        <th class="coef-table__cat">客户类别</th>
+        <th class="coef-table__color">色彩</th>
+        <th class="is-num">红线（${unit}）</th>
+        <th class="is-num">正常（${unit}）</th>
+        <th class="is-num">峰值（${unit}）</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="coef-table__cat" rowspan="2">流通品</td>
+        <td class="coef-table__color">黑白</td>
+        ${cell(mode.rows[0])}
+      </tr>
+      <tr>
+        <td class="coef-table__color">彩色</td>
+        ${cell(mode.rows[1])}
+      </tr>
+      ${
+        mode.split
+          ? '<tr><td class="coef-table__cat">专属品</td><td colspan="4" class="coef-table__skip">不设系数</td></tr>'
+          : ''
+      }
+    </tbody>
+  </table>`
 }
 
 function renderEditor() {
-  const mode = MODES.find((item) => item.key === state.activeMode) || MODES[0]
+  const mode = currentMode()
   const unit = mode.metric === 'days' ? '天' : '条'
 
   $('#modeEditor').innerHTML = `
     <div class="editor-head">
-      <input class="input editor-name" value="${mode.name}" data-mode-name aria-label="模式名称" />
+      <h3 class="editor-head__title">${mode.name}</h3>
+      <span class="tag">${modeRange(mode)}</span>
       <span class="editor-head__meta">命中 ${fmt(mode.hits)} 个 SKU</span>
     </div>
 
-    <div class="field-row">
-      <span>月均条数 ≥</span>
-      <input class="num-input" value="${mode.min}" data-mode-min aria-label="月均条数阈值" />
-      <span>条/月</span>
-    </div>
-
-    <p class="section-label">备货系数 ${mode.participates ? `<span>单位：${unit}</span>` : ''}</p>
-    ${renderCoefficients(mode)}`
+    <div class="tbl-block">
+      <div class="section-label">备货系数 ${mode.participates ? `<span>单位：${unit}</span>` : ''}</div>
+      ${mode.participates ? coefTableReadonly(mode, unit) : '<div class="table-empty">不参与备货计算</div>'}
+      <div class="tbl-foot">
+        <span class="tbl-foot__hint"></span>
+        <button class="btn btn--sm" data-edit="mode">编辑</button>
+      </div>
+    </div>`
 
   $$('.mode-item').forEach((item) => item.classList.toggle('is-active', item.dataset.mode === mode.key))
 }
+
+function editModeDialog() {
+  const mode = currentMode()
+  const unit = mode.metric === 'days' ? '天' : '条'
+
+  openForm({
+    title: `编辑模式 · ${mode.name}`,
+    values: JSON.parse(JSON.stringify(mode)),
+    render: (v) => `
+      ${formRow('名称', textField('name', v.name))}
+      ${
+        v.participates
+          ? formRow('判定区间', `<span class="form__static">月均条数 ≥</span>${numField('min', v.min, '条/月', {
+              min: 0,
+              step: 1,
+            })}`)
+          : formRow('判定条件', '<span class="form__static">月均条数为 0 时命中，不参与备货计算</span>')
+      }
+      ${
+        v.participates
+          ? `<div class="form__group">
+              <div class="form__group-head">备货系数<span class="form__group-unit">单位：${unit}</span></div>
+              <div class="coef-grid">
+                <div class="coef-grid__head"><span>色彩</span><span>红线</span><span>正常</span><span>峰值</span></div>
+                ${v.rows
+                  .map(
+                    (row, index) => `
+                  <div class="coef-grid__row">
+                    <span>${row.color}</span>
+                    ${numField(`r${index}-redLine`, row.redLine, '', { step: 0.1, min: 0 })}
+                    ${numField(`r${index}-normal`, row.normal, '', { step: 0.1, min: 0 })}
+                    ${numField(`r${index}-peak`, row.peak, '', { step: 0.1, min: 0 })}
+                  </div>`,
+                  )
+                  .join('')}
+              </div>
+              <p class="form__group-hint">同一行需满足 红线 &lt; 正常 &lt; 峰值</p>
+            </div>`
+          : ''
+      }`,
+    validate: (v) => {
+      if (!v.name.trim()) return '名称不能为空'
+      if (!v.participates) return null
+      if (v.min === null || v.min < 0) return '判定区间需填写不小于 0 的数值'
+      for (let i = 0; i < v.rows.length; i += 1) {
+        const red = v[`r${i}-redLine`]
+        const normal = v[`r${i}-normal`]
+        const peak = v[`r${i}-peak`]
+        if ([red, normal, peak].some((value) => value === null)) return `${v.rows[i].color} 的三个系数都要填写`
+        if (!(red < normal && normal < peak)) return `${v.rows[i].color}：需满足 红线 < 正常 < 峰值`
+      }
+      return null
+    },
+    onSubmit: (v) => {
+      pushHistory()
+      mode.name = v.name.trim()
+      if (v.participates) {
+        mode.min = v.min
+        mode.rows.forEach((row, index) => {
+          row.redLine = v[`r${index}-redLine`]
+          row.normal = v[`r${index}-normal`]
+          row.peak = v[`r${index}-peak`]
+        })
+      }
+      renderModeList()
+      renderEditor()
+      markDirty('strategy')
+      toast(`已更新「${mode.name}」`)
+    },
+  })
+}
+
+/* ---------------- 设置：销量加权 ---------------- */
+const WEIGHT_ROWS = [
+  ['近 1 个月', 'm1'],
+  ['近 3 个月月均', 'm3'],
+  ['近 12 个月月均', 'm12'],
+]
+
+function weightTotal() {
+  return WEIGHT_ROWS.reduce((sum, [, key]) => sum + state.weights[key], 0)
+}
+
+function renderWeights() {
+  $('#weightBody').innerHTML = WEIGHT_ROWS.map(
+    ([label, key]) => `<tr><td>${label}</td><td class="is-num">${state.weights[key]}%</td></tr>`,
+  ).join('')
+
+  const total = weightTotal()
+  $('#weightFoot').innerHTML = `<tr class="tfoot"><td>合计</td><td class="is-num ${
+    total === 100 ? '' : 'is-bad'
+  }">${total}%</td></tr>`
+  $('#weightHint').textContent = total === 100 ? '' : `合计需为 100%，当前 ${total}%`
+  $('#railWeightMeta').textContent = WEIGHT_ROWS.map(([, key]) => state.weights[key]).join(' / ')
+}
+
+function editWeightsDialog() {
+  openForm({
+    title: '编辑销量加权',
+    note: '三个权重相加必须等于 100%，加权结果决定备货系数的基数。',
+    values: { ...state.weights },
+    reset: () => ({ m1: 50, m3: 30, m12: 20 }),
+    render: (v) => `
+      ${formRow('近 1 个月', numField('m1', v.m1, '%', { min: 0, max: 100, step: 5 }))}
+      ${formRow('近 3 个月月均', numField('m3', v.m3, '%', { min: 0, max: 100, step: 5 }))}
+      ${formRow('近 12 个月月均', numField('m12', v.m12, '%', { min: 0, max: 100, step: 5 }))}
+      <div class="form__sum">合计 <b id="formSum">${(v.m1 || 0) + (v.m3 || 0) + (v.m12 || 0)}</b>%</div>`,
+    onInput: (v) => {
+      const sum = (v.m1 || 0) + (v.m3 || 0) + (v.m12 || 0)
+      const el = $('#formSum')
+      if (el) {
+        el.textContent = String(sum)
+        el.classList.toggle('is-bad', sum !== 100)
+      }
+    },
+    validate: (v) => {
+      if ([v.m1, v.m3, v.m12].some((value) => value === null)) return '三个权重都要填写'
+      const sum = v.m1 + v.m3 + v.m12
+      return sum === 100 ? null : `合计 ${sum}%，需调整到 100%`
+    },
+    onSubmit: (v) => {
+      pushHistory()
+      state.weights = { m1: v.m1, m3: v.m3, m12: v.m12 }
+      renderWeights()
+      markDirty('weights')
+      toast('销量加权已更新')
+    },
+  })
+}
+
+/* ---------------- 设置：健康度评分 ---------------- */
+// 区间文案统一成数学式：≤ x / a ~ b / ≥ x，和 SPU 分级的「≥ x」同一套写法。
+// 百分号贴数字，其他单位只写在末尾，避免「11 个 ~ 20 个」这种重复
+function rangeText(range, unit = '') {
+  const tight = (value) => `${value}${unit === '%' ? '%' : ''}`
+  const suffix = (value) => `${tight(value)}${unit && unit !== '%' ? ` ${unit}` : ''}`
+  if (range.from === null && range.to === null) return '不限'
+  if (range.from === null) return `≤ ${suffix(range.to)}`
+  if (range.to === null) return `≥ ${suffix(range.from)}`
+  if (range.from === range.to) return `= ${suffix(range.from)}`
+  return `${tight(range.from)} ~ ${suffix(range.to)}`
+}
+
+function scoringWeightTotal() {
+  return SCORING_ROWS.reduce((sum, row) => sum + row.weight, 0)
+}
+
+function renderScoring() {
+  $('#scoringBody').innerHTML = SCORING_ROWS.map(
+    (row) => `
+    <tr>
+      <td>${row.label}</td>
+      <td class="is-num">${row.weight}%</td>
+      <td>${rangeText(row.low, row.unit)}</td>
+      <td>${rangeText(row.mid, row.unit)}</td>
+      <td>${rangeText(row.high, row.unit)}</td>
+    </tr>`,
+  ).join('')
+
+  $('#scoringHint').textContent = `三档得分 ${SCORING_SCORES.low} / ${SCORING_SCORES.mid} / ${
+    SCORING_SCORES.high
+  } · 综合分档 ≤ ${SCORING_TOTAL.midFrom} 红 · ${SCORING_TOTAL.midFrom} ~ ${SCORING_TOTAL.midTo} 黄 · ≥ ${
+    SCORING_TOTAL.midTo
+  } 绿`
+  $('#railScoringMeta').textContent = `${SCORING_ROWS.length} 个维度`
+}
+
+const TIERS = [
+  ['low', '低'],
+  ['mid', '中'],
+  ['high', '高'],
+]
+
+const TIER_LABEL = { low: '低', mid: '中', high: '高' }
+
+// 「分档刻度条」：一条轴上只填分界值，相邻两档共用同一个数，不再逐档填 from / to
+function bandOrder(row) {
+  return TIERS.map(([tier]) => tier).sort(
+    (a, b) => (row[a].from ?? Number.NEGATIVE_INFINITY) - (row[b].from ?? Number.NEGATIVE_INFINITY),
+  )
+}
+
+function bandBar(key, segs) {
+  const [first, second, third] = segs
+  // 分界值取左段的上界：存量区间本来就写成 0~10 / 11~20，取 10 比取 11 更贴近原值
+  const b1 = first.to ?? second.from
+  const b2 = second.to ?? third.from
+  const empty = b1 === b2
+  const seg = (item) =>
+    `<span class="bandbar__seg bandbar__seg--${item.tone}${
+      empty && item === second ? ' is-empty' : ''
+    }"${empty && item === second ? ' title="该档区间为空，不会命中"' : ''}>${item.label}</span>`
+  const cut = (suffix, value, label) =>
+    `<input class="bandbar__cut" type="number" inputmode="decimal" step="1" data-key="${key}-${suffix}"
+      value="${value ?? ''}" placeholder="不限" aria-label="${label}" />`
+
+  return `<div class="bandbar">
+    ${seg(first)}
+    ${cut('b1', b1, '第 1 个分界值')}
+    ${seg(second)}
+    ${cut('b2', b2, '第 2 个分界值')}
+    ${seg(third)}
+  </div>`
+}
+
+function rowSegs(row) {
+  return bandOrder(row).map((tier) => ({
+    label: TIER_LABEL[tier],
+    tone: tier,
+    from: row[tier].from,
+    to: row[tier].to,
+  }))
+}
+
+function editScoringDialog() {
+  openForm({
+    title: '编辑健康度评分',
+    wide: true,
+    note: '三档按数值从小到大排成一条轴，只填两个分界值，左右两档共用；权重合计需为 100%。',
+    values: JSON.parse(
+      JSON.stringify({ chains: SCORING_ROWS, scores: SCORING_SCORES, total: SCORING_TOTAL }),
+    ),
+    reset: () => ({
+      chains: [
+        { key: 'cr5', label: '客户数 CR5', unit: '%', weight: 15, low: { from: 0, to: 40 }, mid: { from: 40, to: 60 }, high: { from: 60, to: null } },
+        { key: 'customers', label: '累计客户数', unit: '个', weight: 10, low: { from: 21, to: null }, mid: { from: 11, to: 20 }, high: { from: 0, to: 10 } },
+        { key: 'mom', label: '销售环比率', unit: '%', weight: 20, low: { from: 10, to: null }, mid: { from: -10, to: 10 }, high: { from: null, to: -10 } },
+        { key: 'inout', label: '本次进销比', unit: '%', weight: 30, low: { from: 0, to: 20 }, mid: { from: 20, to: 30 }, high: { from: 30, to: null } },
+        { key: 'consumption', label: '预估月消耗', unit: '条', weight: 25, low: { from: null, to: 0 }, mid: { from: 0, to: 0 }, high: { from: 0, to: null } },
+      ],
+      scores: { low: 80, mid: 60, high: 40 },
+      total: { midFrom: 50, midTo: 70 },
+    }),
+    render: (v) => `
+      <div class="rule-head">
+        <span>维度</span>
+        <span>风险分档</span>
+        <span class="is-right">权重</span>
+      </div>
+      <div class="rule-body">
+        ${v.chains
+          .map(
+            (row) => `
+          <div class="rule-row">
+            <span class="rule-row__name">${row.label}${row.unit ? `<em>${row.unit}</em>` : ''}</span>
+            ${bandBar(row.key, rowSegs(row))}
+            ${numField(`w-${row.key}`, row.weight, '%', { min: 0, max: 100, step: 5 })}
+          </div>`,
+          )
+          .join('')}
+      </div>
+      <div class="rule-foot">
+        <span>分界值同时属于相邻两档，按中风险优先</span>
+        <span>权重合计 <b id="formSum">${scoringWeightTotal()}</b>%</span>
+      </div>
+      <div class="rule-head rule-head--sub">
+        <span>总分规则</span>
+        <span></span>
+        <span></span>
+      </div>
+      <div class="rule-body">
+        <div class="rule-row">
+          <span class="rule-row__name">三档得分</span>
+          <div class="form__inline">
+            ${TIERS.map(
+              ([tier, label]) =>
+                `<label class="form__inline-item">${label}${numField(`score-${tier}`, v.scores[tier], '', {
+                  min: 0,
+                  max: 100,
+                  step: 5,
+                })}</label>`,
+            ).join('')}
+          </div>
+          <span></span>
+        </div>
+        <div class="rule-row">
+          <span class="rule-row__name">综合分档<em>分</em></span>
+          ${bandBar('total', [
+            { label: '红', tone: 'high', from: 0, to: v.total.midFrom },
+            { label: '黄', tone: 'mid', from: v.total.midFrom, to: v.total.midTo },
+            { label: '绿', tone: 'low', from: v.total.midTo, to: null },
+          ])}
+          <span></span>
+        </div>
+      </div>`,
+    onInput: (v) => {
+      const sum = v.chains.reduce((total, row) => total + (v[`w-${row.key}`] || 0), 0)
+      const el = $('#formSum')
+      if (el) {
+        el.textContent = String(sum)
+        el.classList.toggle('is-bad', sum !== 100)
+      }
+    },
+    validate: (v) => {
+      const sum = v.chains.reduce((total, row) => total + (v[`w-${row.key}`] || 0), 0)
+      if (sum !== 100) return `权重合计 ${sum}%，需调整到 100%`
+      for (const row of v.chains) {
+        const b1 = v[`${row.key}-b1`]
+        const b2 = v[`${row.key}-b2`]
+        if (b1 === null || b2 === null) return `${row.label} 的两个分界值都要填写`
+        if (b1 > b2) return `${row.label} 的分界值要按从左到右递增`
+      }
+      const from = v['total-b1']
+      const to = v['total-b2']
+      if (from === null || to === null) return '综合分档的两个分界值都要填写'
+      if (from > to) return '综合分档的分界值要按从左到右递增'
+      return null
+    },
+    onSubmit: (v) => {
+      pushHistory()
+      SCORING_ROWS.forEach((row) => {
+        const order = bandOrder(row)
+        const b1 = v[`${row.key}-b1`]
+        const b2 = v[`${row.key}-b2`]
+        row.weight = v[`w-${row.key}`]
+        row[order[0]] = { from: null, to: b1 }
+        row[order[1]] = { from: b1, to: b2 }
+        row[order[2]] = { from: b2, to: null }
+      })
+      TIERS.forEach(([tier]) => {
+        SCORING_SCORES[tier] = v[`score-${tier}`]
+      })
+      SCORING_TOTAL = { midFrom: v['total-b1'], midTo: v['total-b2'] }
+      renderScoring()
+      markDirty('scoring')
+      toast('评分规则已更新')
+    },
+  })
+}
+
+/* ---------------- 设置：SPU 分级 ---------------- */
+function gradeText(grade, index) {
+  if (grade.min === null) {
+    const prev = SPU_GRADES[index - 1]
+    return `< ${prev ? prev.min : 0}`
+  }
+  return `≥ ${grade.min}`
+}
+
+function renderGrades() {
+  $('#gradeBody').innerHTML = SPU_GRADES.map(
+    (grade, index) => `
+    <tr>
+      <td><span class="grade grade--${grade.tone}">${grade.label}</span></td>
+      <td>${gradeText(grade, index)}</td>
+      <td class="is-num">${grade.count} 个</td>
+    </tr>`,
+  ).join('')
+  $('#railSpuMeta').textContent = `${SPU_GRADES.length} 档`
+}
+
+function editSpuDialog() {
+  openForm({
+    title: '编辑 SPU 分级',
+    mid: true,
+    note: '从高到低判定，命中第一条「月均 ≥ 下限」的等级；末档兜底。',
+    values: { tiers: JSON.parse(JSON.stringify(SPU_GRADES)) },
+    reset: () => ({
+      tiers: [
+        { key: 'splus', label: 'S+', tone: 'splus', min: 2500, count: 1 },
+        { key: 's', label: 'S', tone: 's', min: 300, count: 2 },
+        { key: 'a', label: 'A', tone: 'a', min: 100, count: 0 },
+        { key: 'b', label: 'B', tone: 'b', min: 30, count: 1 },
+        { key: 'c', label: 'C', tone: 'c', min: 1, count: 1 },
+        { key: 'z', label: 'Z', tone: 'z', min: null, count: 0 },
+      ],
+    }),
+    render: (v) => `
+      <div class="tierrow tierrow--head">
+        <span>等级</span>
+        <span>月均条数 <em>≥</em></span>
+        <span class="is-right">当前命中</span>
+      </div>
+      <div class="tierbody">
+        ${v.tiers
+          .map(
+            (tier, index) => `
+          <div class="tierrow">
+            <input class="input tierrow__label" data-key="label-${index}" value="${esc(tier.label)}"
+              maxlength="4" aria-label="第 ${index + 1} 档名称" />
+            ${
+              index < v.tiers.length - 1
+                ? `<label class="tierrow__value">${numField(`min-${index}`, tier.min, '条')}</label>`
+                : `<span class="tierrow__fallback">低于上一档，全部收下</span>`
+            }
+            <span class="tierrow__hit">${tier.count} 个</span>
+          </div>`,
+          )
+          .join('')}
+      </div>
+      <p class="form__group-hint">下限需逐档递减，末档不填。</p>`,
+    validate: (v) => {
+      for (let i = 0; i < v.tiers.length - 1; i += 1) {
+        if (!v[`label-${i}`].trim()) return `第 ${i + 1} 档名称不能为空`
+        const min = v[`min-${i}`]
+        if (min === null || min < 0) return `${v[`label-${i}`]} 的月均下限需填写不小于 0 的数值`
+        if (i > 0 && !(min < v[`min-${i - 1}`])) return `第 ${i + 1} 档下限需小于上一档`
+      }
+      return null
+    },
+    onSubmit: (v) => {
+      pushHistory()
+      SPU_GRADES.forEach((grade, index) => {
+        grade.label = v[`label-${index}`].trim()
+        if (index < SPU_GRADES.length - 1) grade.min = v[`min-${index}`]
+      })
+      renderGrades()
+      markDirty('spu')
+      toast('SPU 分级已更新')
+    },
+  })
+}
+
+/* ---------------- 设置：手动策略 ---------------- */
+state.manualSelected = new Set()
+
+function renderManualModes() {
+  $('#manualModeBody').innerHTML = MANUAL_MODES.map(
+    (item) => `
+    <tr>
+      <td>${esc(item.name)}</td>
+      <td>${item.participates ? '<span class="tag">自定系数</span>' : '<span class="tag tag--muted">滞销</span>'}</td>
+      <td class="meta">${esc(item.desc)}</td>
+      <td class="is-num">${item.participates ? item.redLine.toFixed(1) : '—'}</td>
+      <td class="is-num">${item.participates ? item.normal.toFixed(1) : '—'}</td>
+      <td class="is-num">${item.participates ? item.peak.toFixed(1) : '—'}</td>
+      <td class="is-num">${rowActs('manual-mode', item.id, item.builtin)}</td>
+    </tr>`,
+  ).join('')
+  $('#manualModeMeta').textContent = `${MANUAL_MODES.length} 个模式`
+}
+
+function renderManualSkus() {
+  $('#manualSkuBody').innerHTML = MANUAL_SKUS.map((item) => {
+    const mode = MANUAL_MODES.find((entry) => entry.id === item.modeId)
+    const checked = state.manualSelected.has(item.id)
+    return `
+    <tr class="${checked ? 'is-selected' : ''}">
+      <td><span class="cbx"><input type="checkbox" data-manual-check="${item.id}" ${
+        checked ? 'checked' : ''
+      } /><span></span></span></td>
+      <td class="meta">${esc(item.id)}</td>
+      <td>${esc(item.product)} / ${esc(item.color)}</td>
+      <td>${mode ? esc(mode.name) : '—'}</td>
+      <td class="is-num">${
+        mode?.participates ? `${item.redLine.toFixed(1)} / ${item.normal.toFixed(1)} / ${item.peak.toFixed(1)}` : '—'
+      }</td>
+      <td class="is-num">${rowActs('manual-sku', item.id)}</td>
+    </tr>`
+  }).join('')
+
+  const count = state.manualSelected.size
+  $('#manualSkuMeta').textContent = `${MANUAL_SKUS.length} 个 SKU`
+  $('#manualSkuHint').textContent = count ? `已选 ${count} 个` : '未手动指定的 SKU 按自动策略判定'
+  $('#manualBulkBtn').hidden = count === 0
+  const all = $('#manualAll')
+  if (all) {
+    all.checked = count > 0 && count === MANUAL_SKUS.length
+    all.indeterminate = count > 0 && count < MANUAL_SKUS.length
+  }
+}
+
+function editManualModeDialog(item) {
+  const isNew = !item
+  const data = item || { id: `mm-${Date.now()}`, name: '', behavior: '自定系数', desc: '', participates: true, redLine: 20, normal: 40, peak: 60 }
+
+  openForm({
+    title: isNew ? '新增手动模式' : `编辑手动模式 · ${data.name}`,
+    values: { ...data },
+    render: (v) => `
+      ${formRow('名称', textField('name', v.name, { placeholder: '如 自定模式' }))}
+      ${formRow('说明', textField('desc', v.desc, { placeholder: '这条模式怎么用' }))}
+      ${formRow('参与计算', switchField('participates', v.participates), '关闭后不计预警、不进紧急补货')}
+      ${
+        v.participates
+          ? `<div class="form__group">
+              <div class="form__group-head">备货系数<span class="form__group-unit">单位：条</span></div>
+              <div class="form__inline">
+                <label class="form__inline-item">红线${numField('redLine', v.redLine, '', { step: 0.1, min: 0 })}</label>
+                <label class="form__inline-item">正常${numField('normal', v.normal, '', { step: 0.1, min: 0 })}</label>
+                <label class="form__inline-item">峰值${numField('peak', v.peak, '', { step: 0.1, min: 0 })}</label>
+              </div>
+            </div>`
+          : ''
+      }`,
+    validate: (v) => {
+      if (!v.name.trim()) return '名称不能为空'
+      if (MANUAL_MODES.some((entry) => entry.id !== data.id && entry.name === v.name.trim())) return '名称重复'
+      if (!v.participates) return null
+      if ([v.redLine, v.normal, v.peak].some((value) => value === null)) return '三个系数都要填写'
+      return v.redLine < v.normal && v.normal < v.peak ? null : '需满足 红线 < 正常 < 峰值'
+    },
+    onSubmit: (v) => {
+      pushPurchase()
+      const target = MANUAL_MODES.find((entry) => entry.id === data.id)
+      const next = {
+        ...(target || data),
+        name: v.name.trim(),
+        desc: v.desc.trim(),
+        participates: v.participates,
+        behavior: v.participates ? '自定系数' : '滞销',
+        redLine: v.redLine ?? data.redLine,
+        normal: v.normal ?? data.normal,
+        peak: v.peak ?? data.peak,
+      }
+      if (target) Object.assign(target, next)
+      else MANUAL_MODES.push(next)
+      renderManualModes()
+      renderManualSkus()
+      markPurchaseDirty('strategy')
+      toast(isNew ? `已新增「${next.name}」` : `已更新「${next.name}」`)
+    },
+  })
+}
+
+function editManualSkuDialog(item) {
+  const isNew = !item
+  const skuOptions = INVENTORY.flatMap((group) =>
+    group.children.map((child) => ({
+      value: `${group.product}|${child.color}`,
+      label: `${group.product} / ${child.color}`,
+    })),
+  )
+  const data = item || {
+    id: 'sample',
+    product: INVENTORY[0].product,
+    color: INVENTORY[0].children[0].color,
+    modeId: MANUAL_MODES[0].id,
+    redLine: 20,
+    normal: 40,
+    peak: 60,
+  }
+  const skuValue = `${data.product}|${data.color}`
+
+  openForm({
+    title: isNew ? '新增手动 SKU' : '编辑手动 SKU',
+    values: { ...data, sku: skuValue },
+    render: (v) => {
+      const mode = MANUAL_MODES.find((entry) => entry.id === v.modeId)
+      return `
+        ${formRow('SKU', isNew ? selectField('sku', v.sku, skuOptions) : `<span class="form__static">${esc(data.product)} / ${esc(data.color)}</span>`)}
+        ${formRow(
+          '模式',
+          selectField(
+            'modeId',
+            v.modeId,
+            MANUAL_MODES.map((entry) => ({ value: entry.id, label: entry.name })),
+          ),
+        )}
+        ${
+          mode?.participates
+            ? `<div class="form__group">
+                <div class="form__group-head">备货系数<span class="form__group-unit">单位：条</span></div>
+                <div class="form__inline">
+                  <label class="form__inline-item">红线${numField('redLine', v.redLine, '', { step: 0.1, min: 0 })}</label>
+                  <label class="form__inline-item">正常${numField('normal', v.normal, '', { step: 0.1, min: 0 })}</label>
+                  <label class="form__inline-item">峰值${numField('peak', v.peak, '', { step: 0.1, min: 0 })}</label>
+                </div>
+              </div>`
+            : `<p class="form__empty">该模式不参与备货计算，无需填系数</p>`
+        }`
+    },
+    validate: (v) => {
+      const mode = MANUAL_MODES.find((entry) => entry.id === v.modeId)
+      if (!mode) return '请选择模式'
+      if (!mode.participates) return null
+      if ([v.redLine, v.normal, v.peak].some((value) => value === null)) return '三个系数都要填写'
+      return v.redLine < v.normal && v.normal < v.peak ? null : '需满足 红线 < 正常 < 峰值'
+    },
+    onSubmit: (v) => {
+      pushPurchase()
+      const [product, color] = String(v.sku || skuValue).split('|')
+      const mode = MANUAL_MODES.find((entry) => entry.id === v.modeId)
+      const target = MANUAL_SKUS.find((entry) => entry.id === data.id)
+      const next = {
+        id: `${product}-${color}`,
+        product,
+        color,
+        modeId: v.modeId,
+        redLine: mode.participates ? v.redLine : undefined,
+        normal: mode.participates ? v.normal : undefined,
+        peak: mode.participates ? v.peak : undefined,
+      }
+      if (target) Object.assign(target, next)
+      else MANUAL_SKUS.push(next)
+      state.manualSelected.delete(data.id)
+      renderManualSkus()
+      markPurchaseDirty('strategy')
+      toast(isNew ? `已新增 ${product} / ${color}` : '已更新手动策略')
+    },
+  })
+}
+
+/* ---------------- 设置：下单主数据 ---------------- */
+function rowActs(kind, id, lockDelete = false) {
+  return `<span class="row-acts">
+    <button class="icon-btn" data-edit-row="${kind}:${id}" title="编辑">
+      <svg viewBox="0 0 16 16" fill="none">
+        <path d="M11.1 2.6 13.4 4.9 5.9 12.4l-3 .7.7-3 7.5-7.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+      </svg>
+    </button>
+    <button class="icon-btn" data-del-row="${kind}:${id}" title="${lockDelete ? '内置模式不可删除' : '删除'}" ${
+      lockDelete ? 'disabled' : ''
+    }>
+      <svg viewBox="0 0 16 16" fill="none">
+        <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </button>
+  </span>`
+}
+
+function renderFactories() {
+  $('#factoryBody').innerHTML = FACTORIES.map(
+    (item) => `
+    <tr>
+      <td>${esc(item.name)}</td>
+      <td>${item.enabled ? '<span class="tag">启用</span>' : '<span class="tag tag--muted">停用</span>'}</td>
+      <td class="is-num">${rowActs('factory', item.id)}</td>
+    </tr>`,
+  ).join('')
+
+  const on = FACTORIES.filter((item) => item.enabled).length
+  $('#factoryHint').textContent = `共 ${FACTORIES.length} 家 · ${on} 家启用`
+  $('#railFactoryMeta').textContent = `${FACTORIES.length} 家 · ${on} 家启用`
+}
+
+function renderPeople() {
+  $('#peopleBody').innerHTML = PEOPLE.map(
+    (item) => `
+    <tr>
+      <td>${esc(item.category)}</td>
+      <td>
+        <span class="chips">
+          ${item.people.map((name) => `<span class="chip">${esc(name)}</span>`).join('')}
+          ${item.people.length ? '' : '<span class="meta">未分配</span>'}
+        </span>
+      </td>
+      <td class="is-num">${rowActs('people', item.id)}</td>
+    </tr>`,
+  ).join('')
+  $('#peopleHint').textContent = `${PEOPLE.length} 个分类 · 未分配的分类不参与分单`
+  $('#railPeopleMeta').textContent = `${PEOPLE.length} 个分类`
+}
+
+function renderSkuFactories() {
+  const keyword = ($('#skuFactorySearch')?.value || '').trim().toLowerCase()
+  const rows = SKU_FACTORIES.filter((item) =>
+    `${item.id} ${item.product} ${item.color} ${item.category}`.toLowerCase().includes(keyword),
+  )
+
+  $('#skuFactoryBody').innerHTML = rows.length
+    ? rows
+        .map(
+          (item) => `
+      <tr>
+        <td class="meta">${esc(item.id)}</td>
+        <td>${esc(item.product)} / ${esc(item.color)}</td>
+        <td class="meta">${esc(item.category)}</td>
+        <td>
+          <span class="chips">
+            ${item.factories.map((name) => `<span class="chip">${esc(name)}</span>`).join('')}
+          </span>
+        </td>
+        <td class="is-num">${rowActs('sku-factory', item.id)}</td>
+      </tr>`,
+        )
+        .join('')
+    : '<tr><td colspan="5" class="table-empty">没有匹配的 SKU</td></tr>'
+
+  $('#skuFactoryCount').textContent = `${SKU_FACTORIES.length} 个 SKU 有约束`
+  $('#skuFactoryHint').textContent = keyword
+    ? `匹配 ${rows.length} 个`
+    : '未列出的 SKU 默认全部启用染厂可选'
+  $('#railSkuMeta').textContent = `${SKU_FACTORIES.length} 个 SKU 有约束`
+}
+
+function editFactoryDialog(item) {
+  const isNew = !item
+  const data = item || { id: `f-${Date.now()}`, name: '', enabled: true, orders: 0 }
+
+  openForm({
+    title: isNew ? '新增染厂' : '编辑染厂',
+    values: { ...data },
+    render: (v) => `
+      ${formRow('染厂名称', textField('name', v.name, { placeholder: '与合同、对账单一致' }))}
+      ${formRow('启用', switchField('enabled', v.enabled), '停用后不再出现在下单下拉里')}
+      ${!isNew && data.orders ? `<p class="form__empty">已有 ${data.orders} 张分订单使用，停用或改名不影响这些订单的原厂名</p>` : ''}`,
+    validate: (v) => {
+      if (!v.name.trim()) return '染厂名称不能为空'
+      if (FACTORIES.some((entry) => entry.id !== data.id && entry.name === v.name.trim())) return '名称重复'
+      return null
+    },
+    onSubmit: (v) => {
+      pushPurchase()
+      const target = FACTORIES.find((entry) => entry.id === data.id)
+      if (target) Object.assign(target, { name: v.name.trim(), enabled: v.enabled })
+      else FACTORIES.push({ ...data, name: v.name.trim(), enabled: v.enabled })
+      renderFactories()
+      renderSkuFactories()
+      markPurchaseDirty('factories')
+      toast(isNew ? '已新增染厂' : '已更新染厂')
+    },
+  })
+}
+
+function editPeopleDialog(item) {
+  const isNew = !item
+  const data = item || { id: `p-${Date.now()}`, category: '', people: [] }
+
+  openForm({
+    title: isNew ? '新增分类' : '编辑分单人员',
+    values: { ...data, people: [...data.people] },
+    render: (v) => `
+      ${formRow(
+        '树形分类',
+        isNew
+          ? `<input class="input" data-key="category" list="category-options" value="${esc(v.category)}" placeholder="与产品资料一致" />
+             <datalist id="category-options">${['经编网布', '其他', '涤纶网布', '锦纶网布', '交织网布', '瑞士网']
+               .map((name) => `<option value="${name}"></option>`)
+               .join('')}</datalist>`
+          : `<span class="form__static">${esc(data.category)}</span>`,
+      )}
+      ${formRow('分单人员', tagsField('people', v.people, STAFF_POOL, '选择或输入姓名'), '回车添加，末位人员负责兜底')}`,
+    validate: (v) => {
+      if (!isNew) return null
+      if (!String(v.category || '').trim()) return '树形分类不能为空'
+      if (PEOPLE.some((entry) => entry.category === v.category.trim())) return '该分类已存在'
+      return null
+    },
+    onSubmit: (v) => {
+      pushPurchase()
+      const target = PEOPLE.find((entry) => entry.id === data.id)
+      if (target) target.people = v.people
+      else PEOPLE.push({ ...data, category: v.category.trim(), people: v.people })
+      renderPeople()
+      markPurchaseDirty('people')
+      toast(isNew ? '已新增分类' : '已更新分单人员')
+    },
+  })
+}
+
+function editSkuFactoryDialog(item) {
+  const isNew = !item
+  const skuOptions = INVENTORY.flatMap((group) =>
+    group.children.map((child) => ({
+      value: `${group.product}|${child.color}`,
+      label: `${group.product} / ${child.color}`,
+    })),
+  )
+  const data = item || { id: '', product: INVENTORY[0].product, color: INVENTORY[0].children[0].color, category: '', factories: [] }
+  const enabledNames = FACTORIES.filter((entry) => entry.enabled).map((entry) => entry.name)
+
+  openForm({
+    title: isNew ? '新增 SKU 染厂约束' : '编辑可选染厂',
+    note: '留空表示该 SKU 可以用全部启用染厂。',
+    values: { ...data, factories: [...data.factories], sku: `${data.product}|${data.color}` },
+    render: (v) => `
+      ${formRow('SKU', isNew ? selectField('sku', v.sku, skuOptions) : `<span class="form__static">${esc(data.product)} / ${esc(data.color)}</span>`)}
+      ${formRow('可选染厂', tagsField('factories', v.factories, enabledNames, '从启用染厂中选择'))}`,
+    validate: () => null,
+    onSubmit: (v) => {
+      pushPurchase()
+      const [product, color] = String(v.sku || `${data.product}|${data.color}`).split('|')
+      const id = `${product}-${color}`
+      const category = SKU_FACTORIES.find((entry) => entry.id === id)?.category || PEOPLE[0].category
+      const target = SKU_FACTORIES.find((entry) => entry.id === data.id)
+      if (target) {
+        target.factories = v.factories
+      } else {
+        SKU_FACTORIES.push({ id, product, color, category, factories: v.factories })
+      }
+      renderSkuFactories()
+      markPurchaseDirty('sku-factories')
+      toast(isNew ? '已新增约束' : '已更新可选染厂')
+    },
+  })
+}
+
+const RAIL_PANEL = {
+  'manual-mode': 'strategy',
+  'manual-sku': 'strategy',
+  factory: 'factories',
+  people: 'people',
+  'sku-factory': 'sku-factories',
+}
+
+const ROW_EDIT = {
+  'manual-mode': editManualModeDialog,
+  'manual-sku': editManualSkuDialog,
+  factory: editFactoryDialog,
+  people: editPeopleDialog,
+  'sku-factory': editSkuFactoryDialog,
+}
+
+function rowById(kind, id) {
+  if (kind === 'manual-mode') return MANUAL_MODES.find((entry) => entry.id === id)
+  if (kind === 'manual-sku') return MANUAL_SKUS.find((entry) => entry.id === id)
+  if (kind === 'factory') return FACTORIES.find((entry) => entry.id === id)
+  if (kind === 'people') return PEOPLE.find((entry) => entry.id === id)
+  return SKU_FACTORIES.find((entry) => entry.id === id)
+}
+
+function deleteRow(kind, id) {
+  const item = rowById(kind, id)
+  if (!item) return
+  const name = item.name || item.category || `${item.product} / ${item.color}`
+  openConfirm({
+    title: '确认删除',
+    note:
+      kind === 'factory' && item.orders
+        ? `删除「${name}」后，已有 ${item.orders} 张分订单仍保留原厂名，新订单不再出现该染厂。`
+        : `删除「${name}」后不可恢复。`,
+    onOk: () => {
+      pushPurchase()
+      if (kind === 'manual-mode') MANUAL_MODES = MANUAL_MODES.filter((entry) => entry.id !== id)
+      if (kind === 'manual-sku') MANUAL_SKUS = MANUAL_SKUS.filter((entry) => entry.id !== id)
+      if (kind === 'factory') FACTORIES = FACTORIES.filter((entry) => entry.id !== id)
+      if (kind === 'people') PEOPLE = PEOPLE.filter((entry) => entry.id !== id)
+      if (kind === 'sku-factory') SKU_FACTORIES = SKU_FACTORIES.filter((entry) => entry.id !== id)
+      renderManualModes()
+      renderManualSkus()
+      renderFactories()
+      renderPeople()
+      renderSkuFactories()
+      markPurchaseDirty(RAIL_PANEL[kind])
+      toast('已删除')
+    },
+  })
+}
+
+/* ---------------- 设置：事件 ---------------- */
+function renderConfig() {
+  renderModeList()
+  renderEditor()
+  renderWeights()
+  renderScoring()
+  renderGrades()
+  renderManualModes()
+  renderManualSkus()
+  renderFactories()
+  renderPeople()
+  renderSkuFactories()
+}
+
+document.addEventListener('click', (event) => {
+  const edit = event.target.closest('[data-edit]')
+  if (edit) {
+    const map = { mode: editModeDialog, weights: editWeightsDialog, scoring: editScoringDialog, spu: editSpuDialog }
+    map[edit.dataset.edit]?.()
+    return
+  }
+
+  const add = event.target.closest('[data-add]')
+  if (add) {
+    const map = {
+      'manual-mode': () => editManualModeDialog(null),
+      'manual-sku': () => editManualSkuDialog(null),
+      factory: () => editFactoryDialog(null),
+      people: () => editPeopleDialog(null),
+      'sku-factory': () => editSkuFactoryDialog(null),
+    }
+    map[add.dataset.add]?.()
+    return
+  }
+
+  const rowEdit = event.target.closest('[data-edit-row]')
+  if (rowEdit) {
+    const [kind, id] = rowEdit.dataset.editRow.split(':')
+    ROW_EDIT[kind]?.(rowById(kind, id))
+    return
+  }
+
+  const rowDel = event.target.closest('[data-del-row]')
+  if (rowDel) {
+    const [kind, id] = rowDel.dataset.delRow.split(':')
+    deleteRow(kind, id)
+  }
+})
 
 $('#modeList').addEventListener('click', (event) => {
   const item = event.target.closest('[data-mode]')
@@ -1137,125 +2428,99 @@ $('#modeList').addEventListener('click', (event) => {
   renderEditor()
 })
 
-$('#modeEditor').addEventListener('input', (event) => {
-  const mode = MODES.find((item) => item.key === state.activeMode)
-  if (!mode) return
-  pushHistory()
-  if (event.target.matches('[data-mode-name]')) mode.name = event.target.value
-  if (event.target.matches('[data-mode-min]')) mode.min = Number(event.target.value) || 0
-  const coef = event.target.closest('[data-coef]')
-  if (coef) {
-    const [color, field] = coef.dataset.coef.split('-')
-    const row = mode.rows.find((item) => item.color === color)
-    if (row) row[field] = Number(coef.value) || 0
-  }
-  markDirty()
-  renderModeList()
-})
-
-$('#modeEditor').addEventListener('change', (event) => {
-  if (event.target.matches('.coef-input') || event.target.matches('[data-mode-min]')) renderEditor()
-})
-
 $$('[data-strategy]').forEach((btn) => {
   btn.addEventListener('click', () => {
-    $$('[data-strategy]').forEach((el) => el.classList.toggle('is-active', el === btn))
+    $$('[data-strategy]').forEach((el) => {
+      const active = el === btn
+      el.classList.toggle('is-active', active)
+      el.setAttribute('aria-selected', String(active))
+    })
     const manual = btn.dataset.strategy === 'manual'
     $('#autoStrategy').hidden = manual
     $('#manualStrategy').hidden = !manual
   })
 })
 
-/* ---------------- 配置：销量加权 ---------------- */
-const WEIGHT_KEYS = ['m1', 'm3', 'm12']
+$('#manualSkuBody').addEventListener('change', (event) => {
+  const box = event.target.closest('[data-manual-check]')
+  if (!box) return
+  if (box.checked) state.manualSelected.add(box.dataset.manualCheck)
+  else state.manualSelected.delete(box.dataset.manualCheck)
+  renderManualSkus()
+})
 
-function syncWeights() {
-  WEIGHT_KEYS.forEach((key) => {
-    $(`[data-weight="${key}"]`).value = String(state.weights[key])
-  })
+$('#manualAll').addEventListener('change', (event) => {
+  state.manualSelected = event.target.checked ? new Set(MANUAL_SKUS.map((item) => item.id)) : new Set()
+  renderManualSkus()
+})
 
-  const total = WEIGHT_KEYS.reduce((sum, key) => sum + state.weights[key], 0)
-  const totalEl = $('#weightTotal')
-  totalEl.textContent = `合计 ${total}%`
-  totalEl.className = total === 100 ? 'weight-total' : 'weight-total weight-total--warn'
-}
-
-$$('[data-weight]').forEach((input) => {
-  input.addEventListener('input', () => {
-    pushHistory()
-    state.weights[input.dataset.weight] = Math.max(0, Math.min(100, Number(input.value) || 0))
-    syncWeights()
-    markDirty()
+$('#manualBulkBtn').addEventListener('click', () => {
+  openConfirm({
+    title: '恢复自动判定',
+    note: `将 ${state.manualSelected.size} 个 SKU 从手动清单移除，改由自动策略判定。`,
+    okText: '恢复',
+    onOk: () => {
+      pushPurchase()
+      MANUAL_SKUS = MANUAL_SKUS.filter((item) => !state.manualSelected.has(item.id))
+      state.manualSelected = new Set()
+      renderManualSkus()
+      markPurchaseDirty('strategy')
+      toast('已恢复自动判定')
+    },
   })
 })
 
-$('[data-reset-weights]').addEventListener('click', () => {
-  pushHistory()
-  state.weights = { m1: 50, m3: 30, m12: 20 }
-  syncWeights()
-  markDirty()
-})
+$('#skuFactorySearch').addEventListener('input', renderSkuFactories)
 
-/* ---------------- 配置：评分 / SPU ---------------- */
-function renderScoring() {
-  $('#scoringBody').innerHTML = SCORING_ROWS.map(
-    (row) => `
-    <tr>
-      <td class="score-table__dim">${row.label}</td>
-      <td class="is-num">${row.weight}%</td>
-      <td class="risk--low">${row.low}</td>
-      <td class="risk--mid">${row.mid}</td>
-      <td class="risk--high">${row.high}</td>
-    </tr>`,
-  ).join('')
+/* ---------------- 设置：草稿、校验、保存 ---------------- */
+function configSnapshot() {
+  return JSON.stringify({
+    weights: state.weights,
+    modes: MODES,
+    scoring: SCORING_ROWS,
+    scores: SCORING_SCORES,
+    total: SCORING_TOTAL,
+    grades: SPU_GRADES,
+    manualModes: MANUAL_MODES,
+    manualSkus: MANUAL_SKUS,
+  })
 }
 
-function renderGrades() {
-  $('#gradeBody').innerHTML = SPU_GRADES.map(
-    (grade) => `
-    <tr>
-      <td><span class="grade grade--${grade.tone}">${grade.label}</span></td>
-      <td>${grade.threshold}</td>
-      <td class="is-num">${grade.count} 个</td>
-    </tr>`,
-  ).join('')
-}
-
-/* ---------------- 配置：草稿状态 ---------------- */
-function snapshot() {
-  return JSON.stringify({ weights: state.weights, modes: MODES })
+function applyConfig(json) {
+  const data = JSON.parse(json)
+  state.weights = data.weights
+  MODES.length = 0
+  MODES.push(...data.modes)
+  SCORING_ROWS = data.scoring
+  SCORING_SCORES = data.scores
+  SCORING_TOTAL = data.total
+  SPU_GRADES = data.grades
+  MANUAL_MODES = data.manualModes
+  MANUAL_SKUS = data.manualSkus
+  state.activeMode = MODES.some((mode) => mode.key === state.activeMode) ? state.activeMode : MODES[0].key
+  state.manualSelected = new Set()
+  renderConfig()
 }
 
 function pushHistory() {
-  state.history.push(snapshot())
+  state.history.push(configSnapshot())
   if (state.history.length > 50) state.history.shift()
   state.redo = []
   syncHistoryButtons()
 }
 
-function restore(json) {
-  const data = JSON.parse(json)
-  state.weights = data.weights
-  MODES.length = 0
-  MODES.push(...data.modes)
-  state.activeMode = MODES.some((mode) => mode.key === state.activeMode) ? state.activeMode : MODES[0].key
-  renderModeList()
-  renderEditor()
-  syncWeights()
-}
-
 function undo() {
   if (!state.history.length) return
-  state.redo.push(snapshot())
-  restore(state.history.pop())
+  state.redo.push(configSnapshot())
+  applyConfig(state.history.pop())
   syncHistoryButtons()
   markDirty()
 }
 
 function redo() {
   if (!state.redo.length) return
-  state.history.push(snapshot())
-  restore(state.redo.pop())
+  state.history.push(configSnapshot())
+  applyConfig(state.redo.pop())
   syncHistoryButtons()
   markDirty()
 }
@@ -1265,32 +2530,143 @@ function syncHistoryButtons() {
   $('#redoBtn').disabled = state.redo.length === 0
 }
 
-function markDirty() {
-  $('#saveState').textContent = '未保存'
-  $('#saveState').classList.add('state--dirty')
-  $('#saveBtn').disabled = false
+// 保存前先跑一遍规则自检：不通过时禁用保存，并把原因挂在状态标签上
+function configIssues() {
+  const issues = []
+  const total = weightTotal()
+  if (total !== 100) issues.push(`销量加权合计 ${total}%，需为 100%`)
+
+  const weightSum = scoringWeightTotal()
+  if (weightSum !== 100) issues.push(`评分权重合计 ${weightSum}%，需为 100%`)
+
+  SCORING_ROWS.forEach((row) => {
+    TIERS.forEach(([tier, label]) => {
+      const range = row[tier]
+      if (range.from !== null && range.to !== null && range.from > range.to) {
+        issues.push(`${row.label} 的${label}风险区间下限大于上限`)
+      }
+    })
+  })
+
+  MODES.filter((mode) => mode.participates).forEach((mode) => {
+    mode.rows.forEach((row) => {
+      if (!(row.redLine < row.normal && row.normal < row.peak)) {
+        issues.push(`${mode.name} · ${row.color} 系数需满足 红线 < 正常 < 峰值`)
+      }
+    })
+  })
+
+  return issues
+}
+
+function refreshConfigState() {
+  const issues = configIssues()
+  const save = $('#saveBtn')
+  const label = $('#saveState')
+  save.disabled = !state.dirty || issues.length > 0
+  save.title = issues.length ? issues.join('；') : ''
+  label.classList.toggle('state--dirty', state.dirty)
+  label.classList.toggle('state--error', issues.length > 0)
+  label.textContent = issues.length ? `待修正 ${issues.length} 项` : state.dirty ? '未保存' : '已保存'
+  label.title = issues.length ? issues.join('\n') : ''
+}
+
+const STOCKING_PANELS = ['strategy', 'weights', 'scoring', 'spu']
+const PURCHASE_PANELS = ['factories', 'people', 'sku-factories']
+
+function syncDirtyMarkers() {
+  $$('.rail__item').forEach((item) => {
+    item.classList.toggle('is-dirty', state.dirtyPanels.has(item.dataset.panel))
+  })
+}
+
+function markDirty(section) {
+  state.dirty = true
+  if (section) state.dirtyPanels.add(section)
+  syncDirtyMarkers()
   $('#discardBtn').disabled = false
+  refreshConfigState()
 }
 
 function markClean() {
+  state.dirty = false
   state.history = []
   state.redo = []
+  STOCKING_PANELS.forEach((panel) => state.dirtyPanels.delete(panel))
+  syncDirtyMarkers()
   syncHistoryButtons()
-  $('#saveState').textContent = '已保存'
-  $('#saveState').classList.remove('state--dirty')
-  $('#saveBtn').disabled = true
-  $('#discardBtn').disabled = true
+  refreshConfigState()
+}
+
+/* 下单配置：单套设置，独立于备货方案，有自己的放弃 / 确定 */
+let purchaseBackup = null
+
+function pushPurchase() {
+  if (purchaseBackup) return
+  purchaseBackup = JSON.stringify({
+    factories: FACTORIES,
+    people: PEOPLE,
+    skus: SKU_FACTORIES,
+    manualModes: MANUAL_MODES,
+    manualSkus: MANUAL_SKUS,
+  })
+}
+
+function markPurchaseDirty(section) {
+  if (section) state.dirtyPanels.add(section)
+  syncDirtyMarkers()
+  $('#purchaseState').textContent = '未保存'
+  $('#purchaseState').classList.add('state--dirty')
+  $('#purchaseOk').disabled = false
+  $('#purchaseDiscard').disabled = false
+}
+
+function markPurchaseClean() {
+  purchaseBackup = null
+  PURCHASE_PANELS.forEach((panel) => state.dirtyPanels.delete(panel))
+  syncDirtyMarkers()
+  $('#purchaseState').textContent = '已保存'
+  $('#purchaseState').classList.remove('state--dirty')
+  $('#purchaseOk').disabled = true
+  $('#purchaseDiscard').disabled = true
 }
 
 $('#undoBtn').addEventListener('click', undo)
 $('#redoBtn').addEventListener('click', redo)
 $('#saveBtn').addEventListener('click', () => {
+  const issues = configIssues()
+  if (issues.length) {
+    toast(issues[0])
+    return
+  }
   markClean()
   toast('已保存到 src/stocking/config.json')
 })
 $('#discardBtn').addEventListener('click', () => {
-  if (state.history.length) restore(state.history[0])
+  if (state.history.length) applyConfig(state.history[0])
   markClean()
+})
+
+$('#purchaseOk').addEventListener('click', () => {
+  markPurchaseClean()
+  toast('已保存到 src/purchase/settings.json')
+})
+$('#purchaseDiscard').addEventListener('click', () => {
+  if (purchaseBackup) {
+    const data = JSON.parse(purchaseBackup)
+    FACTORIES = data.factories
+    PEOPLE = data.people
+    SKU_FACTORIES = data.skus
+    MANUAL_MODES = data.manualModes
+    MANUAL_SKUS = data.manualSkus
+    state.manualSelected = new Set()
+    renderManualModes()
+    renderManualSkus()
+    renderFactories()
+    renderPeople()
+    renderSkuFactories()
+  }
+  markPurchaseClean()
 })
 
 document.addEventListener('keydown', (event) => {
@@ -1327,22 +2703,38 @@ document.addEventListener('click', (event) => {
 })
 
 /* ---------------- 初始化 ---------------- */
+// 依赖 MODES / skuKey 全部初始化完成后再摆种子数据
+normalizeSeed()
+syncCounts()
+
 renderToneFilters()
 renderInventory()
 renderSales()
-renderModeList()
-renderEditor()
-syncWeights()
-renderScoring()
-renderGrades()
+renderConfig()
 markClean()
+markPurchaseClean()
 
 // 便于评审直接打开某一屏：?screen=config&panel=weights&strategy=manual&sku=挪威网|1#黑色
 const params = new URLSearchParams(location.search)
 const initialScreen = params.get('screen')
-if (initialScreen && ['inventory', 'sales', 'config'].includes(initialScreen)) switchScreen(initialScreen)
+if (initialScreen && ['inventory', 'sales', 'purchase', 'config'].includes(initialScreen)) switchScreen(initialScreen)
 const initialPanel = params.get('panel')
-if (initialPanel && ['strategy', 'weights', 'scoring', 'spu'].includes(initialPanel)) switchPanel(initialPanel)
+if (initialPanel && Object.keys(PANEL_DOMAIN).includes(initialPanel)) switchPanel(initialPanel)
 if (params.get('strategy') === 'manual') $('[data-strategy="manual"]').click()
+// 评审时可直接打开某个编辑弹窗：?screen=config&panel=scoring&dialog=scoring
+const initialDialog = params.get('dialog')
+const DIALOGS = {
+  mode: editModeDialog,
+  weights: editWeightsDialog,
+  scoring: editScoringDialog,
+  spu: editSpuDialog,
+  factory: () => editFactoryDialog(null),
+  people: () => editPeopleDialog(null),
+  'sku-factory': () => editSkuFactoryDialog(null),
+  'manual-mode': () => editManualModeDialog(null),
+  'manual-sku': () => editManualSkuDialog(null),
+}
+if (initialDialog && DIALOGS[initialDialog]) DIALOGS[initialDialog]()
+
 const initialSku = params.get('sku')
 if (initialSku) openSku(initialSku)

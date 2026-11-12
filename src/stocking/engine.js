@@ -78,13 +78,12 @@ function createResult(overrides = {}) {
     modeId: '',
     manualBehavior: '',
     manualCoefficients: null,
-    manualOrders: [],
     ...overrides,
   }
 }
 
 function evaluateManual(item, mode, override, weights, baselineMonth) {
-  const behavior = ['custom', 'exclude', 'order'].includes(mode.behavior) ? mode.behavior : 'custom'
+  const behavior = mode.behavior === 'exclude' ? 'exclude' : 'custom'
   const coefficients = behavior === 'custom' ? override.coefficients ?? mode.defaultCoefficients ?? null : null
   const monthlySales = weightedMonthlySales(item?.monthSales, baselineMonth, weights)
 
@@ -92,7 +91,7 @@ function evaluateManual(item, mode, override, weights, baselineMonth) {
     modeKey: mode.id,
     modeName: mode.name,
     modeLabel: `手动·${mode.name}`,
-    // 手动自定系数模式按库存条数比较（与按量模式同一口径）；排除 / 订单货模式不参与备货策略。
+    // 手动自定系数模式按库存条数比较（与按量模式同一口径）；排除模式不参与备货策略。
     metric: behavior === 'custom' ? 'stock' : 'none',
     participates: behavior === 'custom' && Boolean(coefficients),
     coefficients,
@@ -103,7 +102,6 @@ function evaluateManual(item, mode, override, weights, baselineMonth) {
     modeId: mode.id,
     manualBehavior: behavior,
     manualCoefficients: coefficients,
-    manualOrders: behavior === 'order' ? override.orders ?? [] : [],
   })
 }
 
@@ -181,7 +179,6 @@ export function evaluateItem(item, evaluator) {
     modeId: result.modeId,
     manualBehavior: result.manualBehavior,
     manualCoefficients: result.manualCoefficients,
-    manualOrders: result.manualOrders,
   }
 }
 

@@ -3,7 +3,6 @@ import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   ElButton,
   ElDialog,
-  ElInput,
   ElInputNumber,
   ElMessage,
   ElOption,
@@ -14,8 +13,9 @@ import {
 import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
-import { createEvaluator, evaluateItem, evaluateBulkScoring, evaluateScoring, getAutoModes, getManualModes } from '@/stocking'
-import { calculateInventoryRow, getSuggestedPlanned } from '@/utils/inventory'
+import { createEvaluator, evaluateItem, getAutoModes, getManualModes } from '@/stocking'
+import { calculateInventoryRow } from '@/utils/inventory'
+import { evaluateRowHealth } from '@/utils/skuHealth'
 
 const props = defineProps({
   // 传主面板行或原始 SKU 行都行：评估只读取因子字段，不依赖派生值。
@@ -65,7 +65,6 @@ const coefficients = computed(() => evaluated.value?.stockingCoefficients ?? nul
 const coefficientText = computed(() => {
   const row = evaluated.value
   if (row?.excluded) {
-    if (row.manualBehavior === 'order') return '订单货：不参与备货'
     if (row.manualBehavior === 'exclude') return '已排除：不参与备货'
     return row.exclusive ? '专属品：不参与计算' : '不参与计算'
   }
@@ -83,56 +82,24 @@ const productText = computed(() => String(props.item?.product ?? '').replace(/\s
 // 色彩标签分灰阶 / 彩色两种色调，与导入时的「黑白 / 彩色」口径保持一致。
 const monochrome = computed(() => String(props.item?.category ?? '').includes('黑白'))
 
-// —— 策略：自动（按模式判定）/ 手动（自定系数 / 排除 / 订单货）——
+// —— 策略：自动（按模式判定）/ 手动（自定系数 / 排除）——
 const manualModes = computed(() => getManualModes(stockingStore.config))
 const skuId = computed(() => String(props.item?.skuId ?? '').trim())
 const savedEntry = computed(() => (skuId.value ? stockingStore.manualOverrides.get(skuId.value) ?? null : null))
 const strategyDraft = ref('auto')
 const manualModeDraft = ref('')
 const customCoefficients = reactive({ redLine: null, normal: null, peak: null })
-const orderDraft = ref([])
 const savingManual = ref(false)
 
 const selectedManualMode = computed(
   () => manualModes.value.find((mode) => mode.id === manualModeDraft.value) ?? null,
 )
 const isCustomMode = computed(() => selectedManualMode.value?.behavior === 'custom')
-const isOrderMode = computed(() => selectedManualMode.value?.behavior === 'order')
-
-// 订单行：空行丢弃、字符串去空格，保存与「是否有改动」判断共用同一套清洗。
-function normalizeOrderRows(rows) {
-  return (rows ?? [])
-    .map((row) => ({
-      name: String(row?.name ?? '').trim(),
-      factory: String(row?.factory ?? '').trim(),
-      quantity: Number.isFinite(row?.quantity) ? row.quantity : null,
-      note: String(row?.note ?? '').trim(),
-    }))
-    .filter((row) => row.name || row.factory || row.note || row.quantity !== null)
-}
-
-function emptyOrderRow() {
-  return { name: '', factory: '', quantity: null, note: '' }
-}
-
-function addOrderRow() {
-  orderDraft.value = [...orderDraft.value, emptyOrderRow()]
-}
-
-function removeOrderRow(index) {
-  orderDraft.value = orderDraft.value.filter((_, rowIndex) => rowIndex !== index)
-}
 
 const manualDirty = computed(() => {
   if (strategyDraft.value !== 'manual') return Boolean(savedEntry.value)
   if (!manualModeDraft.value) return false
   if (savedEntry.value?.modeId !== manualModeDraft.value) return true
-  if (isOrderMode.value) {
-    return (
-      JSON.stringify(normalizeOrderRows(orderDraft.value)) !==
-      JSON.stringify(normalizeOrderRows(savedEntry.value?.orders ?? []))
-    )
-  }
   if (!isCustomMode.value) return false
   const current = savedEntry.value?.coefficients ?? null
   return (
@@ -154,7 +121,6 @@ function syncStrategyDraft() {
     customCoefficients.redLine = defaults.redLine ?? null
     customCoefficients.normal = defaults.normal ?? null
     customCoefficients.peak = defaults.peak ?? null
-    orderDraft.value = []
     return
   }
 
@@ -165,12 +131,6 @@ function syncStrategyDraft() {
   customCoefficients.redLine = coefficients.redLine ?? null
   customCoefficients.normal = coefficients.normal ?? null
   customCoefficients.peak = coefficients.peak ?? null
-  orderDraft.value = (entry.orders ?? []).map((order) => ({
-    name: order.name ?? '',
-    factory: order.factory ?? '',
-    quantity: Number.isFinite(order.quantity) ? order.quantity : null,
-    note: order.note ?? '',
-  }))
 }
 
 watch([dialogVisible, skuId, manualModes], ([isVisible]) => {
@@ -178,14 +138,9 @@ watch([dialogVisible, skuId, manualModes], ([isVisible]) => {
   syncStrategyDraft()
 }, { immediate: true })
 
-// 切到「自定系数模式」时默认填该模式的默认系数；切到「订单货模式」时至少留一行订单。
+// 切到「自定系数模式」时默认填该模式的默认系数。
 watch(manualModeDraft, () => {
-  if (strategyDraft.value !== 'manual') return
-  if (isOrderMode.value) {
-    if (!orderDraft.value.length) orderDraft.value = [emptyOrderRow()]
-    return
-  }
-  if (!isCustomMode.value) return
+  if (strategyDraft.value !== 'manual' || !isCustomMode.value) return
   if (customCoefficients.redLine !== null) return
   const defaults = selectedManualMode.value?.defaultCoefficients ?? {}
   customCoefficients.redLine = defaults.redLine ?? null
@@ -211,18 +166,6 @@ async function saveStrategy() {
     }
 
     const entry = { modeId: mode.id }
-    if (mode.behavior === 'order') {
-      const orders = normalizeOrderRows(orderDraft.value)
-      if (!orders.length) {
-        ElMessage.error('请至少填写一条订单')
-        return
-      }
-      if (orders.some((order) => !order.name)) {
-        ElMessage.error('请填写订单名')
-        return
-      }
-      entry.orders = orders
-    }
     if (mode.behavior === 'custom') {
       const values = [customCoefficients.redLine, customCoefficients.normal, customCoefficients.peak]
       if (!values.every((value) => Number.isFinite(value))) {
@@ -265,40 +208,19 @@ const salesOfSku = computed(() => {
 const calculatedRow = computed(() =>
   props.item ? calculateInventoryRow(evaluated.value) : null,
 )
-const suggestedQuantity = computed(() =>
-  calculatedRow.value ? getSuggestedPlanned(calculatedRow.value) : 0,
-)
 // 按量模式用专属的两项判定（本次进销比 / 累积客户数），区间取配置页「按量」模式里的设置。
-const isBulkMode = computed(() => evaluated.value?.modeKey === 'bulk')
 const bulkHealthScoring = computed(
   () =>
     getAutoModes(stockingStore.config).find((mode) => mode.key === 'bulk')?.healthScoring ?? null,
 )
+// 口径与主面板「评分」列共用 src/utils/skuHealth.js，两边算出的综合评分一定一致。
 const scoring = computed(() => {
   if (!props.item || !calculatedRow.value) return null
-  const row = calculatedRow.value
-  // 专属品 / 尾货 / 排除模式 / 模式缺省一律显示「不参与」。
-  const participates = Boolean(row.strategyAvailable) && !row.excluded
-  const metrics = {
-    cr5: salesOfSku.value?.cr5 ?? null,
-    activeCustomers: props.item.activeCustomers,
-    sales: salesOfSku.value?.sales ?? props.item.monthSales,
-    cumulativeSales: salesOfSku.value?.cumulativeSales ?? props.item.cumulativeSales,
-    suggestedQuantity: suggestedQuantity.value,
-    monthlySales: evaluated.value?.monthlySales,
-    theoreticalStock: row.theoreticalStock,
-  }
-  if (isBulkMode.value) {
-    return evaluateBulkScoring({
-      metrics,
-      participates,
-      healthScoring: bulkHealthScoring.value,
-    })
-  }
-  return evaluateScoring({
+  return evaluateRowHealth({
+    row: calculatedRow.value,
+    salesEntry: salesOfSku.value,
     config: stockingStore.config.scoring,
-    participates,
-    metrics,
+    bulkHealthScoring: bulkHealthScoring.value,
   })
 })
 // 按量模式没有「得分」，tooltip 里直接给出该项的判定规则。
@@ -662,39 +584,6 @@ onBeforeUnmount(disposeChart)
             </span>
           </div>
 
-          <div v-if="isOrderMode" class="sku-detail__orders">
-            <div class="sku-detail__orders-head">
-              <span class="sku-detail__manual-label">订单</span>
-              <ElButton size="small" text type="primary" @click="addOrderRow">
-                ＋ 添加订单
-              </ElButton>
-            </div>
-            <div
-              v-for="(order, index) in orderDraft"
-              :key="index"
-              class="sku-detail__order-row"
-            >
-              <ElInput v-model="order.name" size="small" placeholder="订单名" aria-label="订单名" />
-              <ElInput v-model="order.factory" size="small" placeholder="订单厂家" aria-label="订单厂家" />
-              <ElInputNumber
-                v-model="order.quantity"
-                :min="0"
-                :controls="false"
-                size="small"
-                class="sku-detail__order-quantity"
-                placeholder="数量"
-                aria-label="数量"
-              />
-              <ElInput v-model="order.note" size="small" placeholder="备注（可选）" aria-label="备注" />
-              <ElButton size="small" text type="danger" @click="removeOrderRow(index)">
-                删除
-              </ElButton>
-            </div>
-            <p v-if="!orderDraft.length" class="sku-detail__manual-hint">
-              还没有订单，点「添加订单」记录订单名 / 厂家 / 数量 / 备注。
-            </p>
-          </div>
-
           <div v-if="isCustomMode" class="sku-detail__manual-row">
             <span class="sku-detail__manual-label">系数</span>
             <label class="sku-detail__coefficient">
@@ -935,30 +824,6 @@ onBeforeUnmount(disposeChart)
 .sku-detail__manual-actions {
   display: flex;
   justify-content: flex-end;
-}
-
-/* 订单货：一个 SKU 可以挂多张订单，每行四列 + 删除 */
-.sku-detail__orders {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sku-detail__orders-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.sku-detail__order-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 72px minmax(0, 1.2fr) auto;
-  gap: 6px;
-  align-items: center;
-}
-
-.sku-detail__order-quantity {
-  width: 100%;
 }
 
 .sku-detail__coefficient {

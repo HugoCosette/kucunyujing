@@ -24,9 +24,7 @@ import {
   CATEGORIES,
   COEFFICIENT_KEYS,
   MODE_METRICS,
-  MANUAL_BEHAVIORS,
   SALES_WINDOW_DEFAULTS,
-  DEFAULT_MANUAL_MODE_NAMES,
   createDefaultManualMode,
   expandMonthWeights,
   exportConfigFile,
@@ -56,11 +54,6 @@ const WEIGHT_FIELDS = [
   { key: 'm3', label: '近 3 个月月均' },
   { key: 'm12', label: '近 12 个月月均' },
 ]
-
-// 手动模式的行为标签统一从 MANUAL_BEHAVIORS 取，避免多处硬编码。
-const MANUAL_MODE_BEHAVIOR_LABELS = Object.fromEntries(
-  MANUAL_BEHAVIORS.map((behavior) => [behavior.value, behavior.label]),
-)
 
 const inventoryStore = useInventoryStore(props.panelKey)
 const stockingStore = useStockingConfigStore()
@@ -408,7 +401,7 @@ const danglingSkuIds = computed(() =>
   findDanglingSkuIds(stockingStore.manual, inventoryItems),
 )
 
-// 内置的三种行为必须各保留一个，其余自定义模式可删。
+// 内置的两种行为必须各保留一个，其余自定义模式可删。
 function isRequiredManualMode(mode) {
   if (!mode) return true
   const sameBehavior = manualModes.value.filter((entry) => entry.behavior === mode.behavior)
@@ -416,7 +409,7 @@ function isRequiredManualMode(mode) {
 }
 
 function nextManualModeName(behavior) {
-  const base = DEFAULT_MANUAL_MODE_NAMES[behavior] ?? '自定系数模式'
+  const base = behavior === 'exclude' ? '排除模式' : '自定系数模式'
   const used = new Set(manualModes.value.map((mode) => mode.name))
   if (!used.has(base)) return base
   let index = 2
@@ -466,26 +459,6 @@ async function updateManualRowCoefficient(row, key, value) {
 
 async function clearManualRow(row) {
   await stockingStore.setManualEntry(row.skuId, null)
-}
-
-// 订单货模式在清单里只展示订单条数与订单明细，编辑在 SKU 弹窗里完成。
-function orderRowsText(row) {
-  const orders = row.entry.orders ?? []
-  return orders.length ? `订单货：${orders.length} 单` : '订单货：待填写订单'
-}
-
-function orderRowsTitle(row) {
-  const orders = row.entry.orders ?? []
-  if (!orders.length) return '在 SKU 弹窗里为该 SKU 添加订单'
-  return orders
-    .map((order) => {
-      const parts = [order.name || '未命名订单']
-      if (order.factory) parts.push(`厂家：${order.factory}`)
-      if (Number.isFinite(order.quantity)) parts.push(`数量：${order.quantity}`)
-      if (order.note) parts.push(`备注：${order.note}`)
-      return parts.join(' / ')
-    })
-    .join('\n')
 }
 
 async function clearManualSelection() {
@@ -989,7 +962,7 @@ function handleFileCommand(command) {
               <div class="manual-block__head">
                 <h3>手动模式</h3>
                 <ElTooltip
-                  content="行为由系统提供（自定系数 / 排除 / 订单货），名称、说明与默认系数可自行调整；内置的三种行为各保留一个。"
+                  content="行为由系统提供（自定系数 / 排除），名称、说明与默认系数可自行调整；内置的两种行为各保留一个。"
                   placement="top"
                 >
                   <span class="config-info">i</span>
@@ -1018,7 +991,7 @@ function handleFileCommand(command) {
                     aria-label="手动模式名称"
                   />
                   <span class="manual-mode-row__behavior">
-                    {{ MANUAL_MODE_BEHAVIOR_LABELS[mode.behavior] ?? '自定系数' }}
+                    {{ mode.behavior === 'exclude' ? '排除' : '自定系数' }}
                   </span>
                   <ElInput
                     v-model="mode.description"
@@ -1065,7 +1038,7 @@ function handleFileCommand(command) {
               <div class="manual-block__head">
                 <h3>手动 SKU 清单</h3>
                 <ElTooltip
-                  content="在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。自定系数按「公斤」比较；排除 / 订单货不参与备货策略，订单明细在 SKU 弹窗里维护。"
+                  content="在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。自定系数按「公斤」比较；排除不参与备货策略。"
                   placement="top"
                 >
                   <span class="config-info">i</span>
@@ -1140,9 +1113,6 @@ function handleFileCommand(command) {
                         @update:model-value="(value) => updateManualRowCoefficient(row, coefficient.key, value)"
                       />
                     </template>
-                    <span v-else-if="row.mode?.behavior === 'order'" class="manual-table__orders" :title="orderRowsTitle(row)">
-                      {{ orderRowsText(row) }}
-                    </span>
                     <span v-else class="manual-table__exclude">排除：不参与备货策略</span>
                   </template>
                 </ElTableColumn>
@@ -1153,7 +1123,7 @@ function handleFileCommand(command) {
                 </ElTableColumn>
               </ElTable>
               <p v-else class="manual-block__empty">
-                还没有手动 SKU。到主面板点击颜色单元格的 ⓘ 打开 SKU 弹窗，把策略切成「手动策略」即可。
+                还没有手动 SKU。到主面板点击颜色单元格旁的详情按钮打开 SKU 弹窗，把策略切成「手动策略」即可。
               </p>
             </div>
           </div>
@@ -1669,12 +1639,6 @@ function handleFileCommand(command) {
 .manual-table__exclude {
   color: var(--industrial-muted);
   font-size: 12px;
-}
-
-.manual-table__orders {
-  color: var(--industrial-muted);
-  font-size: 12px;
-  cursor: help;
 }
 
 /* —— 折叠卡片里的文字操作 —— */

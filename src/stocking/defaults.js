@@ -23,7 +23,7 @@ export const BUILTIN_STRATEGIES = [
   { id: 'manual', name: '手动策略', behavior: 'manual' },
 ]
 
-// 手动策略下内置的三种模式：行为由代码提供，名称与参数可由使用者调整。
+// 手动策略下内置的两种模式：行为由代码提供，名称与参数可由使用者调整。
 export const BUILTIN_MANUAL_MODES = [
   {
     id: 'manual-custom',
@@ -38,33 +38,18 @@ export const BUILTIN_MANUAL_MODES = [
     behavior: 'exclude',
     description: '不参与备货策略：不计预警、不进紧急补货、不给建议值',
   },
-  {
-    id: 'manual-order',
-    name: '订单货模式',
-    behavior: 'order',
-    description: '为特定厂家订做、需求不明晰：不参与备货策略，按订单记录订单名 / 厂家 / 数量 / 备注',
-  },
 ]
 
 export const MANUAL_BEHAVIORS = [
   { value: 'custom', label: '自定系数', hint: '给每个 SKU 单独指定系数' },
   { value: 'exclude', label: '排除', hint: '不参与备货策略' },
-  { value: 'order', label: '订单货', hint: '记录订做订单，不参与备货策略' },
 ]
 
 // 手动行为的兼容层：旧版的「滞销」（slow）统一迁移成「排除」（exclude），
 // 模式 id 也一并从 manual-slow 映射到 manual-exclude，手动清单里的记录才不会丢。
 const LEGACY_MANUAL_MODE_IDS = { 'manual-slow': 'manual-exclude' }
 
-// 各手动行为的默认名称；改名时只改这里，归一化会顺带迁移旧内置名。
-export const DEFAULT_MANUAL_MODE_NAMES = {
-  custom: '自定系数模式',
-  exclude: '排除模式',
-  order: '订单货模式',
-}
-
 export function normalizeManualBehavior(value) {
-  if (value === 'order') return 'order'
   return value === 'exclude' || value === 'slow' ? 'exclude' : 'custom'
 }
 
@@ -154,7 +139,7 @@ export function createDefaultManualMode(overrides = {}) {
   const behavior = normalizeManualBehavior(source.behavior)
   const mode = {
     id: mapLegacyManualModeId(source.id ?? `manual-${behavior}-${Date.now().toString(36)}`),
-    name: source.name ?? DEFAULT_MANUAL_MODE_NAMES[behavior],
+    name: source.name ?? (behavior === 'exclude' ? '排除模式' : '自定系数模式'),
     behavior,
     description: source.description ?? '',
   }
@@ -168,7 +153,7 @@ export function createDefaultManualMode(overrides = {}) {
   return mode
 }
 
-// 内置默认配置：自动策略（5 个模式）+ 手动策略（自定系数模式 / 排除模式 / 订单货模式）。
+// 内置默认配置：自动策略（5 个模式）+ 手动策略（自定系数模式 / 排除模式）。
 // 这是「恢复默认」的唯一依据，与 src/stocking/config.json 的初始内容保持一致。
 export function createDefaultConfig() {
   return {
