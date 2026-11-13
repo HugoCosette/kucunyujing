@@ -18,7 +18,7 @@
 | `../../index.html`（原型根目录） | 页面结构 | **可以读**：DOM 层级、class 命名、哪些元素成组。抄结构，不抄标签细节 |
 | `../../styles.css` | 视觉规格 | **可以抄**：尺寸、间距、字号、颜色、圆角。搬进 SFC 的 `<style scoped>` 时加前缀防污染 |
 | `../../app.js` | 交互时序 | **只读逻辑，不要抄写法**。它是 `innerHTML` 拼串 + 全局函数，不是 Vue |
-| 本目录 `shots/*.png` | 验收基准 | 13 张，改完一张一张对 |
+| 本目录 `shots/*.png` | 验收基准 | 15 张（9 个分区 + 5 个弹窗 + 1 张未保存态），改完一张一张对 |
 
 深链（本地直接打开，比看截图信息量大）：
 
@@ -27,9 +27,14 @@ index.html?screen=config&panel=strategy
 index.html?screen=config&panel=weights
 index.html?screen=config&panel=scoring&dialog=scoring
 index.html?screen=config&panel=spu&dialog=spu
+index.html?screen=config&panel=vat
 index.html?screen=config&panel=factories
 index.html?screen=config&panel=people
+index.html?screen=config&panel=categories
 index.html?screen=config&panel=sku-factories
+
+> 设置页已合并为一个壳：左栏「备货配置」4 项 + 「下单配置」5 项，工具条随所点分区切换。
+> 旧的 `?screen=purchase-settings` 深链仍可打开（自动落到缸规则）。
 ```
 
 ### 抄什么、不抄什么（照抄会坏在哪）
@@ -146,8 +151,8 @@ grid-template-columns: 1fr 64px 1fr 64px 1fr;
 - `src/stocking/**`（`engine.js` / `scoring.js` / `spuGrades.js` / `validate.js` / `config.json`）
 - `src/cleaning/**`、`tools/cleaning/engine.mjs`
 - `src/purchase/resolve.js`、`src/purchase/validate.js`
-- 示例数据区：`src/data/panels.js`、`EXAMPLE_PANEL`、`inventory-example` store
-- `src/components/PanelNavigation.vue` 右侧「示例数据，请勿修改」分组
+- 文件清单以 `git status` 为准。示例面板 / 示例配置已于迭代记录 #74 删除（`/example`、`EXAMPLE_PANEL` 都不在了），
+  导航右侧现在只有「屏蔽列表」，没有「示例数据，请勿修改」分组——**不要再把这些加回来**
 
 **写法**
 
@@ -170,8 +175,8 @@ npm run build
 
 | Step | 改哪里 | 内容 | 完成标志 |
 |---|---|---|---|
-| 1 | `ConfigView.vue` 的 `<style>` | 左栏固定 196px、内容限宽 860、表格/按钮/表尾样式 | 7 个分区外观与截图一致，示例配置页不跑版 |
-| 2 | `ConfigView.vue` 模板 | 7 分区结构、只读表格、表尾单一按钮、顶部条 | 点击左栏能切，脏点能亮 |
+| 1 | `ConfigView.vue` 的 `<style>` | 左栏固定 196px、内容限宽 860、表格/按钮/表尾样式 | 4 个分区（策略与模式 / 销量加权 / 健康度评分 / SPU 分级）外观与截图一致 |
+| 2 | `ConfigView.vue` 模板 | 一个壳两组（备货 4 + 下单 5）、只读表格、表尾单一按钮、两条工具条按域切换 | 点击左栏能切，工具条跟着换，脏点能亮 |
 | 3 | `ScoringSettings.vue` | 分档刻度条（`bandBar`）、得分/分档行 | 5 行 × 2 框，权重合计实时变色 |
 | 4 | `SpuGradeSettings.vue` | 三列阈值表，单位进列头 | 6 行对齐，递减校验生效 |
 | 5 | 回归 | 逐条走第 4 节 20 项 | 全部通过再提交 |
@@ -201,6 +206,6 @@ npm run build
 
 - [ ] 左栏在 1280 / 1440 宽都不折叠，右列独立滚动
 - [ ] 任何表格里都点不出输入框
-- [ ] 未改动任何 `src/stocking/**` 与示例区（`git status` 自查）
+- [ ] 未改动任何 `src/stocking/**`（`git status` 自查）
 - [ ] 关掉浏览器重进，配置仍能读回（持久化没被破坏）
-- [ ] 示例配置页 `/example/config` 外观未受影响
+- [ ] 顶部导航仍是 5 主 + 右侧「屏蔽列表」，没有冒出示例入口

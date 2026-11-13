@@ -163,22 +163,37 @@ let SPU_GRADES = [
 ]
 
 // 下单配置：主数据。原型里直接落数组，落到 Vue 时对应 src/purchase/settings.json
-// 行为三选一：自定系数 / 排除 / 订单货（订单货按客户订单填量，不参与预警与评分）
+// 行为二选一：自定系数 / 订单货（项目已删除「排除」行为，见迭代记录 #76）
 const MANUAL_BEHAVIORS = [
   { value: 'custom', label: '自定系数', hint: '给每个 SKU 单独指定系数' },
-  { value: 'exclude', label: '排除', hint: '不参与备货策略，不计预警' },
   { value: 'order', label: '订单货', hint: '按客户订单填量，不参与预警与评分' },
 ]
 
 let MANUAL_MODES = [
-  { id: 'mm-custom', name: '自定模式', behavior: 'custom', desc: '人工指定红线 / 正常 / 峰值', participates: true, builtin: true, redLine: 20, normal: 40, peak: 60 },
-  { id: 'mm-slow', name: '滞销模式', behavior: 'exclude', desc: '不参与备货策略，不计预警', participates: false, builtin: true },
-  { id: 'mm-order', name: '订单货模式', behavior: 'order', desc: '按客户订单填量，不参与预警与评分', participates: false, builtin: true },
+  {
+    id: 'manual-custom',
+    name: '自定系数模式',
+    behavior: 'custom',
+    desc: '由人工为该 SKU 指定红线 / 正常 / 峰值系数',
+    participates: true,
+    builtin: true,
+    redLine: 20,
+    normal: 40,
+    peak: 60,
+  },
+  {
+    id: 'manual-order',
+    name: '订单货模式',
+    behavior: 'order',
+    desc: '按客户订单填量：不计预警、不做评分',
+    participates: false,
+    builtin: true,
+  },
 ]
 
 let MANUAL_SKUS = [
-  { id: 'NB-193#KC-0021', product: '挪威网', color: '193#浅咖', modeId: 'mm-custom', redLine: 20, normal: 40, peak: 60 },
-  { id: '9090-33#SH-0014', product: '9090网布', color: '33#深灰', modeId: 'mm-slow' },
+  { id: 'NB-193#KC-0021', product: '挪威网', color: '193#浅咖', modeId: 'manual-custom', redLine: 20, normal: 40, peak: 60 },
+  { id: '9090-33#SH-0014', product: '9090网布', color: '33#深灰', modeId: 'manual-order' },
 ]
 
 let FACTORIES = [
@@ -188,13 +203,13 @@ let FACTORIES = [
   { id: 'f4', name: '广东锦丰染厂', enabled: false, orders: 0 },
 ]
 
-const STAFF_POOL = ['张伟', '李四', '王芳', '赵敏', '陈立', '孙倩']
 
+// 分类里的分单人员必须取自「分单人员表」，所以两边用同一批名字
 let PEOPLE = [
-  { id: 'p1', category: '涤纶网布', people: ['张伟', '李四', '王芳'] },
-  { id: 'p2', category: '锦纶网布', people: ['张伟', '赵敏'] },
-  { id: 'p3', category: '交织网布', people: ['陈立'] },
-  { id: 'p4', category: '瑞士网', people: ['王芳', '孙倩'] },
+  { id: 'p1', category: '涤纶网布', people: ['阿婷', '刘玉红'] },
+  { id: 'p2', category: '锦纶网布', people: ['小凤'] },
+  { id: 'p3', category: '交织网布', people: [] },
+  { id: 'p4', category: '瑞士网', people: ['钟秋兰', '刘燕'] },
 ]
 
 let SKU_FACTORIES = [
@@ -373,6 +388,13 @@ function normalizeSeed() {
 
 /* ---------------- 导航 ---------------- */
 function switchScreen(screen) {
+  // 旧的 ?screen=purchase-settings 深链仍然可用：下单配置已并入「设置」壳
+  if (screen === 'purchase-settings') {
+    switchScreen('config')
+    switchPanel('vat')
+    return
+  }
+
   state.screen = screen
   $$('.screen').forEach((el) => {
     el.hidden = el.id !== `screen-${screen}`
@@ -919,8 +941,8 @@ function openSku(key) {
       <div class="manual-box__row">
         <span>模式</span>
         <select class="input" style="width: 130px" aria-label="手动模式">
-          <option>自定模式</option>
-          <option>滞销模式</option>
+          <option>自定系数模式</option>
+          <option>订单货模式</option>
         </select>
         <span>预计库存 ${fmt(d.projected)} 公斤，日库销比 ${d.days.toFixed(1)} 天</span>
       </div>
@@ -1326,10 +1348,19 @@ function switchPanel(panel) {
   const view = $(`[data-panel-view="${panel}"]`)
   const host = view?.closest('.config-layout')
   if (!host) return
+
+  const domain = PANEL_DOMAIN[panel] ?? 'stocking'
   $$('.rail__item', host).forEach((item) => item.classList.toggle('is-active', item.dataset.panel === panel))
   $$('[data-panel-view]', host).forEach((item) => {
     item.hidden = item.dataset.panelView !== panel
   })
+
+  // 一个壳两个域：备货域走「方案 + 撤销重做 + 保存」，下单域走「导入导出 + 确定」
+  $$('[data-domain-bar]').forEach((bar) => {
+    bar.hidden = bar.dataset.domainBar !== domain
+  })
+  // 缸规则表列多，下单域的右列放宽到 1040
+  $('#configPanels')?.classList.toggle('is-wide', domain === 'purchase')
 }
 
 $$('.rail__item').forEach((item) => item.addEventListener('click', () => switchPanel(item.dataset.panel)))
@@ -1383,6 +1414,21 @@ function tagsField(key, items, options, placeholder = '添加') {
   </span>`
 }
 
+// 人员只能从「分单人员表」里勾选（项目 #68 的做法），不再允许手输
+function checkChipsField(key, selected, options, emptyHint = '请先在「分单人员表」添加人员') {
+  if (!options.length) return `<span class="form__empty">${emptyHint}</span>`
+  return `<span class="check-chips" data-checks="${key}">
+    ${options
+      .map(
+        (name) => `<label class="check-chip${selected.includes(name) ? ' is-on' : ''}">
+          <input type="checkbox" data-check value="${esc(name)}"${selected.includes(name) ? ' checked' : ''} />
+          <span>${esc(name)}</span>
+        </label>`,
+      )
+      .join('')}
+  </span>`
+}
+
 function readForm() {
   // 从初始结构深拷贝：这样 rows / tiers 这类「行结构」在提交时仍然拿得到
   const values = formSpec?.values ? JSON.parse(JSON.stringify(formSpec.values)) : {}
@@ -1396,6 +1442,11 @@ function readForm() {
   })
   $$('[data-tags]', $('#formBody')).forEach((wrap) => {
     values[wrap.dataset.tags] = $$('[data-tag]', wrap).map((chip) => chip.dataset.tag)
+  })
+  $$('[data-checks]', $('#formBody')).forEach((wrap) => {
+    values[wrap.dataset.checks] = $$('[data-check]', wrap)
+      .filter((box) => box.checked)
+      .map((box) => box.value)
   })
   return values
 }
@@ -2031,7 +2082,7 @@ function renderManualModes() {
         item.behavior === 'custom'
           ? '<span class="tag">自定系数</span>'
           : `<span class="tag tag--muted">${esc(
-              MANUAL_BEHAVIORS.find((b) => b.value === item.behavior)?.label ?? '排除',
+              MANUAL_BEHAVIORS.find((b) => b.value === item.behavior)?.label ?? '订单货',
             )}</span>`
       }</td>
       <td class="meta">${esc(item.desc)}</td>
@@ -2077,7 +2128,7 @@ function renderManualSkus() {
 function editManualModeDialog(item) {
   const isNew = !item
   const data = item || {
-    id: `mm-${Date.now()}`,
+    id: `manual-${Date.now()}`,
     name: '',
     behavior: 'custom',
     desc: '',
@@ -2091,7 +2142,7 @@ function editManualModeDialog(item) {
     title: isNew ? '新增手动模式' : `编辑手动模式 · ${data.name}`,
     values: { ...data },
     render: (v) => `
-      ${formRow('名称', textField('name', v.name, { placeholder: '如 自定模式' }))}
+      ${formRow('名称', textField('name', v.name, { placeholder: '如 自定系数模式' }))}
       ${formRow(
         '行为',
         selectField(
@@ -2725,7 +2776,7 @@ function editPeopleDialog(item) {
                .join('')}</datalist>`
           : `<span class="form__static">${esc(data.category)}</span>`,
       )}
-      ${formRow('分单人员', tagsField('people', v.people, STAFF_POOL, '选择或输入姓名'), '回车添加，末位人员负责兜底')}`,
+      ${formRow('分单人员', checkChipsField('people', v.people, PO_PEOPLE_LIST), '勾选即分配；分类没勾人时回退到人员表全部')}`,
     validate: (v) => {
       if (!isNew) return null
       if (!String(v.category || '').trim()) return '树形分类不能为空'
@@ -2810,6 +2861,30 @@ function rowById(kind, id) {
 }
 
 function deleteRow(kind, id) {
+  // 人员是按姓名存的，没有对象可查，单独处理
+  if (kind === 'person') {
+    const usedBy = PEOPLE.filter((entry) => entry.people.includes(id)).map((entry) => entry.category)
+    openConfirm({
+      title: '确认移除',
+      note: usedBy.length
+        ? `移除「${id}」后，${usedBy.join('、')} 里的同名分配会一并清掉。`
+        : `移除「${id}」后不可恢复。`,
+      onOk: () => {
+        pushPurchase()
+        PO_PEOPLE_LIST = PO_PEOPLE_LIST.filter((name) => name !== id)
+        PEOPLE.forEach((entry) => {
+          entry.people = entry.people.filter((name) => name !== id)
+        })
+        renderPoPeople()
+        renderPeople()
+        markPurchaseDirty(RAIL_PANEL.person)
+        markPurchaseDirty('categories')
+        toast('已移除')
+      },
+    })
+    return
+  }
+
   const item = rowById(kind, id)
   if (!item) return
   const name = item.name || item.category || item.id || `${item.product} / ${item.color}`
@@ -4182,7 +4257,7 @@ markPurchaseClean()
 // 便于评审直接打开某一屏：?screen=config&panel=weights&strategy=manual&sku=挪威网|1#黑色
 const params = new URLSearchParams(location.search)
 const initialScreen = params.get('screen')
-const SCREENS = ['inventory', 'sales', 'purchase', 'config', 'purchase-settings', 'hidden']
+const SCREENS = ['inventory', 'sales', 'purchase', 'config', 'purchase-settings', 'hidden']  // purchase-settings 为兼容旧链接保留
 if (initialScreen && SCREENS.includes(initialScreen)) switchScreen(initialScreen)
 const initialPanel = params.get('panel')
 if (initialPanel && Object.keys(PANEL_DOMAIN).includes(initialPanel)) switchPanel(initialPanel)

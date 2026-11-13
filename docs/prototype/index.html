@@ -13,8 +13,7 @@
         <button class="nav__item is-active" data-screen="inventory">主面板</button>
         <button class="nav__item" data-screen="sales">销售表</button>
         <button class="nav__item" data-screen="purchase">采购下单</button>
-        <button class="nav__item" data-screen="purchase-settings">下单设置</button>
-        <button class="nav__item" data-screen="config">配置信息</button>
+        <button class="nav__item" data-screen="config">设置</button>
       </nav>
 
       <div class="header__right">
@@ -31,16 +30,14 @@
         <div class="page-head">
           <h1 class="page-title">主面板</h1>
           <div class="page-head__actions">
-            <button class="btn" data-demo="选择模板文件下载">导入模板</button>
-            <button class="btn" data-demo="导出当前视图为 Excel">保存 Excel</button>
-            <button class="btn" data-demo="选择 5 张分表，清洗后导入">导入分表</button>
+            <button class="btn" data-demo="选择 5 张分表，清洗出总表与销售表后导入">导入分表</button>
             <button class="btn" id="addSkuBtn" title="手动添加一个 SKU，字段与导入的总表 / 销售表一致">添加 SKU</button>
-            <button class="btn btn--primary" data-demo="选择总表 + 销售表">导入 Excel</button>
+            <button class="btn" data-demo="选择模板文件下载">导入模板</button>
             <button class="btn btn--danger" data-demo="打开紧急补货弹窗">
               紧急补货 <span class="btn__count" id="urgentCount">0</span>
             </button>
             <button class="btn" data-demo="打开本次采购清单">
-              采购清单 <span class="btn__count" id="purchaseCount" style="background: #e1e6e9; color: #2f3b43">0</span>
+              本次采购清单 <span class="btn__count" id="purchaseCount" style="background: #e1e6e9; color: #2f3b43">0</span>
             </button>
           </div>
         </div>
@@ -214,10 +211,11 @@
     </section>
 
     <!-- ===================== 设置 ===================== -->
+    <!-- ===================== 设置（备货 + 下单，一个壳两个域） ===================== -->
     <section class="screen" id="screen-config" hidden>
       <div class="page page--config">
-        <div class="config-bar">
-          <h1 class="config-bar__title">配置信息</h1>
+        <div class="config-bar" data-domain-bar="stocking">
+          <h1 class="config-bar__title">设置</h1>
           <span class="config-bar__domain">备货配置</span>
 
           <div class="menu-anchor">
@@ -260,6 +258,21 @@
           </div>
         </div>
 
+
+        <div class="config-bar" data-domain-bar="purchase" hidden>
+          <h1 class="config-bar__title">设置</h1>
+          <span class="config-bar__domain">下单配置</span>
+          <span class="state" id="purchaseState">已保存</span>
+
+          <div class="config-bar__end">
+            <button class="btn btn--sm" data-demo="选择下单设置 JSON">导入设置文件</button>
+            <button class="btn btn--sm" data-demo="导出下单设置 JSON">导出设置文件</button>
+            <span class="config-bar__divider"></span>
+            <button class="btn btn--text" id="purchaseDiscard" disabled>放弃</button>
+            <button class="btn btn--primary" id="purchaseOk" disabled>确定</button>
+          </div>
+        </div>
+
         <div class="config-layout">
           <aside class="rail">
             <div class="rail__group">
@@ -281,9 +294,33 @@
                 <span class="rail__meta" id="railSpuMeta">6 档</span>
               </button>
             </div>
+
+            <div class="rail__group">
+              <div class="rail__group-title">下单配置</div>
+              <button class="rail__item" data-panel="vat">
+                <span class="rail__title">缸规则</span>
+                <span class="rail__meta" id="railVatMeta">2 条规则</span>
+              </button>
+              <button class="rail__item" data-panel="factories">
+                <span class="rail__title">染厂清单</span>
+                <span class="rail__meta" id="railFactoryMeta">4 家 · 3 家启用</span>
+              </button>
+              <button class="rail__item" data-panel="people">
+                <span class="rail__title">分单人员表</span>
+                <span class="rail__meta" id="railPeopleListMeta">6 人</span>
+              </button>
+              <button class="rail__item" data-panel="categories">
+                <span class="rail__title">树形分类与分单</span>
+                <span class="rail__meta" id="railPeopleMeta">4 个分类</span>
+              </button>
+              <button class="rail__item" data-panel="sku-factories">
+                <span class="rail__title">SKU 可选染厂</span>
+                <span class="rail__meta" id="railSkuMeta">3 个 SKU 有约束</span>
+              </button>
+            </div>
           </aside>
 
-          <div class="config-panels">
+          <div class="config-panels" id="configPanels">
             <section class="panel" data-panel-view="strategy">
               <div class="panel__head">
                 <h2 class="panel__title">策略与模式</h2>
@@ -431,58 +468,8 @@
                 </div>
               </div>
             </section>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ===================== 下单设置 ===================== -->
-    <section class="screen" id="screen-purchase-settings" hidden>
-      <div class="page page--config">
-        <div class="config-bar">
-          <h1 class="config-bar__title">下单设置</h1>
-          <span class="config-bar__domain">染厂 · 分单 · 缸规则</span>
-          <span class="state" id="purchaseState">已保存</span>
-
-          <div class="config-bar__end">
-            <button class="btn btn--sm" data-demo="选择下单设置 JSON">导入设置文件</button>
-            <button class="btn btn--sm" data-demo="导出下单设置 JSON">导出设置文件</button>
-            <span class="config-bar__divider"></span>
-            <button class="btn btn--text" id="purchaseDiscard" disabled>放弃</button>
-            <button class="btn btn--primary" id="purchaseOk" disabled>确定</button>
-          </div>
-        </div>
-
-        <div class="config-layout">
-          <aside class="rail">
-            <div class="rail__group">
-              <div class="rail__group-title">下单配置</div>
-              <button class="rail__item is-active" data-panel="vat">
-                <span class="rail__title">缸规则</span>
-                <span class="rail__meta" id="railVatMeta">2 条规则</span>
-              </button>
-              <button class="rail__item" data-panel="factories">
-                <span class="rail__title">染厂清单</span>
-                <span class="rail__meta" id="railFactoryMeta">4 家 · 3 家启用</span>
-              </button>
-              <button class="rail__item" data-panel="people">
-                <span class="rail__title">分单人员表</span>
-                <span class="rail__meta" id="railPeopleListMeta">6 人</span>
-              </button>
-              <button class="rail__item" data-panel="categories">
-                <span class="rail__title">树形分类与分单</span>
-                <span class="rail__meta" id="railPeopleMeta">4 个分类</span>
-              </button>
-              <button class="rail__item" data-panel="sku-factories">
-                <span class="rail__title">SKU 可选染厂</span>
-                <span class="rail__meta" id="railSkuMeta">3 个 SKU 有约束</span>
-              </button>
-            </div>
-          </aside>
-
-          <div class="config-panels config-panels--wide">
             <!-- 缸规则 -->
-            <section class="panel" data-panel-view="vat">
+            <section class="panel" data-panel-view="vat" hidden>
               <div class="panel__head">
                 <h2 class="panel__title">缸规则</h2>
                 <div class="panel__head-actions">

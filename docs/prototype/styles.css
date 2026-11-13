@@ -100,11 +100,9 @@ textarea {
 
 .header__right {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 45px;
+  align-items: flex-end;
+  gap: 10px;
   margin-left: auto;
-  padding-bottom: 8px;
 }
 
 .link-btn {
@@ -1051,7 +1049,9 @@ select.input {
 
 .rail {
   align-self: start;
+  max-height: 100%;
   padding: 4px;
+  overflow-y: auto;
   border: 1px solid var(--industrial-grid);
   border-radius: 3px;
   background: var(--industrial-surface);
@@ -2374,6 +2374,45 @@ input[type='number']::-webkit-inner-spin-button {
 }
 
 /* 标签输入 */
+/* 勾选式人员：只能从人员表里挑，选中态用主色描边 */
+.check-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.check-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 13px;
+  background: #fff;
+  color: var(--industrial-text);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.check-chip:hover {
+  border-color: #8fa3ae;
+}
+
+.check-chip:has(input:checked) {
+  border-color: var(--industrial-primary);
+  background: #eaf1f5;
+  color: var(--industrial-primary);
+}
+
+.check-chip input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .tags {
   display: flex;
   flex-wrap: wrap;
@@ -2967,12 +3006,6 @@ select.po-cell {
 /* ============================================================
    顶部导航：右侧辅助入口（屏蔽列表）
    ============================================================ */
-.header__right {
-  align-items: center;
-  gap: 10px;
-  padding-bottom: 8px;
-}
-
 .nav__item--utility {
   display: inline-flex;
   align-items: center;
@@ -2996,7 +3029,7 @@ select.po-cell {
 /* ============================================================
    设置：面板工具条 / 宽版面板
    ============================================================ */
-.config-panels--wide {
+.config-panels.is-wide {
   max-width: 1040px;
 }
 
