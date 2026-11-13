@@ -1,7 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
-  ElButton,
   ElDialog,
   ElInputNumber,
   ElMessage,
@@ -10,7 +9,6 @@ import {
   ElRadioGroup,
   ElSelect,
 } from 'element-plus'
-import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
 import { createEvaluator, evaluateItem, getAutoModes, getManualModes } from '@/stocking'
@@ -23,10 +21,6 @@ const props = defineProps({
     type: Object,
     default: null,
   },
-  panelKey: {
-    type: String,
-    default: DEFAULT_PANEL_KEY,
-  },
   // 受控显隐：弹窗统一挂在页面层级，由表格行的入口按钮驱动。
   visible: {
     type: Boolean,
@@ -36,7 +30,7 @@ const props = defineProps({
 
 const emit = defineEmits(['update:visible'])
 
-const inventoryStore = useInventoryStore(props.panelKey)
+const inventoryStore = useInventoryStore()
 const stockingStore = useStockingConfigStore()
 
 const dialogVisible = computed({
@@ -65,7 +59,7 @@ const coefficients = computed(() => evaluated.value?.stockingCoefficients ?? nul
 const coefficientText = computed(() => {
   const row = evaluated.value
   if (row?.excluded) {
-    if (row.manualBehavior === 'exclude') return '已排除：不参与备货'
+    if (row.manualBehavior === 'order') return '订单货：按客户订单填量，不参与预警'
     return row.exclusive ? '专属品：不参与计算' : '不参与计算'
   }
   return coefficients.value
@@ -82,7 +76,8 @@ const productText = computed(() => String(props.item?.product ?? '').replace(/\s
 // 色彩标签分灰阶 / 彩色两种色调，与导入时的「黑白 / 彩色」口径保持一致。
 const monochrome = computed(() => String(props.item?.category ?? '').includes('黑白'))
 
-// —— 策略：自动（按模式判定）/ 手动（自定系数 / 排除）——
+// —— 策略：自动（按模式判定）/ 手动（自定系数 / 订单货）——
+// 选择即生效：单选、下拉、系数改动都会立刻写入，不需要再点保存。
 const manualModes = computed(() => getManualModes(stockingStore.config))
 const skuId = computed(() => String(props.item?.skuId ?? '').trim())
 const savedEntry = computed(() => (skuId.value ? stockingStore.manualOverrides.get(skuId.value) ?? null : null))
@@ -90,47 +85,114 @@ const strategyDraft = ref('auto')
 const manualModeDraft = ref('')
 const customCoefficients = reactive({ redLine: null, normal: null, peak: null })
 const savingManual = ref(false)
+// 回填草稿时挂起监听，避免把「同步」当成用户切换又写一次文件。
+let syncingDraft = false
+let applying = false
+let pendingApply = false
 
 const selectedManualMode = computed(
   () => manualModes.value.find((mode) => mode.id === manualModeDraft.value) ?? null,
 )
 const isCustomMode = computed(() => selectedManualMode.value?.behavior === 'custom')
-
-const manualDirty = computed(() => {
-  if (strategyDraft.value !== 'manual') return Boolean(savedEntry.value)
-  if (!manualModeDraft.value) return false
-  if (savedEntry.value?.modeId !== manualModeDraft.value) return true
-  if (!isCustomMode.value) return false
-  const current = savedEntry.value?.coefficients ?? null
+const coefficientsValid = computed(() => {
+  const values = [customCoefficients.redLine, customCoefficients.normal, customCoefficients.peak]
   return (
-    !current ||
-    current.redLine !== customCoefficients.redLine ||
-    current.normal !== customCoefficients.normal ||
-    current.peak !== customCoefficients.peak
+    values.every((value) => Number.isFinite(value)) &&
+    values.every((value) => value >= 0) &&
+    values[0] <= values[1] &&
+    values[1] <= values[2]
   )
 })
+const manualCoefficientWarning = computed(
+  () => strategyDraft.value === 'manual' && isCustomMode.value && !coefficientsValid.value,
+)
+
+function writeCoefficients(source) {
+  customCoefficients.redLine = source?.redLine ?? null
+  customCoefficients.normal = source?.normal ?? null
+  customCoefficients.peak = source?.peak ?? null
+}
 
 // 打开弹窗或切换 SKU 时，用已保存的手动设置回填表单。
 function syncStrategyDraft() {
-  const entry = savedEntry.value
-  if (!entry) {
-    strategyDraft.value = 'auto'
-    const fallback = manualModes.value.find((mode) => mode.behavior === 'custom') ?? manualModes.value[0]
-    manualModeDraft.value = fallback?.id ?? ''
-    const defaults = fallback?.defaultCoefficients ?? { redLine: null, normal: null, peak: null }
-    customCoefficients.redLine = defaults.redLine ?? null
-    customCoefficients.normal = defaults.normal ?? null
-    customCoefficients.peak = defaults.peak ?? null
+  syncingDraft = true
+  try {
+    const entry = savedEntry.value
+    if (!entry) {
+      strategyDraft.value = 'auto'
+      const fallback = manualModes.value.find((mode) => mode.behavior === 'custom') ?? manualModes.value[0]
+      manualModeDraft.value = fallback?.id ?? ''
+      writeCoefficients(fallback?.defaultCoefficients)
+      return
+    }
+
+    strategyDraft.value = 'manual'
+    manualModeDraft.value = entry.modeId
+    const mode = manualModes.value.find((item) => item.id === entry.modeId)
+    writeCoefficients(entry.coefficients ?? mode?.defaultCoefficients)
+  } finally {
+    syncingDraft = false
+  }
+}
+
+function sameEntry(previous, next) {
+  if (!previous || previous.modeId !== next.modeId) return false
+  if (!next.coefficients) return true
+  const current = previous.coefficients ?? {}
+  return (
+    current.redLine === next.coefficients.redLine &&
+    current.normal === next.coefficients.normal &&
+    current.peak === next.coefficients.peak
+  )
+}
+
+// 自动 → 删除手动记录；手动 → 按当前下拉与系数写入。
+async function applyStrategy() {
+  if (!skuId.value) return
+  if (applying) {
+    pendingApply = true
     return
   }
+  applying = true
+  savingManual.value = true
+  try {
+    const previous = savedEntry.value
 
-  strategyDraft.value = 'manual'
-  manualModeDraft.value = entry.modeId
-  const mode = manualModes.value.find((item) => item.id === entry.modeId)
-  const coefficients = entry.coefficients ?? mode?.defaultCoefficients ?? {}
-  customCoefficients.redLine = coefficients.redLine ?? null
-  customCoefficients.normal = coefficients.normal ?? null
-  customCoefficients.peak = coefficients.peak ?? null
+    if (strategyDraft.value === 'auto') {
+      if (!previous) return
+      await stockingStore.setManualEntry(skuId.value, null)
+      ElMessage.success('已恢复自动策略')
+      return
+    }
+
+    const mode = selectedManualMode.value
+    if (!mode) {
+      ElMessage.error('请选择手动模式')
+      syncStrategyDraft()
+      return
+    }
+
+    const entry = { modeId: mode.id }
+    if (mode.behavior === 'custom') {
+      if (!coefficientsValid.value) return
+      entry.coefficients = {
+        redLine: customCoefficients.redLine,
+        normal: customCoefficients.normal,
+        peak: customCoefficients.peak,
+      }
+    }
+
+    if (sameEntry(previous, entry)) return
+    await stockingStore.setManualEntry(skuId.value, entry)
+    ElMessage.success(`已设为「${mode.name}」`)
+  } finally {
+    applying = false
+    savingManual.value = false
+    if (pendingApply) {
+      pendingApply = false
+      applyStrategy()
+    }
+  }
 }
 
 watch([dialogVisible, skuId, manualModes], ([isVisible]) => {
@@ -138,62 +200,26 @@ watch([dialogVisible, skuId, manualModes], ([isVisible]) => {
   syncStrategyDraft()
 }, { immediate: true })
 
-// 切到「自定系数模式」时默认填该模式的默认系数。
-watch(manualModeDraft, () => {
-  if (strategyDraft.value !== 'manual' || !isCustomMode.value) return
-  if (customCoefficients.redLine !== null) return
-  const defaults = selectedManualMode.value?.defaultCoefficients ?? {}
-  customCoefficients.redLine = defaults.redLine ?? null
-  customCoefficients.normal = defaults.normal ?? null
-  customCoefficients.peak = defaults.peak ?? null
+// 关闭时把还没 blur 的系数改动补写一次（@change 只在 blur / 回车时触发）。
+watch(dialogVisible, (isVisible) => {
+  if (isVisible) return
+  applyStrategy()
 })
 
-async function saveStrategy() {
-  if (!skuId.value) return
-  savingManual.value = true
-  try {
-    if (strategyDraft.value === 'auto') {
-      await stockingStore.setManualEntry(skuId.value, null)
-      ElMessage.success('已恢复自动策略')
-      syncStrategyDraft()
-      return
-    }
+// 单选 / 下拉 / 系数改动即生效，所以不再需要「保存」按钮。
+watch(strategyDraft, () => {
+  if (syncingDraft) return
+  applyStrategy()
+}, { flush: 'sync' })
 
-    const mode = selectedManualMode.value
-    if (!mode) {
-      ElMessage.error('请选择手动模式')
-      return
-    }
-
-    const entry = { modeId: mode.id }
-    if (mode.behavior === 'custom') {
-      const values = [customCoefficients.redLine, customCoefficients.normal, customCoefficients.peak]
-      if (!values.every((value) => Number.isFinite(value))) {
-        ElMessage.error('请填写完整的红线 / 正常 / 峰值系数')
-        return
-      }
-      if (values.some((value) => value < 0)) {
-        ElMessage.error('系数不能为负数')
-        return
-      }
-      if (!(values[0] <= values[1] && values[1] <= values[2])) {
-        ElMessage.error('系数需满足 红线 ≤ 正常 ≤ 峰值')
-        return
-      }
-      entry.coefficients = {
-        redLine: values[0],
-        normal: values[1],
-        peak: values[2],
-      }
-    }
-
-    await stockingStore.setManualEntry(skuId.value, entry)
-    ElMessage.success(`已设为「${mode.name}」`)
-    syncStrategyDraft()
-  } finally {
-    savingManual.value = false
+watch(manualModeDraft, () => {
+  if (syncingDraft || strategyDraft.value !== 'manual') return
+  // 切到「自定系数模式」时默认填该模式的默认系数。
+  if (isCustomMode.value && customCoefficients.redLine === null) {
+    writeCoefficients(selectedManualMode.value?.defaultCoefficients)
   }
-}
+  applyStrategy()
+}, { flush: 'sync' })
 
 const salesSheet = computed(() => inventoryStore.salesSheet)
 const months = computed(() => salesSheet.value?.months ?? [])
@@ -596,6 +622,7 @@ onBeforeUnmount(disposeChart)
                 :controls="false"
                 size="small"
                 class="sku-detail__coefficient-input"
+                @change="applyStrategy"
               />
             </label>
             <label class="sku-detail__coefficient">
@@ -608,6 +635,7 @@ onBeforeUnmount(disposeChart)
                 :controls="false"
                 size="small"
                 class="sku-detail__coefficient-input"
+                @change="applyStrategy"
               />
             </label>
             <label class="sku-detail__coefficient">
@@ -620,20 +648,18 @@ onBeforeUnmount(disposeChart)
                 :controls="false"
                 size="small"
                 class="sku-detail__coefficient-input"
+                @change="applyStrategy"
               />
             </label>
           </div>
 
           <div class="sku-detail__manual-actions">
-            <ElButton
-              size="small"
-              type="primary"
-              :disabled="!manualDirty"
-              :loading="savingManual"
-              @click="saveStrategy"
-            >
-              保存策略
-            </ElButton>
+            <span v-if="manualCoefficientWarning" class="sku-detail__manual-warning">
+              系数需满足 0 ≤ 红线 ≤ 正常 ≤ 峰值 且不为空，当前未保存
+            </span>
+            <span v-else class="sku-detail__manual-hint">
+              {{ savingManual ? '保存中…' : '选择后立即生效，无需保存' }}
+            </span>
           </div>
         </div>
       </template>
@@ -823,7 +849,13 @@ onBeforeUnmount(disposeChart)
 
 .sku-detail__manual-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.sku-detail__manual-warning {
+  color: #c45656;
+  font-size: 12px;
 }
 
 .sku-detail__coefficient {

@@ -19,6 +19,8 @@ export {
   DEFAULT_PROFILE_ID,
   DEFAULT_PROFILE_NAME,
   MANUAL_BEHAVIORS,
+  MANUAL_BEHAVIOR_LABELS,
+  MANUAL_BEHAVIOR_NAMES,
   createDefaultAutoModes,
   createDefaultConfig,
   createDefaultManualMode,
@@ -108,4 +110,13 @@ export {
   setManualRuntime,
 } from './manual.js'
 
-export { createDemoProfile, DEMO_PROFILE_DISABLED } from './demoProfile.js'
+export {
+  HIDDEN_SAVE_ENDPOINT,
+  HIDDEN_STORAGE_KEY,
+  countHiddenSkus,
+  loadHiddenSkus,
+  normalizeHiddenProduct,
+  normalizeHiddenSkus,
+  saveHiddenSkus,
+  setHiddenRuntime,
+} from './hidden.js'

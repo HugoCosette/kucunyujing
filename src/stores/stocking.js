@@ -3,9 +3,12 @@ import { defineStore } from 'pinia'
 import {
   activateProfile,
   getActiveProfile,
+  loadHiddenSkus,
   loadManualSkus,
   loadProfiles,
+  normalizeHiddenProduct,
   resetConfig,
+  saveHiddenSkus,
   saveManualSkus,
   saveProfiles,
 } from '@/stocking'
@@ -26,6 +29,14 @@ export const useStockingConfigStore = defineStore('stocking-config', () => {
 
   // 评估器消费的形态：skuId → { modeId, coefficients }
   const manualOverrides = computed(() => new Map(Object.entries(manual.value.items ?? {})))
+
+  // 屏蔽清单：主面板上「删除」的品名 / SKU，只影响主面板展示，源表与销售数据不动。
+  const hidden = shallowRef(loadHiddenSkus())
+  const hiddenProductKeys = computed(() => new Set(hidden.value.products ?? []))
+  const hiddenSkuKeys = computed(() => new Set(Object.keys(hidden.value.skus ?? {})))
+  const hiddenCount = computed(
+    () => (hidden.value.products?.length ?? 0) + Object.keys(hidden.value.skus ?? {}).length,
+  )
 
   function applySaved(saved) {
     profileFile.value = saved.profiles
@@ -142,6 +153,78 @@ export const useStockingConfigStore = defineStore('stocking-config', () => {
     return applyManual({ ...manual.value, items })
   }
 
+  async function applyHidden(next) {
+    const saved = await saveHiddenSkus(next)
+    hidden.value = saved.hidden
+    return saved
+  }
+
+  // 屏蔽（看似删除）：一次可同时写品名与 SKU。
+  // 品名级屏蔽会清掉其下已有的 SKU 记录，这样解除品名时整组一起回来，不会残留
+  // 「品名已恢复、个别 SKU 仍隐藏」的意外状态。
+  async function hideEntries({ products = [], skus: skuEntries = [] } = {}) {
+    const productKeys = (Array.isArray(products) ? products : [products])
+      .map((product) => normalizeHiddenProduct(product))
+      .filter(Boolean)
+    const entries = (Array.isArray(skuEntries) ? skuEntries : [skuEntries])
+      .map((entry) => ({
+        skuId: String(entry?.skuId ?? '').trim(),
+        product: normalizeHiddenProduct(entry?.product),
+        color: String(entry?.color ?? '').trim(),
+      }))
+      .filter((entry) => entry.skuId)
+    if (productKeys.length === 0 && entries.length === 0) {
+      return { hidden: hidden.value, written: false }
+    }
+
+    const productSet = new Set([...hidden.value.products, ...productKeys])
+    const nextSkus = { ...hidden.value.skus }
+    for (const entry of entries) {
+      nextSkus[entry.skuId] = { product: entry.product, color: entry.color }
+    }
+    return applyHidden({
+      ...hidden.value,
+      products: [...productSet],
+      skus: Object.fromEntries(
+        Object.entries(nextSkus).filter(([, entry]) => !productSet.has(entry?.product)),
+      ),
+    })
+  }
+
+  // 解除屏蔽：一次可同时恢复品名与 SKU（弹窗里多选后统一提交）。
+  async function restoreHiddenEntries({ products = [], skus: skuIds = [] } = {}) {
+    const productKeys = new Set(
+      (Array.isArray(products) ? products : [products])
+        .map((product) => normalizeHiddenProduct(product))
+        .filter(Boolean),
+    )
+    const skuKeys = new Set(
+      (Array.isArray(skuIds) ? skuIds : [skuIds])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean),
+    )
+    if (productKeys.size === 0 && skuKeys.size === 0) {
+      return { hidden: hidden.value, written: false }
+    }
+
+    const nextProducts = hidden.value.products.filter((product) => !productKeys.has(product))
+    const nextSkus = Object.fromEntries(
+      Object.entries(hidden.value.skus).filter(([skuId]) => !skuKeys.has(skuId)),
+    )
+    if (
+      nextProducts.length === hidden.value.products.length &&
+      Object.keys(nextSkus).length === Object.keys(hidden.value.skus ?? {}).length
+    ) {
+      return { hidden: hidden.value, written: false }
+    }
+    return applyHidden({ ...hidden.value, products: nextProducts, skus: nextSkus })
+  }
+
+  async function restoreAllHidden() {
+    if (!hiddenCount.value) return { hidden: hidden.value, written: false }
+    return applyHidden({ ...hidden.value, products: [], skus: {} })
+  }
+
   return {
     profileFile,
     profiles,
@@ -150,6 +233,10 @@ export const useStockingConfigStore = defineStore('stocking-config', () => {
     config,
     manual,
     manualOverrides,
+    hidden,
+    hiddenProductKeys,
+    hiddenSkuKeys,
+    hiddenCount,
     apply,
     restoreDefaults,
     selectProfile,
@@ -160,5 +247,8 @@ export const useStockingConfigStore = defineStore('stocking-config', () => {
     applyManual,
     setManualEntry,
     removeManualEntries,
+    hideEntries,
+    restoreHiddenEntries,
+    restoreAllHidden,
   }
 })

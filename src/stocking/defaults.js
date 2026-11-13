@@ -33,28 +33,31 @@ export const BUILTIN_MANUAL_MODES = [
     defaultCoefficients: { redLine: 20, normal: 40, peak: 60 },
   },
   {
-    id: 'manual-exclude',
-    name: '排除模式',
-    behavior: 'exclude',
-    description: '不参与备货策略：不计预警、不进紧急补货、不给建议值',
+    id: 'manual-order',
+    name: '订单货模式',
+    behavior: 'order',
+    description: '按客户订单填量：不计预警、不做评分，需安排填多少就下多少',
   },
 ]
 
-export const MANUAL_BEHAVIORS = [
-  { value: 'custom', label: '自定系数', hint: '给每个 SKU 单独指定系数' },
-  { value: 'exclude', label: '排除', hint: '不参与备货策略' },
-]
-
-// 手动行为的兼容层：旧版的「滞销」（slow）统一迁移成「排除」（exclude），
-// 模式 id 也一并从 manual-slow 映射到 manual-exclude，手动清单里的记录才不会丢。
-const LEGACY_MANUAL_MODE_IDS = { 'manual-slow': 'manual-exclude' }
-
-export function normalizeManualBehavior(value) {
-  return value === 'exclude' || value === 'slow' ? 'exclude' : 'custom'
+// 行为的默认名称与列标签：改名只会改到实例上，新建的模式仍取这里的默认值。
+export const MANUAL_BEHAVIOR_NAMES = {
+  custom: '自定系数模式',
+  order: '订单货模式',
 }
 
-export function mapLegacyManualModeId(id) {
-  return LEGACY_MANUAL_MODE_IDS[id] ?? id
+export const MANUAL_BEHAVIOR_LABELS = {
+  custom: '自定系数',
+  order: '订单货',
+}
+
+export const MANUAL_BEHAVIORS = [
+  { value: 'custom', label: '自定系数', hint: '给每个 SKU 单独指定系数' },
+  { value: 'order', label: '订单货', hint: '按客户订单填量，不参与预警与评分' },
+]
+
+export function normalizeManualBehavior(value) {
+  return value === 'order' ? 'order' : 'custom'
 }
 
 // 自动策略的 5 个模式（顺序即判定优先级）。
@@ -138,8 +141,8 @@ export function createDefaultManualMode(overrides = {}) {
   const source = overrides ?? {}
   const behavior = normalizeManualBehavior(source.behavior)
   const mode = {
-    id: mapLegacyManualModeId(source.id ?? `manual-${behavior}-${Date.now().toString(36)}`),
-    name: source.name ?? (behavior === 'exclude' ? '排除模式' : '自定系数模式'),
+    id: String(source.id ?? `manual-${behavior}-${Date.now().toString(36)}`),
+    name: source.name ?? MANUAL_BEHAVIOR_NAMES[behavior] ?? MANUAL_BEHAVIOR_NAMES.custom,
     behavior,
     description: source.description ?? '',
   }
@@ -153,7 +156,7 @@ export function createDefaultManualMode(overrides = {}) {
   return mode
 }
 
-// 内置默认配置：自动策略（5 个模式）+ 手动策略（自定系数模式 / 排除模式）。
+// 内置默认配置：自动策略（5 个模式）+ 手动策略（自定系数 / 订单货）。
 // 这是「恢复默认」的唯一依据，与 src/stocking/config.json 的初始内容保持一致。
 export function createDefaultConfig() {
   return {

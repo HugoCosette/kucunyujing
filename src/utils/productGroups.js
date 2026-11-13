@@ -158,29 +158,35 @@ export function groupTableRowsByProduct(
   return groups
 }
 
+// 按品名聚合父行：按品名建索引而不是只认「相邻同行」，
+// 即使上游排序把同品名的行拆开，也不会生成两个同 id 的父行（虚拟滚动会错位）。
 export function groupRowsByProduct(rows) {
-  const groups = []
+  const groupsByProduct = new Map()
 
-  for (let start = 0; start < rows.length; ) {
-    let end = start + 1
-    while (end < rows.length && rows[end].product === rows[start].product) end += 1
-
-    const children = rows.slice(start, end)
-    groups.push({
-      ...createProductSummary(children),
-      id: `product:${children[0].product}`,
-      product: children[0].product,
-      color: '',
-      category: '',
-      skuId: '',
-      modeKey: '',
-      modeName: '',
-      modeLabel: '',
-      isProductGroup: true,
-      children,
-    })
-    start = end
+  for (const row of rows) {
+    const product = String(row.product ?? '')
+    let group = groupsByProduct.get(product)
+    if (!group) {
+      group = {
+        id: `product:${product}`,
+        product,
+        color: '',
+        category: '',
+        skuId: '',
+        modeKey: '',
+        modeName: '',
+        modeLabel: '',
+        isProductGroup: true,
+        children: [],
+      }
+      groupsByProduct.set(product, group)
+    }
+    group.children.push(row)
   }
 
-  return groups
+  // 汇总字段要等子行收齐后再算。
+  return [...groupsByProduct.values()].map((group) => ({
+    ...createProductSummary(group.children),
+    ...group,
+  }))
 }

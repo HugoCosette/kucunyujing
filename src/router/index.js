@@ -4,52 +4,42 @@ import SalesPanelView from '../views/SalesPanelView.vue'
 import ConfigView from '../views/ConfigView.vue'
 import PurchaseOrderView from '../views/PurchaseOrderView.vue'
 import PurchaseSettingsView from '../views/PurchaseSettingsView.vue'
-import { inventoryPanels } from '@/data/panels'
+import HiddenSkusView from '../views/HiddenSkusView.vue'
+import { MAIN_PANEL } from '@/data/panels'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    // 主面板 + 销售表 + 配置信息 是需求迭代目标；示例面板 + 示例配置 仅作对照示例，勿改。
-    ...inventoryPanels.flatMap((panel) => [
-      {
-        path: panel.path,
-        name: panel.routeName,
-        component: InventoryPanelView,
-        props: { panelKey: panel.key },
-      },
-      ...(panel.allPath
-        ? [
-            {
-              path: panel.allPath,
-              name: panel.allRouteName,
-              component: SalesPanelView,
-              props: { panelKey: panel.key },
-            },
-          ]
-        : []),
-      ...(panel.purchasePath
-        ? [
-            {
-              path: panel.purchasePath,
-              name: panel.purchaseRouteName,
-              component: PurchaseOrderView,
-              props: { panelKey: panel.key },
-            },
-            {
-              path: panel.purchaseSettingsPath,
-              name: panel.purchaseSettingsRouteName,
-              component: PurchaseSettingsView,
-              props: { panelKey: panel.key },
-            },
-          ]
-        : []),
-      {
-        path: panel.configPath,
-        name: panel.configRouteName,
-        component: ConfigView,
-        props: { panelKey: panel.key },
-      },
-    ]),
+    {
+      path: MAIN_PANEL.path,
+      name: MAIN_PANEL.routeName,
+      component: InventoryPanelView,
+    },
+    {
+      path: MAIN_PANEL.allPath,
+      name: MAIN_PANEL.allRouteName,
+      component: SalesPanelView,
+    },
+    {
+      path: MAIN_PANEL.purchasePath,
+      name: MAIN_PANEL.purchaseRouteName,
+      component: PurchaseOrderView,
+    },
+    {
+      path: MAIN_PANEL.purchaseSettingsPath,
+      name: MAIN_PANEL.purchaseSettingsRouteName,
+      component: PurchaseSettingsView,
+    },
+    {
+      path: MAIN_PANEL.configPath,
+      name: MAIN_PANEL.configRouteName,
+      component: ConfigView,
+    },
+    {
+      path: MAIN_PANEL.hiddenPath,
+      name: MAIN_PANEL.hiddenRouteName,
+      component: HiddenSkusView,
+    },
     {
       path: '/about',
       name: 'about',

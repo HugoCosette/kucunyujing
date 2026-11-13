@@ -11,13 +11,16 @@
 
 ## 1. 目标态在哪
 
-| 看什么 | 去哪看 |
-|---|---|
-| 静态效果 | 本目录 `shots/*.png`（13 张） |
-| 交互效果 | 同级目录 `../../index.html`，见下方深链 |
-| 实现参考 | `../../app.js`（纯 DOM 原型，只作结构参考，**不要整体移植**） |
+原型一共三个文件，**三个都要给，但用法不同**：
 
-深链（本地直接打开）：
+| 文件 | 用途 | 怎么用 |
+|---|---|---|
+| `../../index.html`（原型根目录） | 页面结构 | **可以读**：DOM 层级、class 命名、哪些元素成组。抄结构，不抄标签细节 |
+| `../../styles.css` | 视觉规格 | **可以抄**：尺寸、间距、字号、颜色、圆角。搬进 SFC 的 `<style scoped>` 时加前缀防污染 |
+| `../../app.js` | 交互时序 | **只读逻辑，不要抄写法**。它是 `innerHTML` 拼串 + 全局函数，不是 Vue |
+| 本目录 `shots/*.png` | 验收基准 | 13 张，改完一张一张对 |
+
+深链（本地直接打开，比看截图信息量大）：
 
 ```
 index.html?screen=config&panel=strategy
@@ -29,8 +32,17 @@ index.html?screen=config&panel=people
 index.html?screen=config&panel=sku-factories
 ```
 
-> 原型是 Vue 3 之外的另一套实现（`innerHTML` 拼串 + 全局函数 + 写死数据）。
-> **只照抄 CSS 和结构，不要照抄 JS 逻辑，不要照抄里面的假数据。**
+### 抄什么、不抄什么（照抄会坏在哪）
+
+| 原型里的写法 | 不要照搬 | Vue 里应该 |
+|---|---|---|
+| `el.innerHTML = rows.map(...).join('')` | `v-html` 拼串 | `v-for` + 模板，事件用 `@click` |
+| 全局单例 `openForm({...})` + `formSpec` 闭包 | 一个全局弹窗函数 | `ElDialog` + `ref` 草稿对象 + computed 校验 |
+| `SCORING_ROWS[i].low/mid/high` 扁平数组 | 自建一份区间数据结构 | 读 `config.scoring.dimensions[key].ranges`，提交写回同一结构 |
+| `MODES` 一维数组 | 在组件里 `const MODES = [...]` | `config.strategies[0].modes`（自动）/ `[1].modes`（手动，SKU 归属在 `manualSkus.json`） |
+| `NB-193#KC-0021`、`hits: 5` 等写死值 | 留在组件里当默认值 | 全部来自 store / `evaluate*` 的返回值 |
+
+> 一句话：**原型的 HTML 和 CSS 是资产，原型的 JS 只是一份「交互说明书」。**
 
 ---
 

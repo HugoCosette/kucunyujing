@@ -1,7 +1,7 @@
 <script setup>
-// 顶部导航：左侧是主面板与“配置信息”，右侧是示例数据区（示例面板 / 示例配置）。
-// ⚠️ 右侧示例数据区仅用于对照演示，请勿修改其中的示例数据与示例配置。
-import { exampleNavEntries, mainNavEntries } from '@/data/panels'
+// 顶部导航：左侧是主面板组（主面板 → 销售表 → 采购下单 → 下单设置 → 配置信息），
+// 右侧是屏蔽列表这类辅助入口。
+import { mainNavEntries, utilityNavEntries } from '@/data/panels'
 </script>
 
 <template>
@@ -17,14 +17,12 @@ import { exampleNavEntries, mainNavEntries } from '@/data/panels'
       </RouterLink>
     </div>
 
-    <!-- 示例数据区：仅供对照演示，请勿修改 -->
-    <div class="page-navigation-group page-navigation-group--example">
-      <span class="page-navigation-hint">示例数据，请勿修改</span>
+    <div class="page-navigation-group page-navigation-group--utility">
       <RouterLink
-        v-for="entry in exampleNavEntries"
+        v-for="entry in utilityNavEntries"
         :key="entry.key"
         :to="entry.path"
-        class="page-navigation-link page-navigation-link--example"
+        class="page-navigation-link page-navigation-link--utility"
       >
         {{ entry.label }}
       </RouterLink>
@@ -35,30 +33,23 @@ import { exampleNavEntries, mainNavEntries } from '@/data/panels'
 <style scoped>
 .page-navigation {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 12px;
+  gap: 6px 12px;
   margin-bottom: 18px;
   border-bottom: 1px solid var(--industrial-grid);
 }
 
 .page-navigation-group {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
 }
 
-.page-navigation-group--example {
+.page-navigation-group--utility {
   align-items: center;
-}
-
-.page-navigation-hint {
-  margin-right: 2px;
-  padding: 2px 8px;
-  color: var(--industrial-muted);
-  border: 1px dashed var(--industrial-grid);
-  border-radius: 10px;
-  font-size: 12px;
-  white-space: nowrap;
 }
 
 .page-navigation-link {
@@ -80,16 +71,23 @@ import { exampleNavEntries, mainNavEntries } from '@/data/panels'
   font-weight: 600;
 }
 
-.page-navigation-link--example {
-  color: var(--industrial-overstock);
+.page-navigation-link--utility {
+  display: inline-flex;
+  align-items: center;
 }
 
-.page-navigation-link--example:hover,
-.page-navigation-link--example.router-link-active {
-  color: var(--industrial-overstock);
-}
+@media (max-width: 720px) {
+  .page-navigation-group {
+    gap: 2px;
+  }
 
-.page-navigation-link--example.router-link-active {
-  border-bottom-color: var(--industrial-overstock);
+  .page-navigation-group--utility {
+    justify-content: flex-end;
+  }
+
+  .page-navigation-link {
+    padding: 8px 10px;
+    font-size: 13px;
+  }
 }
 </style>

@@ -23,6 +23,8 @@ import SpuGradeSettings from '@/components/SpuGradeSettings.vue'
 import {
   CATEGORIES,
   COEFFICIENT_KEYS,
+  MANUAL_BEHAVIOR_LABELS,
+  MANUAL_BEHAVIOR_NAMES,
   MODE_METRICS,
   SALES_WINDOW_DEFAULTS,
   createDefaultManualMode,
@@ -37,32 +39,21 @@ import {
   summarizeEvaluation,
   validateConfig,
 } from '@/stocking'
-import { DEFAULT_PANEL_KEY, getPanelConfigLabel, isExamplePanel } from '@/data/panels'
+import { MAIN_PANEL } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
 
-// 主面板与示例配置共用同一份备货配置（src/stocking/config.json），改哪边都一样。
-const props = defineProps({
-  panelKey: {
-    type: String,
-    default: DEFAULT_PANEL_KEY,
-  },
-})
-
+// 备货配置只有一份（src/stocking/config.json），改这里即全局生效。
 const WEIGHT_FIELDS = [
   { key: 'm1', label: '近 1 个月' },
   { key: 'm3', label: '近 3 个月月均' },
   { key: 'm12', label: '近 12 个月月均' },
 ]
 
-const inventoryStore = useInventoryStore(props.panelKey)
+const inventoryStore = useInventoryStore()
 const stockingStore = useStockingConfigStore()
 const inventoryItems = inventoryStore.inventoryItems
-const examplePanel = isExamplePanel(props.panelKey)
-const configLabel = getPanelConfigLabel(props.panelKey)
-const panelDescription = examplePanel
-  ? '示例配置：与主面板共用同一份备货配置，仅供对照演示。'
-  : '维护模式判定与备货系数；修改会写回 src/stocking/config.json。'
+const configLabel = MAIN_PANEL.configLabel
 
 // —— 配置草稿 ——
 const configDraft = ref(normalizeConfig(stockingStore.config))
@@ -409,7 +400,7 @@ function isRequiredManualMode(mode) {
 }
 
 function nextManualModeName(behavior) {
-  const base = behavior === 'exclude' ? '排除模式' : '自定系数模式'
+  const base = MANUAL_BEHAVIOR_NAMES[behavior] ?? MANUAL_BEHAVIOR_NAMES.custom
   const used = new Set(manualModes.value.map((mode) => mode.name))
   if (!used.has(base)) return base
   let index = 2
@@ -665,7 +656,7 @@ function handleFileCommand(command) {
       <div class="config-body">
         <header class="config-heading">
           <h1>{{ configLabel }}</h1>
-          <p>{{ panelDescription }}</p>
+          <p>维护模式判定与备货系数；修改会写回 src/stocking/config.json。</p>
         </header>
 
         <!-- 工作条：方案切换 + 保存状态 + 保存动作，滚动时吸顶 -->
@@ -962,7 +953,7 @@ function handleFileCommand(command) {
               <div class="manual-block__head">
                 <h3>手动模式</h3>
                 <ElTooltip
-                  content="行为由系统提供（自定系数 / 排除），名称、说明与默认系数可自行调整；内置的两种行为各保留一个。"
+                  content="行为由系统提供（自定系数 / 订单货），名称、说明与默认系数可自行调整；内置的两种行为各保留一个。"
                   placement="top"
                 >
                   <span class="config-info">i</span>
@@ -991,7 +982,7 @@ function handleFileCommand(command) {
                     aria-label="手动模式名称"
                   />
                   <span class="manual-mode-row__behavior">
-                    {{ mode.behavior === 'exclude' ? '排除' : '自定系数' }}
+                    {{ MANUAL_BEHAVIOR_LABELS[mode.behavior] ?? MANUAL_BEHAVIOR_LABELS.custom }}
                   </span>
                   <ElInput
                     v-model="mode.description"
@@ -1015,7 +1006,7 @@ function handleFileCommand(command) {
                     />
                   </template>
                   <template v-else>
-                    <span class="manual-mode-row__skip">不参与</span>
+                    <span class="manual-mode-row__skip">按订单填量</span>
                     <span class="manual-mode-row__skip" />
                     <span class="manual-mode-row__skip" />
                   </template>
@@ -1038,7 +1029,7 @@ function handleFileCommand(command) {
               <div class="manual-block__head">
                 <h3>手动 SKU 清单</h3>
                 <ElTooltip
-                  content="在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。自定系数按「公斤」比较；排除不参与备货策略。"
+                  content="在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。自定系数按「公斤」比较；订单货按客户订单填量。"
                   placement="top"
                 >
                   <span class="config-info">i</span>
@@ -1113,7 +1104,7 @@ function handleFileCommand(command) {
                         @update:model-value="(value) => updateManualRowCoefficient(row, coefficient.key, value)"
                       />
                     </template>
-                    <span v-else class="manual-table__exclude">排除：不参与备货策略</span>
+                    <span v-else class="manual-table__note">订单货：按客户订单填量</span>
                   </template>
                 </ElTableColumn>
                 <ElTableColumn label="操作" width="96" align="center">
@@ -1636,7 +1627,7 @@ function handleFileCommand(command) {
   font-variant-numeric: tabular-nums;
 }
 
-.manual-table__exclude {
+.manual-table__note {
   color: var(--industrial-muted);
   font-size: 12px;
 }

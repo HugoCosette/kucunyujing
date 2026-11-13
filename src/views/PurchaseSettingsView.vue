@@ -1,41 +1,81 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { ElButton, ElInput, ElMessage, ElOption, ElSelect, ElSwitch } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElInput, ElMessage, ElOption, ElSelect, ElSwitch } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
-import { DEFAULT_PANEL_KEY } from '@/data/panels'
+import VatRuleSettings from '@/components/VatRuleSettings.vue'
 import { useInventoryStore } from '@/stores/inventory'
 import { usePurchaseStore } from '@/stores/purchase'
 import {
   exportSettingsFile,
   importSettingsFile,
   normalizeSettings,
+  validateVatRules,
 } from '@/purchase'
 import { readWorkbookRows } from '@/utils/xlsxStream'
 
-// 下单设置：染厂清单、树形分类与分单人员、SKU 可选染厂，全部落盘到 src/purchase/settings.json。
+// 下单设置：染厂清单、分单人员表、树形分类、SKU 可选染厂、缸规则，全部落盘到 src/purchase/settings.json。
 // 页面用草稿编辑，点「确定」才写回；导入 Excel 只负责补齐名单，不动已有的启用状态与分配。
-const props = defineProps({
-  panelKey: {
-    type: String,
-    default: DEFAULT_PANEL_KEY,
-  },
-})
-
 const purchaseStore = usePurchaseStore()
-const inventoryStore = useInventoryStore(props.panelKey)
+const inventoryStore = useInventoryStore()
 
 const draft = ref(normalizeSettings(purchaseStore.settings))
+const selectedCategoryName = ref(draft.value.treeCategories[0]?.name ?? '')
+const selectedCategory = computed(
+  () => draft.value.treeCategories.find((entry) => entry.name === selectedCategoryName.value) ?? null,
+)
+
+// 分类被删掉 / 设置被替换（导入、放弃、确定）后，保证下拉框仍停在一个存在的分类上。
+watch(
+  () => draft.value.treeCategories.map((entry) => entry.name),
+  (names) => {
+    if (names.includes(selectedCategoryName.value)) return
+    selectedCategoryName.value = names[0] ?? ''
+  },
+)
 
 const signature = (settings) =>
   JSON.stringify({
     dyeFactories: settings.dyeFactories,
+    assignees: settings.assignees,
     treeCategories: settings.treeCategories,
     skuFactories: settings.skuFactories,
     skuCategoryOverrides: settings.skuCategoryOverrides,
+    vatRules: settings.vatRules,
+    defaultVatRuleId: settings.defaultVatRuleId,
+    spuVatRules: settings.spuVatRules,
   })
 const dirty = computed(() => signature(draft.value) !== signature(purchaseStore.settings))
 
+// 缸规则面板只读写草稿里的三个字段，保存 / 放弃仍由本页统一处理。
+const vatSettings = computed({
+  get: () => ({
+    vatRules: draft.value.vatRules,
+    defaultVatRuleId: draft.value.defaultVatRuleId,
+    spuVatRules: draft.value.spuVatRules,
+  }),
+  set: (value) => {
+    draft.value.vatRules = value.vatRules
+    draft.value.defaultVatRuleId = value.defaultVatRuleId
+    draft.value.spuVatRules = value.spuVatRules
+  },
+})
+
+// 品名（SPU）候选：SKU 数与该品名的月均条数合计，绑定缸规则时用来判断影响面。
+const spuOptions = computed(() => {
+  const map = new Map()
+  for (const item of inventoryStore.inventoryItems) {
+    const product = String(item.product ?? '').trim()
+    if (!product) continue
+    const entry = map.get(product) ?? { product, skuCount: 0, monthlyAvg: 0 }
+    entry.skuCount += 1
+    if (Number.isFinite(item.monthlyAvgCount)) entry.monthlyAvg += item.monthlyAvgCount
+    map.set(product, entry)
+  }
+  return [...map.values()].sort((a, b) => a.product.localeCompare(b.product, 'zh-CN'))
+})
+
 const newFactoryName = ref('')
+const newPersonName = ref('')
 const newCategoryName = ref('')
 const skuKeyword = ref('')
 const importInputRef = ref(null)
@@ -118,6 +158,26 @@ function removeFactory(index) {
   }
 }
 
+function addPerson() {
+  const name = newPersonName.value.trim()
+  if (!name) return
+  if (draft.value.assignees.includes(name)) {
+    ElMessage.warning(`分单人员「${name}」已存在`)
+    return
+  }
+  draft.value.assignees.push(name)
+  newPersonName.value = ''
+}
+
+// 人员从表里删除后，各分类里同名的分配一并清掉，避免留下选不到的名字。
+function removePerson(index) {
+  const [removed] = draft.value.assignees.splice(index, 1)
+  if (!removed) return
+  for (const category of draft.value.treeCategories) {
+    category.assignees = category.assignees.filter((person) => person !== removed)
+  }
+}
+
 function addCategory() {
   const name = newCategoryName.value.trim()
   if (!name) return
@@ -127,10 +187,21 @@ function addCategory() {
   }
   draft.value.treeCategories.push({ name, assignees: [] })
   newCategoryName.value = ''
+  selectedCategoryName.value = name
 }
 
 function removeCategory(index) {
-  draft.value.treeCategories.splice(index, 1)
+  const [removed] = draft.value.treeCategories.splice(index, 1)
+  if (removed && removed.name === selectedCategoryName.value) {
+    selectedCategoryName.value = draft.value.treeCategories[index]?.name ?? ''
+  }
+}
+
+function removeSelectedCategory() {
+  const index = draft.value.treeCategories.findIndex(
+    (entry) => entry.name === selectedCategoryName.value,
+  )
+  if (index >= 0) removeCategory(index)
 }
 
 function addSkuConfig(candidate) {
@@ -253,6 +324,11 @@ function discard() {
 }
 
 async function confirm() {
+  const errors = validateVatRules(draft.value.vatRules)
+  if (errors.length) {
+    ElMessage.error(errors[0].message)
+    return
+  }
   const saved = await purchaseStore.applySettings(draft.value)
   draft.value = normalizeSettings(saved.settings)
   ElMessage.success(
@@ -269,7 +345,7 @@ async function confirm() {
       <header class="settings-heading">
         <h1>下单设置</h1>
         <p>
-          维护可选的染厂、每个树形分类的分单人员，以及哪些 SKU 只能选哪些染厂。保存后写入
+          维护可选的染厂、分单人员表、树形分类的分单人员、哪些 SKU 只能选哪些染厂，以及按品名（SPU）生效的缸规则。保存后写入
           <code>src/purchase/settings.json</code>，采购下单页立即可用。
         </p>
       </header>
@@ -287,6 +363,8 @@ async function confirm() {
           </ElButton>
         </div>
       </div>
+
+      <VatRuleSettings v-model="vatSettings" :spus="spuOptions" />
 
       <section class="settings-card">
         <div class="settings-card__head">
@@ -333,9 +411,54 @@ async function confirm() {
       <section class="settings-card">
         <div class="settings-card__head">
           <div>
+            <h2>分单人员表</h2>
+            <p>
+              下单时的分单人员只能从这里选；在下方各树形分类里点人员名字即可分配。
+            </p>
+          </div>
+          <span class="settings-card__count">共 {{ draft.assignees.length }} 人</span>
+        </div>
+
+        <div class="settings-people" role="list" aria-label="分单人员表">
+          <span
+            v-for="(person, index) in draft.assignees"
+            :key="person"
+            class="person-chip person-chip--roster"
+            role="listitem"
+          >
+            {{ person }}
+            <button
+              type="button"
+              class="person-chip__remove"
+              :aria-label="`删除分单人员 ${person}`"
+              @click="removePerson(index)"
+            >
+              ×
+            </button>
+          </span>
+          <span v-if="draft.assignees.length === 0" class="settings-inline-empty">
+            还没有分单人员
+          </span>
+        </div>
+
+        <div class="settings-add">
+          <ElInput
+            v-model="newPersonName"
+            size="small"
+            placeholder="新增分单人员姓名"
+            class="settings-add__input"
+            @keyup.enter="addPerson"
+          />
+          <ElButton size="small" @click="addPerson">添加人员</ElButton>
+        </div>
+      </section>
+
+      <section class="settings-card">
+        <div class="settings-card__head">
+          <div>
             <h2>树形分类与分单人员</h2>
             <p>
-              一个 SKU 只属于一个树形分类（来自产品资料的「树形分类」列），分订单的分单人员下拉取该分类的名单。
+              一个 SKU 只属于一个树形分类（来自产品资料的「树形分类」列）。先在下拉框里选分类，再给这个分类打勾分单人员；下单页优先用这里勾选的人，分类没勾人时回退到分单人员表全部人员。
             </p>
           </div>
           <div class="settings-card__tools">
@@ -345,43 +468,61 @@ async function confirm() {
           </div>
         </div>
 
-        <div class="settings-table" role="table" aria-label="树形分类与分单人员">
-          <div class="settings-row settings-row--category settings-row--head" role="row">
-            <span role="columnheader">树形分类</span>
-            <span role="columnheader">分单人员</span>
-            <span role="columnheader">操作</span>
-          </div>
-          <div
-            v-for="(category, index) in draft.treeCategories"
-            :key="category.name"
-            class="settings-row settings-row--category"
-            role="row"
-          >
-            <span class="settings-cell">{{ category.name }}</span>
+        <div class="settings-category-picker">
+          <div class="settings-category-picker__row">
             <ElSelect
-              v-model="category.assignees"
+              v-model="selectedCategoryName"
               size="small"
-              multiple
               filterable
-              allow-create
-              default-first-option
-              collapse-tags
-              collapse-tags-tooltip
-              placeholder="添加分单人员"
-              aria-label="分单人员"
+              placeholder="选择树形分类"
+              class="settings-category-picker__select"
             >
               <ElOption
-                v-for="person in category.assignees"
-                :key="person"
-                :label="person"
-                :value="person"
-              />
+                v-for="category in draft.treeCategories"
+                :key="category.name"
+                :label="category.name"
+                :value="category.name"
+              >
+                <span class="settings-category-option">
+                  <span class="settings-category-option__name">{{ category.name }}</span>
+                  <span class="settings-category-option__count">
+                    {{ category.assignees.length }} 人
+                  </span>
+                </span>
+              </ElOption>
             </ElSelect>
-            <ElButton size="small" text type="danger" @click="removeCategory(index)">删除</ElButton>
+            <span class="settings-card__count">共 {{ draft.treeCategories.length }} 个分类</span>
           </div>
-          <p v-if="draft.treeCategories.length === 0" class="settings-empty">
-            还没有树形分类
-          </p>
+
+          <div v-if="selectedCategory" class="settings-category-editor">
+            <div class="settings-category-editor__head">
+              <strong class="settings-category-editor__name">{{ selectedCategory.name }}</strong>
+              <span class="settings-category-editor__count">
+                {{ selectedCategory.assignees.length }} 人已分配
+              </span>
+              <ElButton
+                class="settings-category-editor__remove"
+                size="small"
+                text
+                type="danger"
+                @click="removeSelectedCategory"
+              >
+                删除该分类
+              </ElButton>
+            </div>
+            <ElCheckboxGroup
+              v-model="selectedCategory.assignees"
+              class="settings-category-editor__people"
+            >
+              <ElCheckbox v-for="person in draft.assignees" :key="person" :value="person">
+                {{ person }}
+              </ElCheckbox>
+            </ElCheckboxGroup>
+            <span v-if="draft.assignees.length === 0" class="settings-inline-empty">
+              请先在「分单人员表」添加人员
+            </span>
+          </div>
+          <p v-else class="settings-empty">还没有树形分类</p>
         </div>
 
         <div class="settings-add">
@@ -648,12 +789,129 @@ async function confirm() {
   grid-template-columns: minmax(180px, 1fr) 72px 64px;
 }
 
-.settings-row--category {
-  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1.4fr) 64px;
-}
-
 .settings-row--sku {
   grid-template-columns: minmax(200px, 1.1fr) minmax(160px, 0.9fr) minmax(220px, 1.4fr) 64px;
+}
+
+.settings-people {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 2px 0 4px;
+}
+
+.person-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  color: var(--industrial-text);
+  background: var(--industrial-page);
+  border: 1px solid var(--industrial-grid);
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.person-chip--roster {
+  padding-right: 4px;
+}
+
+.person-chip__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  color: var(--industrial-muted);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.person-chip__remove:hover {
+  color: #b45454;
+  background: rgba(180, 84, 84, 0.12);
+}
+
+.settings-inline-empty {
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.settings-category-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--industrial-surface);
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 6px;
+}
+
+.settings-category-picker__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-category-picker__select {
+  width: min(340px, 100%);
+}
+
+.settings-category-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-category-option__count {
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.settings-category-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--industrial-grid-light);
+}
+
+.settings-category-editor__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--industrial-text);
+  font-size: 13px;
+}
+
+.settings-category-editor__name {
+  font-weight: 600;
+}
+
+.settings-category-editor__count {
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.settings-category-editor__remove {
+  margin-left: auto;
+}
+
+.settings-category-editor__people {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
 }
 
 .settings-cell {

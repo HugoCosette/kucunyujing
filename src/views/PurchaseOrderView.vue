@@ -4,22 +4,14 @@ import { ElButton, ElCheckbox, ElInput, ElMessage, ElMessageBox } from 'element-
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import SkuOrderEditor from '@/components/SkuOrderEditor.vue'
 import VirtualList from '@/components/VirtualList.vue'
-import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { useInventoryStore } from '@/stores/inventory'
 import { usePurchaseStore } from '@/stores/purchase'
-import { categoryForSku } from '@/purchase'
+import { categoryForSku, planOrderQuantity, resolveVatRule } from '@/purchase'
 import { formatQuantity } from '@/utils/inventory'
 
 // 采购下单：左侧是「本次采购清单」里的 SKU，右侧按染厂拆这张 SKU 的分订单。
 // 数据只来自主面板已采纳的需安排；分订单以唯一标识为键，重新导入后自动保留。
-const props = defineProps({
-  panelKey: {
-    type: String,
-    default: DEFAULT_PANEL_KEY,
-  },
-})
-
-const inventoryStore = useInventoryStore(props.panelKey)
+const inventoryStore = useInventoryStore()
 const purchaseStore = usePurchaseStore()
 
 const keyword = ref('')
@@ -37,16 +29,26 @@ const rows = computed(() =>
     const item = itemById.value.get(entry.id)
     const skuId = String(entry.skuId ?? item?.skuId ?? '').trim()
     const summary = purchaseStore.orderSummary(skuId)
+    const planned = Number(entry.planned) || 0
+    const product = item?.product ?? entry.product
+    const rule = resolveVatRule(purchaseStore.settings, { skuId, product })
     return {
       id: entry.id,
       key: entry.id,
       skuId,
-      product: item?.product ?? entry.product,
+      product,
       color: item?.color ?? entry.color,
       treeCategory: categoryForSku(purchaseStore.settings, skuId, item?.treeCategory),
-      planned: Number(entry.planned) || 0,
+      planned,
       ordered: summary.total,
       orderCount: summary.count,
+      vats: summary.vats,
+      monthlyAvgCount: item?.monthlyAvgCount,
+      // 建议下单量已按品名绑定的缸规则换算（缸数 × 每缸公斤）。
+      suggestion: planOrderQuantity(planned, rule, {
+        planned,
+        monthlyAvgCount: item?.monthlyAvgCount,
+      }),
     }
   }),
 )
@@ -91,6 +93,7 @@ const stats = computed(() => {
     skuCount: rows.value.length,
     planned: rows.value.reduce((sum, row) => sum + row.planned, 0),
     ordered: rows.value.reduce((sum, row) => sum + row.ordered, 0),
+    vats: rows.value.reduce((sum, row) => sum + row.vats, 0),
     pending: rows.value.length - orderedSkus,
   }
 })
@@ -124,7 +127,7 @@ function selectRow(row) {
           <div>
             <h1>采购下单</h1>
             <p>
-              在「本次采购清单」的需安排基础上，按染厂把每个 SKU 拆成多张分订单；分订单按唯一标识保存，重新导入不丢。
+              在「本次采购清单」的需安排基础上，按品名绑定的缸规则换算成整缸，再按染厂把每个 SKU 拆成多张分订单；分订单按唯一标识保存，重新导入不丢。
             </p>
           </div>
           <dl class="purchase-stats">
@@ -139,6 +142,10 @@ function selectRow(row) {
             <div class="purchase-stats__item">
               <dt>已下单合计</dt>
               <dd>{{ formatQuantity(stats.ordered) }}</dd>
+            </div>
+            <div class="purchase-stats__item">
+              <dt>合计缸数</dt>
+              <dd>{{ formatQuantity(stats.vats) }}</dd>
             </div>
             <div class="purchase-stats__item">
               <dt>还没下单</dt>
@@ -178,13 +185,19 @@ function selectRow(row) {
                 @click="selectRow(row)"
               >
                 <span class="purchase-sku__name">{{ row.product }} · {{ row.color }}</span>
-                <span class="purchase-sku__meta">{{ row.treeCategory || '树形分类未维护' }}</span>
+                <span class="purchase-sku__meta">
+                  {{ row.treeCategory || '树形分类未维护' }}
+                  <template v-if="row.suggestion.kgPerVat">
+                    · 每缸 {{ formatQuantity(row.suggestion.kgPerVat) }} 公斤
+                  </template>
+                </span>
                 <span class="purchase-sku__qty">
                   需安排 {{ formatQuantity(row.planned) }} · 已下单
                   <strong :class="{ 'purchase-sku__qty--done': row.ordered > 0 }">
                     {{ formatQuantity(row.ordered) }}
                   </strong>
                   <template v-if="row.orderCount">（{{ row.orderCount }} 张）</template>
+                  <template v-if="row.vats"> · {{ formatQuantity(row.vats) }} 缸</template>
                 </span>
               </button>
             </template>

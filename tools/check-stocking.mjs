@@ -44,13 +44,13 @@ const baselineMonth = findBaselineMonth(rows)
 const evaluator = createEvaluator(config, { baselineMonth })
 console.log('baselineMonth =', baselineMonth)
 
-// 手动策略：自定系数模式按「条」比较；排除模式不参与计算。
+// 手动策略：自定系数模式按「条」比较；订单货不参与计算。
 const manualRow = make(new Array(12).fill(10), { skuId: 'manual', monthlyAvg: 10, stock: 5000 })
 const manualEvaluator = createEvaluator(config, {
   baselineMonth,
   manualOverrides: new Map([
     ['manual', { modeId: 'manual-custom', coefficients: { redLine: 30, normal: 60, peak: 90 } }],
-    ['tail', { modeId: 'manual-exclude' }],
+    ['bulk', { modeId: 'manual-order' }],
   ]),
 })
 const manualRowEval = evaluateItem({ ...manualRow, ...rows[1], skuId: 'manual' }, manualEvaluator)
@@ -65,8 +65,17 @@ console.log(
   '灯=',
   manualCalc.urgencyText,
 )
-const excludeManual = evaluateItem({ ...rows[2], skuId: 'tail' }, manualEvaluator)
-console.log('manual exclude ->', excludeManual.modeLabel, '参与=', excludeManual.modeParticipates)
+const orderManual = evaluateItem({ ...rows[2] }, manualEvaluator)
+console.log(
+  'manual order ->',
+  orderManual.modeLabel,
+  '参与=',
+  orderManual.modeParticipates,
+  '行为=',
+  orderManual.manualBehavior,
+  '灯=',
+  calculateInventoryRow(orderManual).urgencyText,
+)
 
 for (const row of rows) {
   const evaluated = evaluateItem(row, evaluator)
@@ -86,4 +95,4 @@ for (const row of rows) {
   )
 }
 
-// 手动策略：自定系数模式按「条」比较；排除模式不参与计算。
+// 手动策略：自定系数模式按「条」比较；订单货不参与计算。

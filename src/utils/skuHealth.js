@@ -16,7 +16,7 @@ export function buildScoringMetrics(row, salesEntry = null) {
   }
 }
 
-// 专属品 / 尾货 / 排除模式 / 模式缺省一律按「不参与」；按量模式走 2 项专属判定，没有综合分。
+// 专属品 / 尾货 / 模式缺省一律按「不参与」；按量模式走 2 项专属判定，没有综合分。
 export function evaluateRowHealth({ row, salesEntry = null, config, bulkHealthScoring = null }) {
   const participates = Boolean(row?.strategyAvailable) && !row?.excluded
   const metrics = buildScoringMetrics(row, salesEntry)

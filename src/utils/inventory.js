@@ -5,6 +5,13 @@
 
 function resolveIssue(item, kgFactor) {
   if (item.excluded) {
+    // 订单货只是「不做预测」，数量和预警都不算，但照常进采购清单下单。
+    if (item.manualBehavior === 'order') {
+      return {
+        long: '订单货：按客户订单填量，不参与预警与评分',
+        short: '订单货',
+      }
+    }
     return {
       long: `${item.modeLabel || item.modeName || '该模式'}：不参与备货计算`,
       short: item.exclusive ? '专属品' : item.modeName || '不参与',
@@ -89,7 +96,7 @@ export function calculateInventoryRow(item) {
   const shortage = strategyAvailable ? normalStock - projectedStock : null
 
   const urgency = item.excluded
-    ? { text: '不参与', tone: 'unavailable' }
+    ? { text: item.manualBehavior === 'order' ? '订单货' : '不参与', tone: 'unavailable' }
     : strategyAvailable
       ? getUrgency(indicator, coefficients)
       : { text: '模式缺省', tone: 'unavailable' }
@@ -143,12 +150,6 @@ export function formatRatio(value) {
   if (value === null || value === undefined) return '--'
   if (!Number.isFinite(value)) return '∞'
   return value.toFixed(2)
-}
-
-export function formatFactors(row) {
-  if (row.excluded) return row.exclusive ? '专属品' : '不参与'
-  if (!row.strategyAvailable) return '缺省'
-  return `${row.redLineFactor}/${row.normalFactor}/${row.peakFactor}`
 }
 
 export function formatProductEditorValue(product) {

@@ -15,6 +15,11 @@ const MANUAL_SKUS_FILE = path.resolve(
   'src/stocking/manualSkus.json',
 )
 
+const HIDDEN_SKUS_FILE = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  'src/stocking/hiddenSkus.json',
+)
+
 const PURCHASE_SETTINGS_FILE = path.resolve(
   fileURLToPath(new URL('.', import.meta.url)),
   'src/purchase/settings.json',
@@ -29,6 +34,7 @@ const PURCHASE_ORDERS_FILE = path.resolve(
 const WATCHED_CONFIG_FILES = [
   STOCKING_CONFIG_FILE,
   MANUAL_SKUS_FILE,
+  HIDDEN_SKUS_FILE,
   PURCHASE_SETTINGS_FILE,
   PURCHASE_ORDERS_FILE,
 ]
@@ -68,6 +74,7 @@ function stockingConfigFilePlugin() {
 
       registerSaveRoute('/__stocking-config/save', STOCKING_CONFIG_FILE)
       registerSaveRoute('/__stocking-manual/save', MANUAL_SKUS_FILE)
+      registerSaveRoute('/__stocking-hidden/save', HIDDEN_SKUS_FILE)
       registerSaveRoute('/__purchase-settings/save', PURCHASE_SETTINGS_FILE)
       registerSaveRoute('/__purchase-orders/save', PURCHASE_ORDERS_FILE)
     },

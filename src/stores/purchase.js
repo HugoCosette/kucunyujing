@@ -37,8 +37,10 @@ export const usePurchaseStore = defineStore('purchase', () => {
   }
 
   // 录入是连续的（改数量、选染厂），写盘防抖 400ms；离开页面时 flush 一次。
+  // 运行态保留还没填写的空白行（否则刚点「添加分订单」的行会被归一化丢掉），
+  // 落盘时 saveOrders 按默认口径丢弃空白行。
   function commitOrders(next) {
-    orders.value = normalizeOrders(next)
+    orders.value = normalizeOrders(next, { keepBlankEntries: true })
     if (ordersSaveTimer) clearTimeout(ordersSaveTimer)
     ordersSaveTimer = window.setTimeout(() => {
       ordersSaveTimer = 0

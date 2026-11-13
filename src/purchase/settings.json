@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updatedAt": "2026-11-11T00:00:00.000Z",
+  "version": 3,
+  "updatedAt": "2026-11-12T09:30:00.000Z",
   "dyeFactories": [
     {
       "id": "df-1",
@@ -43,18 +43,27 @@
       "enabled": true
     }
   ],
+  "assignees": [
+    "阿婷",
+    "刘玉红",
+    "小凤",
+    "钟秋兰",
+    "刘燕",
+    "小良"
+  ],
   "treeCategories": [
     {
       "name": "欧根纱成品",
       "assignees": [
         "阿婷",
-        "刘玉红"
+        "刘玉红",
+        "小凤"
       ]
     },
     {
       "name": "小凤-薄布类",
       "assignees": [
-        "小凤"
+        "阿婷"
       ]
     },
     {
@@ -216,5 +225,37 @@
     }
   ],
   "skuFactories": {},
-  "skuCategoryOverrides": {}
+  "skuCategoryOverrides": {},
+  "vatRules": [
+    {
+      "id": "vr-standard",
+      "name": "标准大货补单",
+      "bandKey": "planned",
+      "remainder": "nearest",
+      "remainderThreshold": 0.5,
+      "minVats": 1,
+      "bands": [
+        { "upTo": 30, "action": "skip", "value": 0 },
+        { "upTo": 120, "action": "fixed", "value": 80 },
+        { "upTo": 200, "action": "fixed", "value": 200 },
+        { "upTo": null, "action": "round", "value": 100 }
+      ]
+    },
+    {
+      "id": "vr-small",
+      "name": "小批量补单",
+      "bandKey": "planned",
+      "remainder": "nearest",
+      "remainderThreshold": 0.5,
+      "minVats": 1,
+      "bands": [
+        { "upTo": 50, "action": "skip", "value": 0 },
+        { "upTo": 100, "action": "fixed", "value": 60 },
+        { "upTo": null, "action": "round", "value": 10 }
+      ]
+    }
+  ],
+  "defaultVatRuleId": "vr-standard",
+  "spuVatRules": {},
+  "skuVatRules": {}
 }

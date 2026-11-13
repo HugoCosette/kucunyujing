@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { ElButton, ElDialog } from 'element-plus'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 
-// 主面板唯一入口：一次导入总表 + 销售表，两者缺一不可。
+// 确认弹窗：分表清洗出的总表 + 销售表在这里预览，两者缺一不可。
 const props = defineProps({
   modelValue: {
     type: Boolean,
@@ -50,7 +50,7 @@ function closeDialog() {
   >
     <template v-if="summary">
       <p class="import-sources__tip">
-        必须一次选择两个文件：总表（库存与出库数据）与销售表（动销指标 + 1-12 月条数/重量）。两个文件都按“唯一标识”关联同一个 SKU，缺一个都不能导入。
+        由分表清洗得到总表（库存与出库数据）与销售表（动销指标 + 1-12 月条数/重量）。两个结果表都按“唯一标识”关联同一个 SKU，缺一个都不能导入。
       </p>
 
       <section v-if="summary.inventory" class="import-sources__section">

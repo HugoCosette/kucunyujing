@@ -1,7 +1,6 @@
 import { ref, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
 import { initialInventoryItems } from '@/data/inventoryItems'
-import { DEFAULT_PANEL_KEY, inventoryPanels } from '@/data/panels'
 
 // 演示数据缺少唯一标识、总出库数量、动销指标与公斤系数：按周消耗折算一组稳定数值，
 // 让模式判定在未导入 Excel 时同样可见；导入后一律以 Excel 为准。
@@ -37,17 +36,5 @@ function createInventoryState() {
   return { inventoryItems, purchaseList, plannedUndoHistory, salesSheet }
 }
 
-// 每个面板一份独立状态：main 为主面板，example 为示例面板。
-// ⚠️ 示例数据：example 的库存、采购清单与撤销记录仅作对照演示，勿改示例数据。
-const inventoryStoreDefinitions = Object.fromEntries(
-  inventoryPanels.map((panel) => [
-    panel.key,
-    defineStore(`inventory-${panel.key}`, () => createInventoryState(panel.key)),
-  ]),
-)
-
-export function useInventoryStore(panelKey = DEFAULT_PANEL_KEY) {
-  const definition =
-    inventoryStoreDefinitions[panelKey] ?? inventoryStoreDefinitions[DEFAULT_PANEL_KEY]
-  return definition()
-}
+// 库存、采购清单、撤销记录与销售表都是全局唯一的一份运行状态。
+export const useInventoryStore = defineStore('inventory', createInventoryState)

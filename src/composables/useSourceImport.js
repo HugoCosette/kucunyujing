@@ -2,101 +2,13 @@ import { ref, shallowRef } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useInventoryStore } from '@/stores/inventory'
 import { applySourceImport } from '@/utils/applySourceImport'
-import { parseInventorySheet } from '@/utils/inventoryImport'
-import { attachSalesToInventory, parseSalesSheet } from '@/utils/salesImport'
-import { analyzeSourceSheet, describeMissingColumns } from '@/utils/sourceImport'
-import { readWorkbookRows } from '@/utils/xlsxSheet'
 
-const MAX_FILE_SIZE = 50 * 1024 * 1024
-
-// 唯一导入流程：总表与销售表必须同时选中，两个文件都按“唯一标识”关联到同一个 SKU。
-// 分表清洗导入（useSplitImport）清洗出总表与销售表后，同样从这里打开预览并确认。
-export function useSourceImport({ panelKey, onApplied }) {
-  const inventoryStore = useInventoryStore(panelKey)
-  const fileInputRef = ref(null)
+// 导入确认：分表清洗（useSplitImport）得到总表 + 销售表后，从这里打开预览并确认写入。
+export function useSourceImport({ onApplied }) {
+  const inventoryStore = useInventoryStore()
   const dialogVisible = ref(false)
   // 导入结果含上万条 SKU 的映射表，用 shallowRef 避免深响应式包装。
   const summary = shallowRef(null)
-
-
-  function trigger() {
-    const input = fileInputRef.value
-    if (!input) return
-    input.value = ''
-    input.click()
-  }
-
-  async function handleFilesChange(event) {
-    const input = event.target
-    const files = Array.from(input.files ?? [])
-    input.value = ''
-    if (!files.length) return
-
-    const problems = []
-    let inventory = null
-    let sales = null
-
-    for (const file of files) {
-      if (!/\.xlsx$/i.test(file.name)) {
-        problems.push({ fileName: file.name, message: '仅支持 .xlsx 格式的 Excel 文件' })
-        continue
-      }
-      if (file.size > MAX_FILE_SIZE) {
-        problems.push({ fileName: file.name, message: '文件超过 50MB，请拆分后再导入' })
-        continue
-      }
-
-      try {
-        const { sheetName, rows } = readWorkbookRows(await file.arrayBuffer())
-        const roles = analyzeSourceSheet(rows)
-        const problem = describeMissingColumns(roles)
-        if (problem) {
-          problems.push({ fileName: file.name, message: problem })
-          continue
-        }
-
-        if (roles.hasInventoryColumns) {
-          if (inventory) {
-            problems.push({ fileName: file.name, message: '已选择过总表，本文件的总表数据未导入' })
-          } else {
-            inventory = { fileName: file.name, sheetName, ...parseInventorySheet(rows) }
-          }
-        }
-        if (roles.hasSalesColumns) {
-          if (sales) {
-            problems.push({ fileName: file.name, message: '已选择过销售表，本文件的销售数据未导入' })
-          } else {
-            sales = { fileName: file.name, sheetName, ...parseSalesSheet(rows) }
-          }
-        }
-      } catch (error) {
-        console.error('Failed to read source workbook', file.name, error)
-        problems.push({
-          fileName: file.name,
-          message: error instanceof Error ? error.message : '未知错误',
-        })
-      }
-    }
-
-    if (!inventory) {
-      problems.push({ fileName: '总表', message: '必须同时导入总表（含库存列）' })
-    }
-    if (!sales) {
-      problems.push({ fileName: '销售表', message: '必须同时导入销售表（含动销指标或月份列）' })
-    }
-
-    if (!inventory && !sales) {
-      ElMessage.error(problems[problems.length - 1]?.message ?? '未识别到可导入的表格')
-      return
-    }
-
-    if (inventory && sales) {
-      sales = { ...sales, merge: attachSalesToInventory(sales.rows, inventory.items) }
-    }
-
-    summary.value = { inventory, sales, problems }
-    dialogVisible.value = true
-  }
 
   function cancel() {
     dialogVisible.value = false
@@ -123,11 +35,8 @@ export function useSourceImport({ panelKey, onApplied }) {
   }
 
   return {
-    fileInputRef,
     dialogVisible,
     summary,
-    trigger,
-    handleFilesChange,
     openSummary,
     cancel,
     confirm,

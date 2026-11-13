@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-12T10:33:42.100Z",
+  "products": [
+    "123"
+  ],
+  "skus": {
+    "MANUAL-0001": {
+      "product": "40D涤安",
+      "color": "666#本白77777"
+    }
+  }
+}

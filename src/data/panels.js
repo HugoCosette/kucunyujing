@@ -1,5 +1,3 @@
-export const DEFAULT_PANEL_KEY = 'main'
-
 // 主面板：业务主线。新的需求、数据结构和交互调整都在主面板与“配置信息”中完成。
 export const MAIN_PANEL = {
   key: 'main',
@@ -20,58 +18,38 @@ export const MAIN_PANEL = {
   configLabel: '配置信息',
   configPath: '/config',
   configRouteName: 'config',
+  // 屏蔽列表：独立页面，入口固定在顶部导航右侧，与主面板业务入口分开。
+  hiddenLabel: '屏蔽列表',
+  hiddenPath: '/hidden',
+  hiddenRouteName: 'hidden',
 }
 
-// ⚠️ 示例数据区：示例面板与示例配置只用于对照演示。
-// 新增或调整功能时只改主面板，不要修改这里的示例入口、示例数据或示例配置。
-export const EXAMPLE_PANEL = {
-  key: 'example',
-  label: '示例面板',
-  path: '/example',
-  routeName: 'example',
-  configLabel: '示例配置',
-  configPath: '/example/config',
-  configRouteName: 'exampleConfig',
-}
+// 顶部导航入口：主面板 → 销售表 → 采购下单 → 下单设置 → 配置信息。
+export const mainNavEntries = [
+  { key: MAIN_PANEL.key, label: MAIN_PANEL.label, path: MAIN_PANEL.path },
+  { key: `${MAIN_PANEL.key}-all`, label: MAIN_PANEL.allLabel, path: MAIN_PANEL.allPath },
+  {
+    key: `${MAIN_PANEL.key}-purchase`,
+    label: MAIN_PANEL.purchaseLabel,
+    path: MAIN_PANEL.purchasePath,
+  },
+  {
+    key: `${MAIN_PANEL.key}-purchase-settings`,
+    label: MAIN_PANEL.purchaseSettingsLabel,
+    path: MAIN_PANEL.purchaseSettingsPath,
+  },
+  {
+    key: `${MAIN_PANEL.key}-config`,
+    label: MAIN_PANEL.configLabel,
+    path: MAIN_PANEL.configPath,
+  },
+]
 
-export const inventoryPanels = [MAIN_PANEL, EXAMPLE_PANEL]
-
-function toNavEntries(panel) {
-  const entries = [{ key: panel.key, label: panel.label, path: panel.path }]
-  // 只有声明了 allPath 的面板才提供“销售表”入口（目前仅主面板）。
-  if (panel.allPath) {
-    entries.push({ key: `${panel.key}-all`, label: panel.allLabel, path: panel.allPath })
-  }
-  // 采购下单与下单设置只挂在声明了 purchasePath 的面板下（目前仅主面板）。
-  if (panel.purchasePath) {
-    entries.push({
-      key: `${panel.key}-purchase`,
-      label: panel.purchaseLabel,
-      path: panel.purchasePath,
-    })
-    entries.push({
-      key: `${panel.key}-purchase-settings`,
-      label: panel.purchaseSettingsLabel,
-      path: panel.purchaseSettingsPath,
-    })
-  }
-  entries.push({
-    key: `${panel.key}-config`,
-    label: panel.configLabel,
-    path: panel.configPath,
-  })
-  return entries
-}
-
-// 顶部导航的左右两组入口：主面板组在左，示例数据组在右。
-export const mainNavEntries = toNavEntries(MAIN_PANEL)
-export const exampleNavEntries = toNavEntries(EXAMPLE_PANEL)
-
-export function isExamplePanel(panelKey) {
-  return panelKey === EXAMPLE_PANEL.key
-}
-
-export function getPanelConfigLabel(panelKey) {
-  const panel = inventoryPanels.find((entry) => entry.key === panelKey) ?? MAIN_PANEL
-  return panel.configLabel
-}
+// 顶部导航右侧的辅助入口：屏蔽列表。
+export const utilityNavEntries = [
+  {
+    key: `${MAIN_PANEL.key}-hidden`,
+    label: MAIN_PANEL.hiddenLabel,
+    path: MAIN_PANEL.hiddenPath,
+  },
+]

@@ -30,11 +30,12 @@ export function assigneesForCategory(settings, category) {
   return entry?.assignees ?? []
 }
 
-// 分类没维护人员时退化为"全部人员"，避免下单被名单缺失卡住。
+// 分单人员优先取该 SKU 树形分类里维护的人；分类没维护人员时回退到
+// 「分单人员表」的全部人员，避免下单时下拉为空、无人可选。
 export function assigneesForSku(settings, skuId, importedCategory) {
   const names = assigneesForCategory(settings, categoryForSku(settings, skuId, importedCategory))
   if (names.length) return names
-  return [...new Set((settings?.treeCategories ?? []).flatMap((item) => item.assignees))]
+  return [...(settings?.assignees ?? [])]
 }
 
 export function findFactoryById(settings, factoryId) {
@@ -48,16 +49,19 @@ export function findFactoryByName(settings, name) {
   return (settings?.dyeFactories ?? []).find((factory) => factory.name === target) ?? null
 }
 
-// 分订单合计：需安排是公斤，这里同口径累加。
+// 分订单合计：需安排是公斤，这里同口径累加；缸数单独合计，方便和染厂对缸。
 export function summarizeOrders(entries) {
   let total = 0
   let counted = 0
+  let vats = 0
   for (const entry of entries ?? []) {
     const quantity = Number(entry?.quantity)
     if (Number.isFinite(quantity) && quantity > 0) {
       total += quantity
       counted += 1
+      const vatCount = Number(entry?.vatCount)
+      if (Number.isFinite(vatCount) && vatCount > 0) vats += vatCount
     }
   }
-  return { total, counted }
+  return { total, counted, vats }
 }

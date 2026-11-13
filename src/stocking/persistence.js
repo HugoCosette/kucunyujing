@@ -1,5 +1,4 @@
 import fileProfiles from './config.json'
-import { DEMO_PROFILE_DISABLED } from './demoProfile.js'
 import { createDefaultConfig } from './defaults.js'
 import { getActiveProfile, normalizeConfig, normalizeProfileFile } from './validate.js'
 
@@ -11,22 +10,11 @@ export const CONFIG_STORAGE_KEY = 'stocking-config:v4'
 
 let currentProfiles = null
 
-// 演示配置已封禁：无论来自源文件还是缓存，都从方案列表里剔除。
-function withoutDisabledProfiles(profiles) {
-  if (!DEMO_PROFILE_DISABLED) return profiles
-  const kept = profiles.profiles.filter((profile) => profile.id !== 'demo')
-  if (!kept.length) return profiles
-  const activeProfileId = kept.some((profile) => profile.id === profiles.activeProfileId)
-    ? profiles.activeProfileId
-    : kept[0].id
-  return { ...profiles, profiles: kept, activeProfileId }
-}
-
 function readCache() {
   try {
     const raw = window.localStorage.getItem(CONFIG_STORAGE_KEY)
     if (!raw) return null
-    return withoutDisabledProfiles(normalizeProfileFile(JSON.parse(raw)))
+    return normalizeProfileFile(JSON.parse(raw))
   } catch (error) {
     console.warn('Failed to read cached stocking config', error)
     return null
@@ -50,7 +38,7 @@ function stampOf(profiles) {
 export function loadProfiles() {
   if (currentProfiles) return currentProfiles
 
-  const fileSnapshot = withoutDisabledProfiles(normalizeProfileFile(fileProfiles))
+  const fileSnapshot = normalizeProfileFile(fileProfiles)
   const cached = readCache()
   currentProfiles =
     cached && stampOf(cached) > stampOf(fileSnapshot) ? cached : fileSnapshot
@@ -106,9 +94,7 @@ async function writeProfilesFile(profiles) {
 
 // 保存：先更新运行时与本地缓存，开发态再写回 src/stocking/config.json。
 export async function saveProfiles(profiles) {
-  const next = withoutDisabledProfiles(
-    normalizeProfileFile({ ...profiles, updatedAt: new Date().toISOString() }),
-  )
+  const next = normalizeProfileFile({ ...profiles, updatedAt: new Date().toISOString() })
   currentProfiles = next
   writeCache(next)
   const written = await writeProfilesFile(next)
@@ -169,5 +155,5 @@ export function exportConfigFile(profiles) {
 
 // 导入：只认 v4 多方案文件，v1/v2/v3 旧配置一律按默认重建。
 export function importConfigFile(text) {
-  return withoutDisabledProfiles(normalizeProfileFile(JSON.parse(text)))
+  return normalizeProfileFile(JSON.parse(text))
 }

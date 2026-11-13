@@ -1,5 +1,4 @@
 import fileManual from './manualSkus.json'
-import { mapLegacyManualModeId } from './defaults.js'
 import { normalizeConfig } from './validate.js'
 
 // 手动清单：唯一标识 → { modeId, coefficients }。
@@ -17,14 +16,15 @@ function toNumber(value) {
 
 function normalizeEntry(entry, config) {
   if (!entry || typeof entry !== 'object') return null
-  const modeId = mapLegacyManualModeId(String(entry.modeId ?? '').trim())
+  const modeId = String(entry.modeId ?? '').trim()
   if (!modeId) return null
 
   const modes = normalizeConfig(config).strategies.find((s) => s.behavior === 'manual')?.modes ?? []
   const mode = modes.find((item) => item.id === modeId)
   if (!mode) return null
 
-  if (mode.behavior === 'exclude') return { modeId }
+  // 订单货不使用系数：只记模式归属，切换模式后不会残留上一次的系数。
+  if (mode.behavior === 'order') return { modeId }
 
   const source = entry.coefficients ?? mode.defaultCoefficients ?? {}
   const coefficients = {

@@ -9,11 +9,11 @@ import {
   BUILTIN_MANUAL_MODES,
   BUILTIN_STRATEGIES,
   CONFIG_VERSION,
+  MANUAL_BEHAVIOR_NAMES,
   PROFILE_FILE_VERSION,
   createDefaultAutoModes,
   createDefaultConfig,
   createDefaultManualMode,
-  mapLegacyManualModeId,
   normalizeManualBehavior,
 } from './defaults.js'
 import { normalizeScoring, validateScoring, normalizeBulkScoring, validateBulkScoring } from './scoring.js'
@@ -121,11 +121,11 @@ function normalizeAutoModes(modes) {
 function normalizeManualMode(mode, index) {
   const source = isPlainObject(mode) ? mode : {}
   const behavior = normalizeManualBehavior(source.behavior)
-  const id = mapLegacyManualModeId(String(source.id ?? '').trim()) || nextId(`manual-${behavior}`)
+  const id = String(source.id ?? '').trim() || nextId(`manual-${behavior}`)
   const rawName = String(source.name ?? '').trim()
-  const fallbackName = behavior === 'exclude' ? '排除模式' : '自定系数模式'
-  // 旧版内置名跟随改名（「滞销模式」→「排除模式」、「自定模式」→「自定系数模式」）；其它自定义名称原样保留。
-  const legacyName = behavior === 'exclude' ? '滞销模式' : '自定模式'
+  const fallbackName = MANUAL_BEHAVIOR_NAMES[behavior] ?? MANUAL_BEHAVIOR_NAMES.custom
+  // 旧版内置名跟随改名（「自定模式」→「自定系数模式」）；其它自定义名称原样保留。
+  const legacyName = behavior === 'custom' ? '自定模式' : ''
   const name = rawName === legacyName ? fallbackName : rawName || fallbackName
   const result = {
     id,
@@ -144,11 +144,17 @@ function normalizeManualMode(mode, index) {
   return result
 }
 
-// 手动策略：两种内置行为（custom / exclude）各保留一个，其余为用户自定义的模式。
+// 手动策略：两种内置行为（custom / order）各保留一个，其余为用户自定义的模式。
+// 已下线的手动行为（exclude / 旧名 slow）在加载旧方案时整条丢弃。
+const REMOVED_MANUAL_BEHAVIORS = new Set(['exclude', 'slow'])
+
 function normalizeManualModes(modes) {
-  const list = (Array.isArray(modes) ? modes : []).map((mode, index) =>
-    normalizeManualMode(mode, index),
-  )
+  const list = (Array.isArray(modes) ? modes : [])
+    .filter(
+      (mode) =>
+        !(isPlainObject(mode) && REMOVED_MANUAL_BEHAVIORS.has(String(mode.behavior ?? ''))),
+    )
+    .map((mode, index) => normalizeManualMode(mode, index))
   const result = [...list]
   for (const builtin of BUILTIN_MANUAL_MODES) {
     if (result.some((mode) => mode.behavior === builtin.behavior)) continue

@@ -4,21 +4,13 @@ import { ElButton, ElInput } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
-import { DEFAULT_PANEL_KEY } from '@/data/panels'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 import { SALES_MONTH_FIELDS, SALES_RATIO_COLUMNS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
 import { useInventoryStore } from '@/stores/inventory'
 import { groupTableRowsByProduct } from '@/utils/productGroups'
 
 // 销售表：品名、颜色与 4 个动销指标取主面板数据，1-12 月条数与重量由“导入销售表”叠加进来。
-const props = defineProps({
-  panelKey: {
-    type: String,
-    default: DEFAULT_PANEL_KEY,
-  },
-})
-
-const inventoryStore = useInventoryStore(props.panelKey)
+const inventoryStore = useInventoryStore()
 const inventoryItems = inventoryStore.inventoryItems
 const salesSheet = computed(() => inventoryStore.salesSheet)
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
@@ -346,7 +338,7 @@ onBeforeUnmount(() => {
           }} · 当前匹配 {{ matchedSkuCount.toLocaleString('zh-CN') }} 个SKU；{{ metricSourceText }}
         </span>
         <span v-else class="sales-hint">
-          未导入销售表：请在主面板一次性导入“总表 + 销售表”，动销指标与 1-12 月数据都来自销售表
+          未导入销售表：请在主面板用「导入分表」清洗后导入，动销指标与 1-12 月数据都来自销售表
         </span>
       </div>
     </div>
@@ -446,7 +438,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="tableVirtualRows.total === 0" class="sales-vtable__empty">
-          {{ appliedKeyword ? '没有匹配的数据' : '暂无数据，请先在主面板导入总表与销售表' }}
+          {{ appliedKeyword ? '没有匹配的数据' : '暂无数据，请先在主面板用「导入分表」导入' }}
         </div>
       </div>
     </div>
@@ -454,7 +446,6 @@ onBeforeUnmount(() => {
     <SkuDetailDialog
       v-model:visible="skuDetailVisible"
       :item="skuDetailItem"
-      :panel-key="panelKey"
     />
   </main>
 </template>

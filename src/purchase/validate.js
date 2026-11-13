@@ -1,7 +1,9 @@
-// 下单设置的归一化：染厂清单、树形分类与分单人员、SKU 可选染厂、SKU 分类覆盖。
+// 下单设置的归一化：染厂清单、分单人员表、树形分类、SKU 可选染厂、SKU 分类覆盖、缸规则。
 // 这里只保证结构稳定与去重，不做业务校验，页面可以放心地把任意脏数据丢进来。
 
-export const SETTINGS_VERSION = 1
+import { VAT_RULE_NONE, normalizeVatRules } from './vat.js'
+
+export const SETTINGS_VERSION = 3
 export const ORDERS_VERSION = 1
 
 function text(value) {
@@ -69,6 +71,26 @@ export function normalizeSettings(raw) {
     treeCategories.push({ name, assignees })
   }
 
+  // 分单人员表：下单时可选的员工总名单。v1 设置没有这个字段，用各分类已维护的人员补齐。
+  const assignees = []
+  const seenPeople = new Set()
+  const addPerson = (value) => {
+    const person = typeof value === 'string' ? text(value) : text(value?.name)
+    if (!person || seenPeople.has(person)) return
+    seenPeople.add(person)
+    assignees.push(person)
+  }
+  for (const person of asArray(source.assignees)) addPerson(person)
+  if (!Array.isArray(source.assignees)) {
+    for (const entry of treeCategories) {
+      for (const person of entry.assignees) addPerson(person)
+    }
+  }
+  // 分类里的人员只能来自分单人员表：名单外的名字下单时选不到，直接清掉。
+  for (const entry of treeCategories) {
+    entry.assignees = entry.assignees.filter((person) => seenPeople.has(person))
+  }
+
   const factoryIds = new Set(dyeFactories.map((factory) => factory.id))
   const skuFactories = {}
   for (const [skuId, ids] of Object.entries(asObject(source.skuFactories))) {
@@ -85,18 +107,41 @@ export function normalizeSettings(raw) {
     if (key && value) skuCategoryOverrides[key] = value
   }
 
+  // 缸规则：v1 / v2 设置没有这部分，归一化时补上默认两条规则，升级后即可直接使用。
+  const vatRules = normalizeVatRules(source.vatRules)
+  const vatRuleIds = new Set(vatRules.map((rule) => rule.id))
+  const defaultVatRuleId = vatRuleIds.has(text(source.defaultVatRuleId))
+    ? text(source.defaultVatRuleId)
+    : vatRules[0]?.id ?? ''
+
+  const vatBindings = (rawBindings) => {
+    const result = {}
+    for (const [product, ruleId] of Object.entries(asObject(rawBindings))) {
+      const key = text(product)
+      const value = text(ruleId)
+      if (!key) continue
+      if (value === VAT_RULE_NONE || vatRuleIds.has(value)) result[key] = value
+    }
+    return result
+  }
+
   return {
     version: SETTINGS_VERSION,
     updatedAt:
       typeof source.updatedAt === 'string' ? source.updatedAt : new Date().toISOString(),
     dyeFactories,
+    assignees,
     treeCategories,
     skuFactories,
     skuCategoryOverrides,
+    vatRules,
+    defaultVatRuleId,
+    spuVatRules: vatBindings(source.spuVatRules),
+    skuVatRules: vatBindings(source.skuVatRules),
   }
 }
 
-function normalizeOrderEntry(entry, index) {
+function normalizeOrderEntry(entry, index, keepBlankEntries) {
   if (!entry || typeof entry !== 'object') return null
 
   const factoryId = text(entry.factoryId)
@@ -104,8 +149,10 @@ function normalizeOrderEntry(entry, index) {
   const assignee = text(entry.assignee)
   const note = text(entry.note)
   const quantity = toNumber(entry.quantity ?? 0)
-  // 完全空白的占位行（没选染厂、没人、没数量、没备注）直接丢弃。
-  if (!factoryId && !factoryName && !assignee && !(quantity > 0) && !note) return null
+  // 完全空白的占位行（没选染厂、没人、没数量、没备注）：落盘时丢弃；
+  // 运行时可保留，供「添加分订单」先建行再填写。
+  const isBlank = !factoryId && !factoryName && !assignee && !(quantity > 0) && !note
+  if (isBlank && !keepBlankEntries) return null
 
   return {
     id: text(entry.id) || `so-${index + 1}`,
@@ -113,11 +160,14 @@ function normalizeOrderEntry(entry, index) {
     factoryName,
     assignee,
     quantity: quantity > 0 ? quantity : 0,
+    // 缸快照：下单时的缸数与每缸公斤，导出与对账要能还原当时按什么缸规下的单。
+    vatCount: toNumber(entry.vatCount) > 0 ? toNumber(entry.vatCount) : null,
+    kgPerVat: toNumber(entry.kgPerVat) > 0 ? toNumber(entry.kgPerVat) : null,
     note,
   }
 }
 
-export function normalizeOrders(raw) {
+export function normalizeOrders(raw, { keepBlankEntries = false } = {}) {
   const source = asObject(raw)
   const orders = {}
 
@@ -126,7 +176,7 @@ export function normalizeOrders(raw) {
     if (!key) continue
     const normalized = []
     for (const entry of asArray(entries)) {
-      const orderEntry = normalizeOrderEntry(entry, normalized.length)
+      const orderEntry = normalizeOrderEntry(entry, normalized.length, keepBlankEntries)
       if (orderEntry) normalized.push(orderEntry)
     }
     if (normalized.length) orders[key] = normalized

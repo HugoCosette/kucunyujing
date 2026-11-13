@@ -163,9 +163,17 @@ let SPU_GRADES = [
 ]
 
 // 下单配置：主数据。原型里直接落数组，落到 Vue 时对应 src/purchase/settings.json
+// 行为三选一：自定系数 / 排除 / 订单货（订单货按客户订单填量，不参与预警与评分）
+const MANUAL_BEHAVIORS = [
+  { value: 'custom', label: '自定系数', hint: '给每个 SKU 单独指定系数' },
+  { value: 'exclude', label: '排除', hint: '不参与备货策略，不计预警' },
+  { value: 'order', label: '订单货', hint: '按客户订单填量，不参与预警与评分' },
+]
+
 let MANUAL_MODES = [
-  { id: 'mm-custom', name: '自定模式', behavior: '自定系数', desc: '人工指定红线 / 正常 / 峰值', participates: true, builtin: true, redLine: 20, normal: 40, peak: 60 },
-  { id: 'mm-slow', name: '滞销模式', behavior: '滞销', desc: '不计预警、不进紧急补货', participates: false, builtin: true },
+  { id: 'mm-custom', name: '自定模式', behavior: 'custom', desc: '人工指定红线 / 正常 / 峰值', participates: true, builtin: true, redLine: 20, normal: 40, peak: 60 },
+  { id: 'mm-slow', name: '滞销模式', behavior: 'exclude', desc: '不参与备货策略，不计预警', participates: false, builtin: true },
+  { id: 'mm-order', name: '订单货模式', behavior: 'order', desc: '按客户订单填量，不参与预警与评分', participates: false, builtin: true },
 ]
 
 let MANUAL_SKUS = [
@@ -193,6 +201,49 @@ let SKU_FACTORIES = [
   { id: 'NB-193#KC-0021', product: '挪威网', color: '193#浅咖', category: '涤纶网布', factories: ['江苏恒泰染整', '绍兴越新印染'] },
   { id: '9090-33#SH-0014', product: '9090网布', color: '33#深灰', category: '锦纶网布', factories: ['福建华源纺织'] },
   { id: '40D-87#MH-0007', product: '40D锦安', color: '87#米黄S', category: '瑞士网', factories: ['绍兴越新印染', '福建华源纺织'] },
+]
+
+// —— 缸规则：一条规则 = 一组「上限 → 每缸公斤」档位，挂在品名（SPU）上 ——
+// action: fixed 固定每缸公斤；skip 不取整（按原样下单）
+let VAT_RULES = [
+  {
+    id: 'v1',
+    name: '标准大货补单',
+    bandKey: 'planned',
+    remainder: 'nearest',
+    threshold: 0.5,
+    minVats: 1,
+    bands: [
+      { upTo: 200, action: 'fixed', value: 60 },
+      { upTo: 600, action: 'fixed', value: 100 },
+      { upTo: null, action: 'vat', value: 200 },
+    ],
+  },
+  {
+    id: 'v2',
+    name: '小批量试单',
+    bandKey: 'planned',
+    remainder: 'ceil',
+    threshold: 0.5,
+    minVats: 1,
+    bands: [
+      { upTo: 300, action: 'fixed', value: 50 },
+      { upTo: null, action: 'fixed', value: 100 },
+    ],
+  },
+]
+let VAT_DEFAULT_RULE = 'v1'
+// 品名 → 规则 id；没写进这里的品名走默认规则
+let VAT_SPU = { 挪威网: 'v1', 巴哈斯: 'v1', '9090网布': 'v2' }
+
+// 分单人员表：扁平名单，与「树形分类」里的人员是同一批人
+let PO_PEOPLE_LIST = ['阿婷', '刘玉红', '小凤', '钟秋兰', '刘燕', '小良']
+
+// 屏蔽列表：整组屏蔽（whole）或按 SKU 屏蔽
+let HIDDEN_GROUPS = [
+  { product: '巴哈斯', whole: false, skus: [{ skuId: 'NB-102#MH-0001', color: '102#玫红' }, { skuId: 'NB-1773#MH-0002', color: '1773#米白' }] },
+  { product: '9090网布', whole: true, skus: [{ skuId: '9090-33#SH-0014', color: '33#深灰' }, { skuId: '9090-41#SH-0015', color: '41#浅灰' }] },
+  { product: '40D锦安', whole: false, skus: [{ skuId: '40D-25#MH-0006', color: '25#酒红（固色）' }] },
 ]
 
 const DIM_SCORES = [
@@ -329,6 +380,10 @@ function switchScreen(screen) {
   $$('.nav__item').forEach((el) => el.classList.toggle('is-active', el.dataset.screen === screen))
   $('#batchbar').hidden = !(screen === 'inventory' && state.selected.size > 0)
   window.scrollTo({ top: 0 })
+
+  // 采购屏刚显示出来才量得到真实高度；hidden 已置 false，直接读尺寸即可（会强制回流）
+  if (screen === 'purchase') syncPoLink()
+  if (screen === 'hidden') renderHidden()
 }
 
 $$('.nav__item').forEach((btn) => btn.addEventListener('click', () => switchScreen(btn.dataset.screen)))
@@ -703,6 +758,14 @@ function syncBatchBar() {
   const count = state.selected.size
   $('#batchCount').textContent = String(count)
   $('#batchbar').hidden = !(state.screen === 'inventory' && count > 0)
+
+  // 右下角「屏蔽选中」：有勾选才点亮
+  $('#hideCount').textContent = String(count)
+  const hideBtn = $('#hideSelected')
+  hideBtn.disabled = count === 0
+  hideBtn.title = count
+    ? `屏蔽选中的 ${count} 个 SKU，可在「屏蔽列表」解除`
+    : '先在表格里勾选要屏蔽的 SKU（勾选品名父行可整组选择）'
 }
 
 $('#toneFilters').addEventListener('click', (event) => {
@@ -1245,25 +1308,27 @@ $('#salesToggleAll').addEventListener('click', () => {
 })
 
 /* ---------------- 配置：分区 ---------------- */
-// 设置壳：分区归属两个域，工具条随域切换（备货=方案制，下单=单套确定）
+// 项目里「配置信息」与「下单设置」是两个页面，这里各有一份 .config-layout，
+// 分区切换只在当前那一份里生效，互不影响。
 const PANEL_DOMAIN = {
   strategy: 'stocking',
   weights: 'stocking',
   scoring: 'stocking',
   spu: 'stocking',
+  vat: 'purchase',
   factories: 'purchase',
   people: 'purchase',
+  categories: 'purchase',
   'sku-factories': 'purchase',
 }
 
 function switchPanel(panel) {
-  const domain = PANEL_DOMAIN[panel] ?? 'stocking'
-  $$('.rail__item').forEach((item) => item.classList.toggle('is-active', item.dataset.panel === panel))
-  $$('[data-panel-view]').forEach((view) => {
-    view.hidden = view.dataset.panelView !== panel
-  })
-  $$('[data-domain-bar]').forEach((bar) => {
-    bar.hidden = bar.dataset.domainBar !== domain
+  const view = $(`[data-panel-view="${panel}"]`)
+  const host = view?.closest('.config-layout')
+  if (!host) return
+  $$('.rail__item', host).forEach((item) => item.classList.toggle('is-active', item.dataset.panel === panel))
+  $$('[data-panel-view]', host).forEach((item) => {
+    item.hidden = item.dataset.panelView !== panel
   })
 }
 
@@ -1962,7 +2027,13 @@ function renderManualModes() {
     (item) => `
     <tr>
       <td>${esc(item.name)}</td>
-      <td>${item.participates ? '<span class="tag">自定系数</span>' : '<span class="tag tag--muted">滞销</span>'}</td>
+      <td>${
+        item.behavior === 'custom'
+          ? '<span class="tag">自定系数</span>'
+          : `<span class="tag tag--muted">${esc(
+              MANUAL_BEHAVIORS.find((b) => b.value === item.behavior)?.label ?? '排除',
+            )}</span>`
+      }</td>
       <td class="meta">${esc(item.desc)}</td>
       <td class="is-num">${item.participates ? item.redLine.toFixed(1) : '—'}</td>
       <td class="is-num">${item.participates ? item.normal.toFixed(1) : '—'}</td>
@@ -2005,17 +2076,34 @@ function renderManualSkus() {
 
 function editManualModeDialog(item) {
   const isNew = !item
-  const data = item || { id: `mm-${Date.now()}`, name: '', behavior: '自定系数', desc: '', participates: true, redLine: 20, normal: 40, peak: 60 }
+  const data = item || {
+    id: `mm-${Date.now()}`,
+    name: '',
+    behavior: 'custom',
+    desc: '',
+    participates: true,
+    redLine: 20,
+    normal: 40,
+    peak: 60,
+  }
 
   openForm({
     title: isNew ? '新增手动模式' : `编辑手动模式 · ${data.name}`,
     values: { ...data },
     render: (v) => `
       ${formRow('名称', textField('name', v.name, { placeholder: '如 自定模式' }))}
+      ${formRow(
+        '行为',
+        selectField(
+          'behavior',
+          v.behavior,
+          MANUAL_BEHAVIORS.map((b) => ({ value: b.value, label: b.label })),
+        ),
+        esc(MANUAL_BEHAVIORS.find((b) => b.value === v.behavior)?.hint ?? ''),
+      )}
       ${formRow('说明', textField('desc', v.desc, { placeholder: '这条模式怎么用' }))}
-      ${formRow('参与计算', switchField('participates', v.participates), '关闭后不计预警、不进紧急补货')}
       ${
-        v.participates
+        v.behavior === 'custom'
           ? `<div class="form__group">
               <div class="form__group-head">备货系数<span class="form__group-unit">单位：条</span></div>
               <div class="form__inline">
@@ -2026,10 +2114,20 @@ function editManualModeDialog(item) {
             </div>`
           : ''
       }`,
+    onInput: (v) => {
+      // 行为一变就要重绘：只有「自定系数」才显示系数区
+      if (v.behavior !== formSpec.values.behavior) {
+        formSpec.values = { ...formSpec.values, ...v }
+        $('#formBody').innerHTML = formSpec.render(formSpec.values)
+        validateForm(false)
+      }
+    },
     validate: (v) => {
-      if (!v.name.trim()) return '名称不能为空'
-      if (MANUAL_MODES.some((entry) => entry.id !== data.id && entry.name === v.name.trim())) return '名称重复'
-      if (!v.participates) return null
+      if (!String(v.name || '').trim()) return '名称不能为空'
+      if (MANUAL_MODES.some((entry) => entry.id !== data.id && entry.name === String(v.name).trim())) {
+        return '名称重复'
+      }
+      if (v.behavior !== 'custom') return null
       if ([v.redLine, v.normal, v.peak].some((value) => value === null)) return '三个系数都要填写'
       return v.redLine < v.normal && v.normal < v.peak ? null : '需满足 红线 < 正常 < 峰值'
     },
@@ -2038,10 +2136,10 @@ function editManualModeDialog(item) {
       const target = MANUAL_MODES.find((entry) => entry.id === data.id)
       const next = {
         ...(target || data),
-        name: v.name.trim(),
-        desc: v.desc.trim(),
-        participates: v.participates,
-        behavior: v.participates ? '自定系数' : '滞销',
+        name: String(v.name).trim(),
+        desc: String(v.desc || '').trim(),
+        behavior: v.behavior,
+        participates: v.behavior === 'custom',
         redLine: v.redLine ?? data.redLine,
         normal: v.normal ?? data.normal,
         peak: v.peak ?? data.peak,
@@ -2217,6 +2315,370 @@ function renderSkuFactories() {
   $('#railSkuMeta').textContent = `${SKU_FACTORIES.length} 个 SKU 有约束`
 }
 
+/* ---------------- 设置：缸规则 ---------------- */
+// 一条规则 = 判定依据 + 一组「上限 → 动作」档位。单位跟着判定依据走：
+// 需安排是公斤，月均条数（SKU/SPU）是条。
+const VAT_BAND_KEYS = [
+  { value: 'planned', label: '需安排（公斤）', unit: '公斤' },
+  { value: 'skuMonthlyAvg', label: 'SKU 月均条数', unit: '条' },
+  { value: 'spuMonthlyAvg', label: 'SPU 月均条数合计', unit: '条' },
+]
+const VAT_ACTIONS = [
+  { value: 'skip', label: '不下单', valueLabel: '' },
+  { value: 'fixed', label: '固定下单量', valueLabel: '固定量' },
+  { value: 'vat', label: '按每缸取整', valueLabel: '每缸' },
+  { value: 'round', label: '取整到步长', valueLabel: '步长' },
+]
+const VAT_REMAINDER_SHORT = { nearest: '就近', floor: '舍弃', ceil: '补足' }
+const VAT_REMAINDERS = [
+  { value: 'nearest', label: '就近（余量过半补一缸）' },
+  { value: 'floor', label: '舍弃（只下整缸）' },
+  { value: 'ceil', label: '补足（不足一缸也下一缸）' },
+]
+
+function vatUnitOf(rule) {
+  return VAT_BAND_KEYS.find((item) => item.value === rule.bandKey)?.unit ?? '公斤'
+}
+
+function vatBandRangeText(bands, index) {
+  const prev = index > 0 ? bands[index - 1].upTo : null
+  const cur = bands[index].upTo
+  if (cur === null) return prev === null ? '全部' : `> ${fmt(prev)}`
+  if (prev === null) return `≤ ${fmt(cur)}`
+  return `${fmt(prev)} ~ ${fmt(cur)}`
+}
+
+function vatActionText(band, unit) {
+  if (band.action === 'skip') return '不下单'
+  const value = fmt(band.value)
+  if (band.action === 'fixed') return `固定 ${value} ${unit}`
+  if (band.action === 'vat') return `每缸 ${value} ${unit}`
+  return `按 ${value} ${unit} 取整`
+}
+
+function vatRuleUsage(ruleId) {
+  return Object.values(VAT_SPU).filter((id) => id === ruleId).length
+}
+
+function vatSpuRows() {
+  return INVENTORY.map((group) => {
+    const monthly = group.children.reduce(
+      (sum, child) => sum + (child.monthlyAvg ?? Math.round((child.weekly ?? 0) * 4.3)),
+      0,
+    )
+    return { product: group.product, skuCount: group.children.length, monthlyAvg: monthly }
+  })
+}
+
+// 品名 → 规则：未绑定返回 ''（表示走默认）
+function vatRuleOf(product) {
+  return VAT_SPU[product] ?? ''
+}
+
+function renderVat() {
+  const options = VAT_RULES.map(
+    (rule) => `<option value="${rule.id}"${rule.id === VAT_DEFAULT_RULE ? ' selected' : ''}>${esc(rule.name)}</option>`,
+  ).join('')
+  $('#vatDefaultRule').innerHTML = options
+
+  // 规则表：区间与动作一列里把所有档位摊开，一眼能看到阈值阶梯
+  $('#vatRuleBody').innerHTML = VAT_RULES.length
+    ? VAT_RULES.map((rule) => {
+        const unit = vatUnitOf(rule)
+        const usage = vatRuleUsage(rule.id)
+        return `
+        <tr>
+          <td>
+            <div class="vat-name">${esc(rule.name)}${
+              rule.id === VAT_DEFAULT_RULE ? '<span class="tag">默认</span>' : ''
+            }</div>
+            <div class="vat-name__meta">${esc(
+              VAT_BAND_KEYS.find((item) => item.value === rule.bandKey)?.label ?? '',
+            )} · 零头${esc(VAT_REMAINDER_SHORT[rule.remainder] ?? '就近')}</div>
+          </td>
+          <td>
+            <div class="vat-bands">
+              ${rule.bands
+                .map(
+                  (band, index) => `<span class="vat-bands__item"><em>${vatBandRangeText(
+                    rule.bands,
+                    index,
+                  )}</em>${vatActionText(band, unit)}</span>`,
+                )
+                .join('')}
+            </div>
+          </td>
+          <td class="is-num">${usage}</td>
+          <td class="is-num">${rowActs('vat-rule', rule.id)}</td>
+        </tr>`
+      }).join('')
+    : '<tr><td colspan="4" class="table-empty">还没有缸规则</td></tr>'
+
+  const spus = vatSpuRows()
+  $('#vatRuleHint').textContent = `未绑定的品名使用默认规则`
+  $('#railVatMeta').textContent = `${VAT_RULES.length} 条规则`
+  $('#vatRuleMeta').textContent = `共 ${VAT_RULES.length} 条规则 · ${spus.length} 个品名`
+
+  renderVatSpu()
+}
+
+function renderVatSpu() {
+  const keyword = ($('#vatSpuSearch')?.value || '').trim().toLowerCase()
+  const rows = vatSpuRows().filter((row) => row.product.toLowerCase().includes(keyword))
+  const defaultName = VAT_RULES.find((rule) => rule.id === VAT_DEFAULT_RULE)?.name ?? '无'
+
+  $('#vatSpuBody').innerHTML = rows.length
+    ? rows
+        .map(
+          (row) => `
+      <tr>
+        <td class="vat-spu__product" title="${esc(row.product)}">${esc(row.product)}</td>
+        <td class="is-num">${row.skuCount}</td>
+        <td class="is-num">${fmt(row.monthlyAvg)}</td>
+        <td>
+          <select class="input input--cell" data-vat-spu="${esc(row.product)}">
+            <option value=""${vatRuleOf(row.product) === '' ? ' selected' : ''}>默认（${esc(defaultName)}）</option>
+            ${VAT_RULES.map(
+              (rule) =>
+                `<option value="${rule.id}"${vatRuleOf(row.product) === rule.id ? ' selected' : ''}>${esc(
+                  rule.name,
+                )}</option>`,
+            ).join('')}
+            <option value="__none__"${vatRuleOf(row.product) === '__none__' ? ' selected' : ''}>不取整（按原样下单）</option>
+          </select>
+        </td>
+      </tr>`,
+        )
+        .join('')
+    : `<tr><td colspan="4" class="table-empty">${
+        keyword ? '没有匹配的品名' : '还没有品名数据'
+      }</td></tr>`
+
+  const bound = Object.keys(VAT_SPU).length
+  $('#vatSpuMeta').textContent = `${bound} 个品名单独绑定 · 其余走默认`
+  $('#vatBulkRule').innerHTML =
+    '<option value="">选择规则批量套用</option>' +
+    VAT_RULES.map((rule) => `<option value="${rule.id}">${esc(rule.name)}</option>`).join('') +
+    '<option value="__none__">不取整</option>'
+}
+
+/* ---------------- 设置：分单人员表 ---------------- */
+function renderPoPeople() {
+  $('#poPeopleBody').innerHTML = PO_PEOPLE_LIST.length
+    ? PO_PEOPLE_LIST.map((name) => {
+        const cats = PEOPLE.filter((entry) => entry.people.includes(name)).map((entry) => entry.category)
+        return `
+      <tr>
+        <td>${esc(name)}</td>
+        <td class="is-num">${
+          cats.length ? `<span class="chips">${cats.map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</span>` : '<span class="meta">未分配</span>'
+        }</td>
+        <td class="is-num">
+          <button class="icon-btn icon-btn--sm" data-del="person" data-id="${esc(name)}" title="移除">×</button>
+        </td>
+      </tr>`
+      }).join('')
+    : '<tr><td colspan="3" class="table-empty">还没有分单人员</td></tr>'
+
+  $('#poPeopleHint').textContent = `${PO_PEOPLE_LIST.length} 人 · 分单时先按树形分类找人`
+  $('#railPeopleListMeta').textContent = `${PO_PEOPLE_LIST.length} 人`
+}
+
+/* ---------------- 设置：缸规则编辑器 ---------------- */
+// 弹窗里的档位可以增删，所以每次改动都从 DOM 回收一次 bands，再整块重绘。
+function vatBandsFromValues(v) {
+  const list = v.bands ?? []
+  return list.map((band, index) => ({
+    upTo: index === list.length - 1 ? null : v[`band-${index}-upTo`] ?? null,
+    action: v[`band-${index}-action`] ?? band.action,
+    value: band.action === 'skip' && !v[`band-${index}-value`] ? 0 : v[`band-${index}-value`] ?? 0,
+  }))
+}
+
+// 用当前档位模拟一次下单：先按判定依据落档，再按动作算缸数与下单量。
+function vatSimulate(values, need, metric) {
+  const bands = vatBandsFromValues(values)
+  if (!bands.length) return ''
+  const key = values.bandKey === 'planned' ? Number(need) || 0 : Number(metric) || 0
+  const band = bands.find((item, index) => index === bands.length - 1 || (item.upTo != null && key <= item.upTo))
+  if (!band || band.action === 'skip') return `落在 ${vatBandRangeText(bands, bands.indexOf(band))} → 不下单`
+  const rangeText = vatBandRangeText(bands, bands.indexOf(band))
+
+  if (band.action === 'fixed') return `落在 ${rangeText} → 固定下单 ${fmt(band.value)} 公斤`
+  if (band.action === 'round') {
+    const step = Math.max(1, Number(band.value) || 1)
+    const kg = Math.round(Number(need) / step) * step
+    return `落在 ${rangeText} → 按 ${fmt(step)} 取整，下单 ${fmt(kg)} 公斤`
+  }
+  const perVat = Math.max(1, Number(band.value) || 1)
+  const raw = (Number(need) || 0) / perVat
+  const minVats = Math.max(0, Number(values.minVats) || 0)
+  let vats = 0
+  if (values.remainder === 'ceil') vats = Math.ceil(raw)
+  else if (values.remainder === 'floor') vats = Math.floor(raw)
+  else vats = Math.floor(raw) + (raw - Math.floor(raw) >= (Number(values.threshold) || 0.5) ? 1 : 0)
+  if ((Number(need) || 0) > 0) vats = Math.max(vats, minVats || 1)
+  return `落在 ${rangeText} → 每缸 ${fmt(perVat)} 公斤，${vats} 缸 = ${fmt(vats * perVat)} 公斤`
+}
+
+function editVatRuleDialog(rule) {
+  const isNew = !rule
+  openForm({
+    title: isNew ? '新增缸规则' : '编辑缸规则',
+    wide: true,
+    kind: 'vat',
+    note: '上限按从小到大串联，最后一档固定无上限；判定依据落在哪一档，就按该档的处理方式算整缸。',
+    values: {
+      name: rule?.name ?? '',
+      bandKey: rule?.bandKey ?? 'planned',
+      remainder: rule?.remainder ?? 'nearest',
+      threshold: rule?.threshold ?? 0.5,
+      minVats: rule?.minVats ?? 1,
+      trial: 1000,
+      trialMetric: 300,
+      bands: JSON.parse(
+        JSON.stringify(rule?.bands ?? [{ upTo: null, action: 'vat', value: 100 }]),
+      ),
+    },
+    render: (v) => {
+      const unit = VAT_BAND_KEYS.find((item) => item.value === v.bandKey)?.unit ?? '公斤'
+      const bands = v.bands ?? []
+      return `
+      <div class="form__grid form__grid--3">
+        ${formRow('规则名称', textField('name', v.name, { placeholder: '例如：标准大货补单' }))}
+        ${formRow(
+          '判定依据',
+          selectField(
+            'bandKey',
+            v.bandKey,
+            VAT_BAND_KEYS.map((item) => ({ value: item.value, label: item.label })),
+          ),
+        )}
+        ${formRow(
+          '零头处理',
+          selectField(
+            'remainder',
+            v.remainder,
+            VAT_REMAINDERS.map((item) => ({ value: item.value, label: item.label })),
+          ),
+        )}
+      </div>
+      <div class="form__grid form__grid--3">
+        ${formRow('补缸阈值', numField('threshold', v.threshold, '余量占比', { min: 0.05, max: 1, step: 0.05 }))}
+        ${formRow('至少几缸', numField('minVats', v.minVats, '缸', { min: 0, max: 99 }))}
+        ${formRow('', '')}
+      </div>
+
+      <div class="vat-edit">
+        <div class="vat-edit__head">
+          <span>区间</span>
+          <span>上限（${esc(unit)}）</span>
+          <span>处理方式</span>
+          <span>参数</span>
+          <span></span>
+        </div>
+        ${bands
+          .map(
+            (band, index) => `
+          <div class="vat-edit__row">
+            <span class="vat-edit__range">${vatBandRangeText(bands, index)}</span>
+            ${
+              index < bands.length - 1
+                ? numField(`band-${index}-upTo`, band.upTo, '', { min: 1 })
+                : '<span class="meta vat-edit__none">无上限</span>'
+            }
+            ${selectField(
+              `band-${index}-action`,
+              band.action,
+              VAT_ACTIONS.map((item) => ({ value: item.value, label: item.label })),
+            )}
+            ${
+              band.action === 'skip'
+                ? '<span class="meta vat-edit__none">—</span>'
+                : numField(`band-${index}-value`, band.value, unit === '条' ? '条' : '公斤', { min: 0 })
+            }
+            <button type="button" class="icon-btn icon-btn--sm" data-band-del="${index}" title="删除该档" ${
+              bands.length <= 1 ? 'disabled' : ''
+            }>×</button>
+          </div>`,
+          )
+          .join('')}
+        <div class="vat-edit__foot">
+          <button type="button" class="btn btn--text btn--sm" data-band-add>＋ 新增阈值</button>
+          <span class="vat-edit__trial" id="vatTrial"></span>
+        </div>
+      </div>
+
+      <div class="form__grid form__grid--3">
+        ${formRow('试算需安排', numField('trial', v.trial, '公斤', { min: 0, step: 10 }))}
+        ${formRow(
+          '试算判据值',
+          numField('trialMetric', v.trialMetric, unit === '条' ? '条' : '公斤', { min: 0, step: 10 }),
+        )}
+        ${formRow('', '')}
+      </div>`
+    },
+    onInput: (v) => {
+      const slot = $('#vatTrial')
+      if (slot) slot.textContent = vatSimulate(v, v.trial, v.trialMetric)
+    },
+    validate: (v) => {
+      if (!String(v.name || '').trim()) return '规则名称不能为空'
+      if (VAT_RULES.some((item) => item.id !== rule?.id && item.name === String(v.name).trim())) {
+        return '规则名称重复'
+      }
+      const bands = vatBandsFromValues(v)
+      for (let i = 0; i < bands.length - 1; i += 1) {
+        if (bands[i].upTo === null) return `第 ${i + 1} 档上限不能为空`
+        if (i > 0 && !(bands[i].upTo > bands[i - 1].upTo)) return `第 ${i + 1} 档上限需大于上一档`
+        if (bands[i].action !== 'skip' && !(bands[i].value > 0)) return `第 ${i + 1} 档参数需大于 0`
+      }
+      const last = bands[bands.length - 1]
+      if (last.action !== 'skip' && !(last.value > 0)) return '最后一档参数需大于 0'
+      return null
+    },
+    onSubmit: (v) => {
+      pushPurchase()
+      const payload = {
+        name: String(v.name).trim(),
+        bandKey: v.bandKey,
+        remainder: v.remainder,
+        threshold: v.threshold,
+        minVats: v.minVats,
+        bands: vatBandsFromValues(v),
+      }
+      if (isNew) VAT_RULES.push({ id: `v${Date.now()}`, ...payload })
+      else Object.assign(rule, payload)
+      renderVat()
+      markPurchaseDirty('vat')
+      toast(isNew ? '已新增缸规则' : '缸规则已更新')
+    },
+  })
+}
+
+function editPersonDialog() {
+  openForm({
+    title: '新增分单人员',
+    narrow: true,
+    values: { name: '' },
+    render: (v) => formRow('姓名', textField('name', v.name, { placeholder: '例如：阿婷' })),
+    validate: (v) => {
+      const name = String(v.name || '').trim()
+      if (!name) return '姓名不能为空'
+      if (PO_PEOPLE_LIST.includes(name)) return '该人员已存在'
+      return null
+    },
+    onSubmit: (v) => {
+      pushPurchase()
+      PO_PEOPLE_LIST.push(String(v.name).trim())
+      renderPoPeople()
+      renderPeople()
+      markPurchaseDirty('people')
+      toast('已添加分单人员')
+    },
+  })
+}
+
 function editFactoryDialog(item) {
   const isNew = !item
   const data = item || { id: `f-${Date.now()}`, name: '', enabled: true, orders: 0 }
@@ -2322,14 +2784,17 @@ function editSkuFactoryDialog(item) {
 const RAIL_PANEL = {
   'manual-mode': 'strategy',
   'manual-sku': 'strategy',
+  'vat-rule': 'vat',
   factory: 'factories',
-  people: 'people',
+  people: 'categories',
+  person: 'people',
   'sku-factory': 'sku-factories',
 }
 
 const ROW_EDIT = {
   'manual-mode': editManualModeDialog,
   'manual-sku': editManualSkuDialog,
+  'vat-rule': editVatRuleDialog,
   factory: editFactoryDialog,
   people: editPeopleDialog,
   'sku-factory': editSkuFactoryDialog,
@@ -2338,6 +2803,7 @@ const ROW_EDIT = {
 function rowById(kind, id) {
   if (kind === 'manual-mode') return MANUAL_MODES.find((entry) => entry.id === id)
   if (kind === 'manual-sku') return MANUAL_SKUS.find((entry) => entry.id === id)
+  if (kind === 'vat-rule') return VAT_RULES.find((entry) => entry.id === id)
   if (kind === 'factory') return FACTORIES.find((entry) => entry.id === id)
   if (kind === 'people') return PEOPLE.find((entry) => entry.id === id)
   return SKU_FACTORIES.find((entry) => entry.id === id)
@@ -2346,7 +2812,7 @@ function rowById(kind, id) {
 function deleteRow(kind, id) {
   const item = rowById(kind, id)
   if (!item) return
-  const name = item.name || item.category || `${item.product} / ${item.color}`
+  const name = item.name || item.category || item.id || `${item.product} / ${item.color}`
   openConfirm({
     title: '确认删除',
     note:
@@ -2357,11 +2823,19 @@ function deleteRow(kind, id) {
       pushPurchase()
       if (kind === 'manual-mode') MANUAL_MODES = MANUAL_MODES.filter((entry) => entry.id !== id)
       if (kind === 'manual-sku') MANUAL_SKUS = MANUAL_SKUS.filter((entry) => entry.id !== id)
+      if (kind === 'vat-rule') {
+        VAT_RULES = VAT_RULES.filter((entry) => entry.id !== id)
+        if (VAT_DEFAULT_RULE === id) VAT_DEFAULT_RULE = VAT_RULES[0]?.id ?? ''
+        Object.keys(VAT_SPU).forEach((product) => {
+          if (VAT_SPU[product] === id) delete VAT_SPU[product]
+        })
+      }
       if (kind === 'factory') FACTORIES = FACTORIES.filter((entry) => entry.id !== id)
       if (kind === 'people') PEOPLE = PEOPLE.filter((entry) => entry.id !== id)
       if (kind === 'sku-factory') SKU_FACTORIES = SKU_FACTORIES.filter((entry) => entry.id !== id)
       renderManualModes()
       renderManualSkus()
+      renderVat()
       renderFactories()
       renderPeople()
       renderSkuFactories()
@@ -2380,8 +2854,10 @@ function renderConfig() {
   renderGrades()
   renderManualModes()
   renderManualSkus()
+  renderVat()
   renderFactories()
   renderPeople()
+  renderPoPeople()
   renderSkuFactories()
 }
 
@@ -2398,9 +2874,12 @@ document.addEventListener('click', (event) => {
     const map = {
       'manual-mode': () => editManualModeDialog(null),
       'manual-sku': () => editManualSkuDialog(null),
+      'vat-rule': () => editVatRuleDialog(null),
       factory: () => editFactoryDialog(null),
       people: () => editPeopleDialog(null),
+      category: () => editPeopleDialog(null),
       'sku-factory': () => editSkuFactoryDialog(null),
+      person: () => editPersonDialog(),
     }
     map[add.dataset.add]?.()
     return
@@ -2572,7 +3051,7 @@ function refreshConfigState() {
 }
 
 const STOCKING_PANELS = ['strategy', 'weights', 'scoring', 'spu']
-const PURCHASE_PANELS = ['factories', 'people', 'sku-factories']
+const PURCHASE_PANELS = ['vat', 'factories', 'people', 'categories', 'sku-factories']
 
 function syncDirtyMarkers() {
   $$('.rail__item').forEach((item) => {
@@ -2702,6 +3181,990 @@ document.addEventListener('click', (event) => {
   toast(demo.dataset.demo)
 })
 
+/* ---------------- 采购下单 ---------------- */
+// 左侧是待下单 SKU 表，右侧是该 SKU 的分订单明细表；两处都是表格，不再用卡片。
+const PO_FACTORIES = [
+  '连江东禾晟',
+  '福清长福',
+  '长乐华鹤',
+  '汕头兴滨染厂',
+  '清远千百丽',
+  '连江俊诚(华阳)',
+  '久顺',
+  '长乐力宏',
+]
+
+const PO_PEOPLE = ['阿婷', '刘玉红', '小凤', '钟秋兰', '刘燕', '小良']
+
+// 分订单 = { factory, assignee, vats(缸数), kg(公斤), note }；缸数与公斤双向联动
+const PURCHASE_SKUS = [
+  {
+    id: 'po-1',
+    product: '巴哈斯',
+    color: '102#玫红',
+    category: '涤纶网布',
+    planned: 3371,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [
+      { factory: '连江东禾晟', assignee: '阿婷', vats: 20, kg: 2000, note: '' },
+      { factory: '福清长福', assignee: '', vats: 0, kg: 0, note: '' },
+    ],
+  },
+  {
+    id: 'po-2',
+    product: '巴哈斯',
+    color: '46#杏色',
+    category: '涤纶网布',
+    planned: 1947,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [],
+  },
+  {
+    id: 'po-3',
+    product: '巴哈斯',
+    color: '49#浅兰',
+    category: '涤纶网布',
+    planned: 1931,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [],
+  },
+  {
+    id: 'po-4',
+    product: '巴哈斯',
+    color: '2#本白',
+    category: '涤纶网布',
+    planned: 1411,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [],
+  },
+  {
+    id: 'po-5',
+    product: '巴哈斯',
+    color: '1773#米白',
+    category: '涤纶网布',
+    planned: 1773,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [],
+  },
+  {
+    id: 'po-6',
+    product: '巴哈斯',
+    color: '1991#深灰',
+    category: '涤纶网布',
+    planned: 1991,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [],
+  },
+  {
+    id: 'po-7',
+    product: '巴哈斯',
+    color: '1423#浅咖',
+    category: '涤纶网布',
+    planned: 1423,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [],
+  },
+  {
+    id: 'po-8',
+    product: '巴哈斯',
+    color: '1952#酒红',
+    category: '涤纶网布',
+    planned: 1952,
+    rule: { name: '标准大货补单', kgPerVat: 100 },
+    orders: [],
+  },
+  {
+    id: 'po-9',
+    product: '巴哈斯',
+    color: '1607#藏青',
+    category: '涤纶网布',
+    planned: 1607,
+    rule: { name: '小批量补单', kgPerVat: 50 },
+    orders: [],
+  },
+]
+
+const poState = { selectedId: PURCHASE_SKUS[0].id, keyword: '', onlyUnordered: false }
+
+function poSelected() {
+  return PURCHASE_SKUS.find((row) => row.id === poState.selectedId) ?? null
+}
+
+function poTotals(row) {
+  return {
+    kg: row.orders.reduce((sum, order) => sum + (Number(order.kg) || 0), 0),
+    vats: row.orders.reduce((sum, order) => sum + (Number(order.vats) || 0), 0),
+  }
+}
+
+// 建议缸数：需安排 ÷ 每缸公斤，余量过半补一缸（与 nearest 零头策略一致）
+function poSuggestion(row) {
+  const per = row.rule.kgPerVat
+  const raw = row.planned / per
+  const floor = Math.floor(raw)
+  const vats = Math.max(raw - floor >= 0.5 ? floor + 1 : floor, 1)
+  return { vats, kg: vats * per }
+}
+
+function poVisibleRows() {
+  const keyword = poState.keyword.trim().toLowerCase()
+  return PURCHASE_SKUS.filter((row) => {
+    if (poState.onlyUnordered && poTotals(row).kg > 0) return false
+    if (!keyword) return true
+    return `${row.product}${row.color}${row.category}`.toLowerCase().includes(keyword)
+  })
+}
+
+function renderPoStats() {
+  const planned = PURCHASE_SKUS.reduce((sum, row) => sum + row.planned, 0)
+  const totals = PURCHASE_SKUS.map(poTotals)
+  const ordered = totals.reduce((sum, item) => sum + item.kg, 0)
+  const vats = totals.reduce((sum, item) => sum + item.vats, 0)
+  const pending = PURCHASE_SKUS.filter((row) => poTotals(row).kg === 0).length
+
+  const items = [
+    ['SKU', fmt(PURCHASE_SKUS.length), '', ''],
+    ['需安排', fmt(planned), '', ''],
+    ['已下单', fmt(ordered), 'is-accent', ''],
+    ['缸数', fmt(vats), '', ''],
+    ['未下单', fmt(pending), 'is-warn', 'pending'],
+  ]
+
+  $('#poStats').innerHTML = items
+    .map(
+      ([label, value, tone, filter]) => `
+      <div class="po-stats__item ${filter ? 'is-clickable' : ''}"${filter ? ` data-filter="${filter}"` : ''}${
+        filter ? ' title="只看未下单"' : ''
+      }>
+        <dt>${label}</dt>
+        <dd class="${tone}">${value}</dd>
+      </div>`,
+    )
+    .join('')
+}
+
+function renderPoList() {
+  const list = poVisibleRows()
+  $('#poListCount').textContent = `${list.length} / ${PURCHASE_SKUS.length}`
+
+  if (!list.length) {
+    $('#poListBody').innerHTML = `<tr><td colspan="3" class="po-empty">没有匹配的 SKU</td></tr>`
+    return
+  }
+
+  $('#poListBody').innerHTML = list
+    .map((row) => {
+      const { kg } = poTotals(row)
+      return `<tr data-sku="${row.id}" class="${row.id === poState.selectedId ? 'is-active' : ''}">
+        <td class="po-mini__name" title="${row.product} · ${row.color}"><span class="po-mini__product">${
+          row.product
+        }</span><span class="po-mini__sep">·</span>${row.color}</td>
+        <td class="is-num">${fmt(row.planned)}</td>
+        <td class="is-num po-mini__ordered ${kg > 0 ? 'is-done' : 'is-zero'}">${kg > 0 ? fmt(kg) : '—'}</td>
+      </tr>`
+    })
+    .join('')
+
+  syncPoLink()
+}
+
+function poOrderRow(order, index, kgPerVat) {
+  const factoryOptions = [`<option value="">选择染厂</option>`]
+    .concat(
+      PO_FACTORIES.map(
+        (name) => `<option value="${name}"${name === order.factory ? ' selected' : ''}>${name}</option>`,
+      ),
+    )
+    .join('')
+  const peopleOptions = [`<option value="">选择分单人员</option>`]
+    .concat(
+      PO_PEOPLE.map(
+        (name) => `<option value="${name}"${name === order.assignee ? ' selected' : ''}>${name}</option>`,
+      ),
+    )
+    .join('')
+
+  // 数量还没填的行整体压灰：一眼能分出"已填"和"只选了厂"的行
+  return `<tr data-index="${index}" class="${Number(order.kg) > 0 ? '' : 'is-blank'}">
+    <td class="po-order__idx">${index + 1}</td>
+    <td><select class="po-cell" data-order="${index}" data-field="factory" aria-label="第 ${index + 1} 个分订单染厂">${factoryOptions}</select></td>
+    <td><select class="po-cell" data-order="${index}" data-field="assignee" aria-label="第 ${index + 1} 个分订单分单人员">${peopleOptions}</select></td>
+    <td><input class="po-cell is-num" type="number" min="0" step="1" data-order="${index}" data-field="vats" value="${
+      order.vats || ''
+    }" placeholder="—" aria-label="第 ${index + 1} 个分订单缸数" title="每缸 ${kgPerVat} 公斤" /></td>
+    <td><input class="po-cell is-num" type="number" min="0" step="0.01" data-order="${index}" data-field="kg" value="${
+      order.kg || ''
+    }" placeholder="—" aria-label="第 ${index + 1} 个分订单数量" /></td>
+    <td><input class="po-cell" data-order="${index}" data-field="note" value="${esc(
+      order.note ?? '',
+    )}" placeholder="缸号 / 交期" aria-label="第 ${index + 1} 个分订单备注" /></td>
+    <td class="is-center"><button type="button" class="po-order__del" data-del="${index}" title="删除这张分订单" aria-label="删除第 ${
+      index + 1
+    } 个分订单">
+      <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5.6 2.2h4.8M2.6 4.4h10.8M4.2 4.4l.55 7.9a1 1 0 0 0 1 .93h4.5a1 1 0 0 0 1-.93l.55-7.9M6.6 6.8v4.2M9.4 6.8v4.2" />
+      </svg>
+    </button></td>
+  </tr>`
+}
+
+function renderPoDetail() {
+  const row = poSelected()
+  if (!row) {
+    $('#poTitle').textContent = '选择一个 SKU 开始下单'
+    $('#poCategory').hidden = true
+    $('#poSummary').innerHTML = ''
+    $('#poOrderBody').innerHTML = `<tr><td colspan="7" class="po-empty">左侧选择一个 SKU</td></tr>`
+    $('#poOrderFoot').innerHTML = ''
+    $('#poClear').disabled = true
+    return
+  }
+
+  const totals = poTotals(row)
+  const suggestion = poSuggestion(row)
+  const diff = totals.kg - row.planned
+
+  $('#poTitle').textContent = `${row.product} · ${row.color}`
+  const category = $('#poCategory')
+  category.hidden = false
+  category.textContent = row.category
+
+  const diffItem = !row.orders.length
+    ? `<span class="po-summary__item">尚未录入分订单</span>`
+    : Math.abs(diff) < 0.005
+      ? `<span class="po-summary__item is-ok">与需安排一致</span>`
+      : diff > 0
+        ? `<span class="po-summary__item is-over">超出需安排 <b>${fmt(diff)}</b> 公斤</span>`
+        : `<span class="po-summary__item is-warn">还差 <b>${fmt(-diff)}</b> 公斤</span>`
+
+  $('#poSummary').innerHTML = `
+    <span class="po-summary__item">需安排 <b>${fmt(row.planned)}</b> 公斤</span>
+    <span class="po-summary__item">已下单 <b>${fmt(totals.kg)}</b> 公斤<em>${fmt(totals.vats)} 缸</em></span>
+    ${diffItem}
+    <span class="po-summary__tip" title="${row.rule.name} · 每缸 ${row.rule.kgPerVat} 公斤 · 建议 ${suggestion.vats} 缸（${fmt(
+      suggestion.kg,
+    )} 公斤），余量过半补一缸">建议 ${suggestion.vats} 缸</span>`
+
+  $('#poOrderBody').innerHTML = row.orders.length
+    ? row.orders
+        .map((order, index) => poOrderRow(order, index, row.rule.kgPerVat))
+        .join('') +
+      `<tr class="po-add-row"><td colspan="7">
+        <button type="button" class="po-add" data-add>＋ 添加分订单</button>
+      </td></tr>`
+    : `<tr><td colspan="7" class="po-empty">暂无分订单</td></tr>
+       <tr class="po-add-row"><td colspan="7">
+        <button type="button" class="po-add" data-add>＋ 添加分订单</button>
+        <button type="button" class="po-add po-add--muted" data-add-suggest title="按缸规则建议生成一张 ${fmt(
+          suggestion.kg,
+        )} 公斤的分订单">按建议添加 ${suggestion.vats} 缸</button>
+      </td></tr>`
+
+  renderPoFoot()
+  $('#poClear').disabled = row.orders.length === 0
+}
+
+// 合计行单独更新：改缸数 / 公斤时只重绘这里，输入框不失焦
+function renderPoFoot() {
+  const row = poSelected()
+  if (!row || !row.orders.length) {
+    $('#poOrderFoot').innerHTML = ''
+    return
+  }
+  const totals = poTotals(row)
+  const diff = totals.kg - row.planned
+  const state = Math.abs(diff) < 0.005 ? 'is-ok' : diff > 0 ? 'is-over' : 'is-warn'
+  const text =
+    Math.abs(diff) < 0.005
+      ? '与需安排一致'
+      : diff > 0
+        ? `超出 ${fmt(diff)} 公斤`
+        : `还差 ${fmt(-diff)} 公斤`
+
+  $('#poOrderFoot').innerHTML = `<tr>
+    <td colspan="3" class="po-foot__label">合计</td>
+    <td class="is-num">${fmt(totals.vats)} 缸</td>
+    <td class="is-num">${totals.kg.toFixed(2)}</td>
+    <td colspan="2" class="po-foot__state ${state}">${text}</td>
+  </tr>`
+}
+
+function renderPoSummaryOnly() {
+  const row = poSelected()
+  if (!row) return
+  const totals = poTotals(row)
+  const diff = totals.kg - row.planned
+  // summary 只重绘这一块：改缸数 / 公斤时不碰表格，输入框不失焦
+  const diffText = !row.orders.length
+    ? '尚未录入分订单'
+    : Math.abs(diff) < 0.005
+      ? '与需安排一致'
+      : diff > 0
+        ? `超出需安排 <b>${fmt(diff)}</b> 公斤`
+        : `还差 <b>${fmt(-diff)}</b> 公斤`
+  const tone = !row.orders.length ? '' : Math.abs(diff) < 0.005 ? 'is-ok' : diff > 0 ? 'is-over' : 'is-warn'
+
+  $('#poSummary').innerHTML = `
+    <span class="po-summary__item">需安排 <b>${fmt(row.planned)}</b> 公斤</span>
+    <span class="po-summary__item">已下单 <b>${fmt(totals.kg)}</b> 公斤<em>${fmt(totals.vats)} 缸</em></span>
+    <span class="po-summary__item ${tone}">${diffText}</span>
+    <span class="po-summary__tip" title="${row.rule.name} · 每缸 ${row.rule.kgPerVat} 公斤">建议 ${poSuggestion(
+      row,
+    ).vats} 缸</span>`
+
+  renderPoFoot()
+
+  const cell = $(`#poListBody tr[data-sku="${row.id}"] .po-mini__ordered`)
+  if (cell) {
+    cell.textContent = totals.kg > 0 ? `${fmt(totals.kg)}${totals.vats ? ` · ${totals.vats} 缸` : ''}` : '—'
+    cell.classList.toggle('is-done', totals.kg > 0)
+    cell.classList.toggle('is-zero', totals.kg === 0)
+  }
+  renderPoStats()
+}
+
+function renderPurchase() {
+  renderPoStats()
+  renderPoList()
+  renderPoDetail()
+}
+
+// 连接件跟着选中行走：切行、滚动、缩放都重算一次
+function syncPoLink() {
+  const link = $('#poLink')
+  const layout = $('.po-layout')
+  if (!link || !layout) return
+
+  const tr = $('#poListBody tr.is-active')
+  if (!tr) {
+    link.hidden = true
+    return
+  }
+
+  link.hidden = false
+
+  const layoutRect = layout.getBoundingClientRect()
+  // 屏幕还没显示出来时量不到高度，直接跳过，避免把扇形压成 0
+  if (layoutRect.height < 60) return
+
+  // 宽度按实测缝隙算，不写死：左栏右缘 → 面板左缘再多 1px（正好吃掉面板那条 1px 左边框）
+  const listPanel = layout.querySelector('.po-panel')
+  const detailPanel = layout.querySelector('.po-panel--detail')
+  if (listPanel && detailPanel) {
+    const listRect = listPanel.getBoundingClientRect()
+    const detailRect = detailPanel.getBoundingClientRect()
+    link.style.left = `${Math.round(listRect.right - layoutRect.left)}px`
+    link.style.width = `${Math.max(8, Math.round(detailRect.left - listRect.right) + 1)}px`
+  }
+
+  const trRect = tr.getBoundingClientRect()
+  const rowHeight = Math.round(trRect.height) || 31
+  // 扇形高度跟着框走：右侧面板高度的 1/4，窗口变化时比例不变
+  const height = Math.round(layoutRect.height / 4)
+
+  // 行中心的绝对位置（相对 layout）
+  const center = trRect.top - layoutRect.top + rowHeight / 2
+
+  // 扇形以行中心对称上下张开；贴到框外时整体夹回，改用开口偏移量，
+  // 保证左右两端都落在框内，而窄口始终对准这一行
+  let top = Math.round(center - height / 2)
+  top = Math.max(0, Math.min(top, Math.round(layoutRect.height - height)))
+  const openCenter = Math.max(0, Math.min(Math.round(center - top), height))
+  const half = rowHeight / 2
+
+  link.style.height = `${height}px`
+  link.style.top = `${top}px`
+  link.style.clipPath = `polygon(0 ${Math.max(0, openCenter - half)}px, 100% 0, 100% 100%, 0 ${Math.min(
+    height,
+    openCenter + half,
+  )}px)`
+}
+
+/* ---------------- 采购下单：交互 ---------------- */
+function poEnsureSelection() {
+  const list = poVisibleRows()
+  if (list.length && !list.some((row) => row.id === poState.selectedId)) {
+    poState.selectedId = list[0].id
+    // 清单也要重绘，否则新选中的行没有 is-active，扇形会跟着消失
+    renderPoList()
+    renderPoDetail()
+  }
+}
+
+$('#poListBody').addEventListener('click', (event) => {
+  const tr = event.target.closest('tr[data-sku]')
+  if (!tr) return
+  poState.selectedId = tr.dataset.sku
+  renderPoList()
+  renderPoDetail()
+  syncPoLink()
+})
+
+// 点顶部「未下单」= 勾上「只看未下单」，两个入口同一状态
+$('#poStats').addEventListener('click', (event) => {
+  if (!event.target.closest('[data-filter="pending"]')) return
+  poState.onlyUnordered = !poState.onlyUnordered
+  $('#poOnlyUnordered').checked = poState.onlyUnordered
+  renderPoList()
+  poEnsureSelection()
+})
+
+$('.po-list__scroll').addEventListener('scroll', syncPoLink)
+window.addEventListener('resize', syncPoLink)
+
+$('#poSearch').addEventListener('input', (event) => {
+  poState.keyword = event.target.value
+  renderPoList()
+  poEnsureSelection()
+})
+
+$('#poOnlyUnordered').addEventListener('change', (event) => {
+  poState.onlyUnordered = event.target.checked
+  renderPoList()
+  poEnsureSelection()
+})
+
+// 改缸数 → 公斤 = 缸数 × 每缸；改公斤 → 缸数按每缸回算；只重绘合计，输入框不失焦
+$('#poOrderBody').addEventListener('input', (event) => {
+  const input = event.target.closest('input[data-order]')
+  if (!input) return
+  const row = poSelected()
+  const index = Number(input.dataset.order)
+  const order = row?.orders[index]
+  if (!order) return
+
+  const field = input.dataset.field
+  const per = row.rule.kgPerVat
+
+  if (field === 'vats') {
+    const vats = Math.max(0, Number(input.value) || 0)
+    order.vats = vats
+    order.kg = Math.round(vats * per * 100) / 100
+    const kg = $(`[data-order="${index}"][data-field="kg"]`)
+    if (kg) kg.value = order.kg
+  } else if (field === 'kg') {
+    const kg = Math.max(0, Number(input.value) || 0)
+    order.kg = kg
+    order.vats = Math.round((kg / per) * 100) / 100
+    const vats = $(`[data-order="${index}"][data-field="vats"]`)
+    if (vats) vats.value = order.vats
+  } else {
+    order[field] = input.value
+  }
+
+  renderPoSummaryOnly()
+})
+
+$('#poOrderBody').addEventListener('change', (event) => {
+  const select = event.target.closest('select[data-order]')
+  if (!select) return
+  const row = poSelected()
+  const order = row?.orders[Number(select.dataset.order)]
+  if (!order) return
+  order[select.dataset.field] = select.value
+  renderPoSummaryOnly()
+})
+
+$('#poOrderBody').addEventListener('click', (event) => {
+  const row = poSelected()
+  if (!row) return
+
+  const del = event.target.closest('[data-del]')
+  if (del) {
+    row.orders.splice(Number(del.dataset.del), 1)
+    renderPoDetail()
+    renderPoList()
+    renderPoStats()
+    return
+  }
+
+  if (event.target.closest('[data-add]')) {
+    row.orders.push({ factory: '', assignee: '', vats: 0, kg: 0, note: '' })
+    renderPoDetail()
+    renderPoList()
+    renderPoStats()
+    return
+  }
+
+  if (event.target.closest('[data-add-suggest]')) {
+    const suggestion = poSuggestion(row)
+    row.orders = [{ factory: '', assignee: '', vats: suggestion.vats, kg: suggestion.kg, note: '' }]
+    renderPoDetail()
+    renderPoList()
+    renderPoStats()
+  }
+})
+
+$('#poClear').addEventListener('click', () => {
+  const row = poSelected()
+  if (!row || !row.orders.length) return
+  openConfirm({
+    title: '清空分订单',
+    note: `确定清空「${row.product} · ${row.color}」的 ${row.orders.length} 张分订单？`,
+    okText: '清空',
+    onOk: () => {
+      row.orders = []
+      renderPoDetail()
+      renderPoList()
+      renderPoStats()
+      toast('已清空该 SKU 的分订单')
+    },
+  })
+})
+
+/* ---------------- 设置：缸规则 / 人员 交互 ---------------- */
+// 缸规则弹窗里的档位可以增删：先从 DOM 回收当前值，再整块重绘
+$('#formBody').addEventListener('click', (event) => {
+  if (!formSpec || formSpec.kind !== 'vat') return
+  const add = event.target.closest('[data-band-add]')
+  const del = event.target.closest('[data-band-del]')
+  if (!add && !del) return
+  event.preventDefault()
+
+  const current = readForm()
+  const bands = vatBandsFromValues({ ...formSpec.values, ...current })
+
+  if (add) {
+    const prev = bands[bands.length - 2]?.upTo ?? 0
+    const last = bands[bands.length - 1]
+    bands.splice(bands.length - 1, 0, {
+      upTo: Number(prev) + 200,
+      action: last?.action ?? 'vat',
+      value: last?.value ?? 100,
+    })
+  } else {
+    if (bands.length <= 1) return
+    bands.splice(Number(del.dataset.bandDel), 1)
+    bands[bands.length - 1].upTo = null
+  }
+
+  formSpec.values = { ...current, bands }
+  $('#formBody').innerHTML = formSpec.render(formSpec.values)
+  validateForm(false)
+})
+
+$('#vatDefaultRule').addEventListener('change', (event) => {
+  VAT_DEFAULT_RULE = event.target.value
+  renderVat()
+  markPurchaseDirty('vat')
+})
+
+$('#vatSpuSearch').addEventListener('input', renderVatSpu)
+
+$('#vatSpuBody').addEventListener('change', (event) => {
+  const select = event.target.closest('[data-vat-spu]')
+  if (!select) return
+  const product = select.dataset.vatSpu
+  if (!select.value) delete VAT_SPU[product]
+  else VAT_SPU[product] = select.value
+  renderVat()
+  markPurchaseDirty('vat')
+})
+
+function vatFilteredSpus() {
+  const keyword = ($('#vatSpuSearch')?.value || '').trim().toLowerCase()
+  return vatSpuRows().filter((row) => row.product.toLowerCase().includes(keyword))
+}
+
+$('#vatBulkApply').addEventListener('click', () => {
+  const ruleId = $('#vatBulkRule').value
+  const rows = vatFilteredSpus()
+  if (!ruleId) return toast('先选择要套用的规则')
+  if (!rows.length) return toast('当前筛选结果为空')
+  pushPurchase()
+  rows.forEach((row) => {
+    if (ruleId === '__none__') VAT_SPU[row.product] = '__none__'
+    else VAT_SPU[row.product] = ruleId
+  })
+  renderVat()
+  markPurchaseDirty('vat')
+  toast(`已套用到 ${rows.length} 个品名`)
+})
+
+$('#vatBulkClear').addEventListener('click', () => {
+  const rows = vatFilteredSpus()
+  if (!rows.length) return toast('当前筛选结果为空')
+  pushPurchase()
+  rows.forEach((row) => delete VAT_SPU[row.product])
+  renderVat()
+  markPurchaseDirty('vat')
+  toast(`已清空 ${rows.length} 个品名的绑定`)
+})
+
+// 人员移除
+document.addEventListener('click', (event) => {
+  const del = event.target.closest('[data-del="person"]')
+  if (!del) return
+  const name = del.dataset.id
+  openConfirm({
+    title: '移除分单人员',
+    note: `移除「${name}」后，已按该人员拆好的分订单保留原姓名，新分单不再出现这个人。`,
+    okText: '移除',
+    onOk: () => {
+      pushPurchase()
+      PO_PEOPLE_LIST = PO_PEOPLE_LIST.filter((item) => item !== name)
+      PEOPLE = PEOPLE.map((entry) => ({ ...entry, people: entry.people.filter((p) => p !== name) }))
+      renderPoPeople()
+      renderPeople()
+      markPurchaseDirty('people')
+      toast('已移除')
+    },
+  })
+})
+
+/* ---------------- 屏蔽列表 ---------------- */
+const hiddenState = { keyword: '', selected: new Set(), collapsed: new Set() }
+
+function hiddenSkuTotal() {
+  return HIDDEN_GROUPS.reduce((sum, group) => sum + group.skus.length, 0)
+}
+
+function syncHiddenBadge() {
+  const total = hiddenSkuTotal()
+  const badge = $('#hiddenBadge')
+  badge.textContent = String(total)
+  badge.hidden = total === 0
+  if ($('#hiddenCount')) $('#hiddenCount').textContent = `共 ${total} 个 SKU，已选 ${hiddenState.selected.size} 个`
+  if ($('#hiddenSummary')) {
+    $('#hiddenSummary').textContent = `${HIDDEN_GROUPS.length} 个品名 · ${total} 个 SKU`
+  }
+  const restore = $('#hiddenRestoreSelected')
+  if (restore) {
+    restore.textContent = `解除屏蔽（${hiddenState.selected.size}）`
+    restore.disabled = hiddenState.selected.size === 0
+  }
+  const all = $('#hiddenSelectAll')
+  if (all) all.checked = total > 0 && hiddenState.selected.size === total
+}
+
+function hiddenVisibleGroups() {
+  const keyword = hiddenState.keyword.trim().toLowerCase()
+  return HIDDEN_GROUPS.map((group) => {
+    const hitGroup = group.product.toLowerCase().includes(keyword)
+    const hitSkus = group.skus.filter((sku) =>
+      `${sku.color} ${sku.skuId}`.toLowerCase().includes(keyword),
+    )
+    const visibleSkus = keyword ? (hitGroup ? group.skus : hitSkus) : group.skus
+    return { ...group, visibleSkus, visible: !keyword || hitGroup || hitSkus.length > 0 }
+  }).filter((group) => group.visible)
+}
+
+function renderHidden() {
+  const groups = hiddenVisibleGroups()
+
+  $('#hiddenList').innerHTML = groups.length
+    ? groups
+        .map((group) => {
+          const open = !hiddenState.collapsed.has(group.product)
+          const selectedAll = group.skus.length > 0 && group.skus.every((sku) => hiddenState.selected.has(sku.skuId))
+          const selectedSome = group.skus.some((sku) => hiddenState.selected.has(sku.skuId))
+          return `
+        <section class="hidden-group">
+          <div class="hidden-group__head" data-hide-toggle="${esc(group.product)}">
+            <input type="checkbox" class="hidden-check" data-hide-group="${esc(group.product)}" ${
+              selectedAll ? 'checked' : ''
+            } ${selectedSome && !selectedAll ? 'data-indeterminate="1"' : ''} aria-label="选择品名 ${esc(
+              group.product,
+            )}" />
+            <span class="hidden-caret${open ? ' is-open' : ''}" aria-hidden="true">
+              <svg viewBox="0 0 12 12"><path d="M4 2.5 8 6l-4 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </span>
+            <span class="hidden-group__name">
+              <span class="hidden-group__text" title="${esc(group.product)}">${esc(group.product)}</span>
+              ${group.whole ? '<span class="tag">整组屏蔽</span>' : ''}
+            </span>
+            <span class="hidden-group__meta">${
+              group.whole ? `当前数据 ${group.skus.length} 个 SKU` : `${group.skus.length} 个 SKU`
+            }</span>
+            <button class="btn btn--text btn--sm" data-hide-restore="${esc(group.product)}">解除</button>
+          </div>
+          ${
+            open
+              ? `<div class="hidden-group__body">
+            ${
+              group.visibleSkus.length
+                ? group.visibleSkus
+                    .map(
+                      (sku) => `
+              <div class="hidden-child">
+                ${
+                  group.whole
+                    ? '<span class="hidden-child__dot" aria-hidden="true"></span>'
+                    : `<input type="checkbox" class="hidden-check" data-hide-sku="${esc(sku.skuId)}" ${
+                        hiddenState.selected.has(sku.skuId) ? 'checked' : ''
+                      } aria-label="选择 SKU ${esc(sku.skuId)}" />`
+                }
+                <span class="hidden-child__color" title="${esc(sku.color)}">${esc(sku.color) || '—'}</span>
+                <span class="hidden-child__sku" title="${esc(sku.skuId)}">${esc(sku.skuId)}</span>
+                ${
+                  group.whole
+                    ? '<span></span>'
+                    : `<button class="btn btn--text btn--sm" data-hide-restore-sku="${esc(sku.skuId)}">解除</button>`
+                }
+              </div>`,
+                    )
+                    .join('')
+                : '<p class="hidden-empty">没有匹配的 SKU</p>'
+            }
+          </div>`
+              : ''
+          }
+        </section>`
+        })
+        .join('')
+    : `<p class="hidden-empty">${
+        HIDDEN_GROUPS.length ? '没有匹配的屏蔽记录' : '还没有屏蔽任何品名或 SKU'
+      }</p>`
+
+  // indeterminate 只能用属性设，模板里写不进去
+  $$('[data-indeterminate]').forEach((box) => {
+    box.indeterminate = true
+  })
+  syncHiddenBadge()
+}
+
+function removeHiddenSku(skuId) {
+  HIDDEN_GROUPS = HIDDEN_GROUPS.map((group) => ({
+    ...group,
+    skus: group.skus.filter((sku) => sku.skuId !== skuId),
+  })).filter((group) => group.skus.length > 0)
+  hiddenState.selected.delete(skuId)
+}
+
+$('#hiddenSearch').addEventListener('input', (event) => {
+  hiddenState.keyword = event.target.value
+  renderHidden()
+})
+
+$('#hiddenSelectAll').addEventListener('change', (event) => {
+  const groups = hiddenVisibleGroups()
+  if (event.target.checked) {
+    groups.forEach((group) => {
+      if (group.whole) hiddenState.selected.add(`product:${group.product}`)
+      group.skus.forEach((sku) => hiddenState.selected.add(sku.skuId))
+    })
+  } else {
+    hiddenState.selected.clear()
+  }
+  renderHidden()
+})
+
+$('#hiddenList').addEventListener('click', (event) => {
+  const restoreSku = event.target.closest('[data-hide-restore-sku]')
+  if (restoreSku) {
+    removeHiddenSku(restoreSku.dataset.hideRestoreSku)
+    renderHidden()
+    toast('已解除屏蔽')
+    return
+  }
+
+  const restoreGroup = event.target.closest('[data-hide-restore]')
+  if (restoreGroup) {
+    const product = restoreGroup.dataset.hideRestore
+    HIDDEN_GROUPS = HIDDEN_GROUPS.filter((group) => group.product !== product)
+    HIDDEN_GROUPS.forEach((group) => {})
+    hiddenState.selected.clear()
+    renderHidden()
+    toast('已解除该品名的屏蔽')
+    return
+  }
+
+  const toggle = event.target.closest('[data-hide-toggle]')
+  if (toggle && !event.target.closest('input')) {
+    const product = toggle.dataset.hideToggle
+    if (hiddenState.collapsed.has(product)) hiddenState.collapsed.delete(product)
+    else hiddenState.collapsed.add(product)
+    renderHidden()
+  }
+})
+
+$('#hiddenList').addEventListener('change', (event) => {
+  const groupBox = event.target.closest('[data-hide-group]')
+  if (groupBox) {
+    const group = HIDDEN_GROUPS.find((item) => item.product === groupBox.dataset.hideGroup)
+    if (!group) return
+    if (groupBox.checked) {
+      group.skus.forEach((sku) => hiddenState.selected.add(sku.skuId))
+      if (group.whole) hiddenState.selected.add(`product:${group.product}`)
+    } else {
+      group.skus.forEach((sku) => hiddenState.selected.delete(sku.skuId))
+      hiddenState.selected.delete(`product:${group.product}`)
+    }
+    renderHidden()
+    return
+  }
+
+  const skuBox = event.target.closest('[data-hide-sku]')
+  if (skuBox) {
+    if (skuBox.checked) hiddenState.selected.add(skuBox.dataset.hideSku)
+    else hiddenState.selected.delete(skuBox.dataset.hideSku)
+    syncHiddenBadge()
+  }
+})
+
+$('#hiddenRestoreSelected').addEventListener('click', () => {
+  const ids = [...hiddenState.selected].filter((key) => !key.startsWith('product:'))
+  const products = [...hiddenState.selected]
+    .filter((key) => key.startsWith('product:'))
+    .map((key) => key.slice('product:'.length))
+  if (!ids.length && !products.length) return
+  ids.forEach(removeHiddenSku)
+  HIDDEN_GROUPS = HIDDEN_GROUPS.filter((group) => !products.includes(group.product))
+  hiddenState.selected.clear()
+  renderHidden()
+  toast('已解除选中的屏蔽')
+})
+
+$('#hiddenRestoreAll').addEventListener('click', () => {
+  if (!HIDDEN_GROUPS.length) return
+  openConfirm({
+    title: '全部解除屏蔽',
+    note: `将恢复 ${HIDDEN_GROUPS.length} 个品名、${hiddenSkuTotal()} 个 SKU，解除后它们会重新出现在主面板。`,
+    okText: '全部解除',
+    onOk: () => {
+      HIDDEN_GROUPS = []
+      hiddenState.selected.clear()
+      renderHidden()
+      toast('已全部解除')
+    },
+  })
+})
+
+// 主面板「屏蔽选中」：写进屏蔽清单，同时从主面板移除
+function hideSelectedSkus() {
+  if (!state.selected.size) return
+  const keys = [...state.selected]
+  const byProduct = new Map()
+
+  keys.forEach((key) => {
+    const [product, color] = key.split('|')
+    const group = INVENTORY.find((item) => item.product === product)
+    if (!group || !group.children.some((child) => child.color === color)) return
+    if (!byProduct.has(product)) byProduct.set(product, [])
+    byProduct.get(product).push({ skuId: `${product}|${color}`, color })
+  })
+
+  byProduct.forEach((skus, product) => {
+    const existing = HIDDEN_GROUPS.find((group) => group.product === product)
+    if (existing) {
+      skus.forEach((sku) => {
+        if (!existing.skus.some((item) => item.skuId === sku.skuId)) existing.skus.push(sku)
+      })
+    } else {
+      HIDDEN_GROUPS.push({ product, whole: false, skus })
+    }
+  })
+
+  keys.forEach((key) => {
+    const [product, color] = key.split('|')
+    const group = INVENTORY.find((item) => item.product === product)
+    if (!group) return
+    group.children = group.children.filter((child) => child.color !== color)
+  })
+  for (let i = INVENTORY.length - 1; i >= 0; i -= 1) {
+    if (!INVENTORY[i].children.length) INVENTORY.splice(i, 1)
+  }
+
+  state.selected.clear()
+  renderInventory()
+  syncHiddenBadge()
+  toast(`已屏蔽 ${keys.length} 个 SKU，可在「屏蔽列表」解除`)
+}
+
+/* ---------------- 主面板：添加 SKU ---------------- */
+function addSkuDialog() {
+  openForm({
+    title: '添加 SKU',
+    wide: true,
+    kind: 'add-sku',
+    note: '字段与导入的总表 / 销售表一致；品名 + 颜色不能与已有 SKU 重复。手动添加的 SKU 只保留在当前页面。',
+    values: {
+      product: '',
+      color: '',
+      category: '黑白',
+      treeCategory: '',
+      warehouse: 0,
+      inTransit: 0,
+      producing: 0,
+      backorder: 0,
+      cumulative: 0,
+      months: 12,
+      monthlyAvg: null,
+    },
+    render: (v) => `
+      <p class="form__section">基础信息</p>
+      <div class="form__grid form__grid--2">
+        ${formRow('品名', textField('product', v.product, { placeholder: '例如：挪威网' }))}
+        ${formRow('颜色', textField('color', v.color, { placeholder: '例如：1#黑色' }))}
+        ${formRow(
+          '色彩',
+          selectField('category', v.category, [
+            { value: '黑白', label: '黑白' },
+            { value: '彩色', label: '彩色' },
+          ]),
+        )}
+        ${formRow('树形分类', textField('treeCategory', v.treeCategory, { placeholder: '采购下单用，可留空' }))}
+      </div>
+
+      <p class="form__section">数量（公斤）</p>
+      <div class="form__grid form__grid--4">
+        ${formRow('期初库存', numField('warehouse', v.warehouse, '', { min: 0 }))}
+        ${formRow('在途', numField('inTransit', v.inTransit, '', { min: 0 }))}
+        ${formRow('待生产', numField('producing', v.producing, '', { min: 0 }))}
+        ${formRow('待出库', numField('backorder', v.backorder, '', { min: 0 }))}
+      </div>
+
+      <p class="form__section">动销指标</p>
+      <div class="form__grid form__grid--3">
+        ${formRow('累积条数', numField('cumulative', v.cumulative, '条', { min: 0 }))}
+        ${formRow('动销月份', numField('months', v.months, '月', { min: 1, max: 12 }))}
+        ${formRow('月均条数', numField('monthlyAvg', v.monthlyAvg, '条', { min: 0, placeholder: '留空自动算' }))}
+      </div>`,
+    validate: (v) => {
+      const product = String(v.product || '').trim()
+      const color = String(v.color || '').trim()
+      if (!product) return '品名不能为空'
+      if (!color) return '颜色不能为空'
+      const group = INVENTORY.find((item) => item.product === product)
+      if (group?.children.some((child) => child.color === color)) return '该品名 + 颜色已存在'
+      return null
+    },
+    onSubmit: (v) => {
+      const product = String(v.product).trim()
+      const color = String(v.color).trim()
+      const monthly =
+        v.monthlyAvg === null || v.monthlyAvg === ''
+          ? Math.round((Number(v.cumulative) || 0) / Math.max(1, Number(v.months) || 1))
+          : Number(v.monthlyAvg)
+      const child = {
+        mode: '常规',
+        color,
+        tone: 'normal',
+        planned: 0,
+        producing: Number(v.producing) || 0,
+        backorder: Number(v.backorder) || 0,
+        weekly: Math.round((monthly / 4.3) * 10) / 10,
+        warehouse: Number(v.warehouse) || 0,
+        inTransit: Number(v.inTransit) || 0,
+        monthlyAvg: monthly,
+        treeCategory: String(v.treeCategory || '').trim(),
+      }
+      let group = INVENTORY.find((item) => item.product === product)
+      if (!group) {
+        group = { product, grade: 'Z', children: [] }
+        INVENTORY.push(group)
+      }
+      group.children.push(child)
+      renderInventory()
+      syncCounts()
+      toast(`已添加 ${product} · ${color}`)
+    },
+  })
+}
+
+$('#addSkuBtn').addEventListener('click', addSkuDialog)
+$('#hideSelected').addEventListener('click', hideSelectedSkus)
+
 /* ---------------- 初始化 ---------------- */
 // 依赖 MODES / skuKey 全部初始化完成后再摆种子数据
 normalizeSeed()
@@ -2711,13 +4174,16 @@ renderToneFilters()
 renderInventory()
 renderSales()
 renderConfig()
+renderPurchase()
+renderHidden()
 markClean()
 markPurchaseClean()
 
 // 便于评审直接打开某一屏：?screen=config&panel=weights&strategy=manual&sku=挪威网|1#黑色
 const params = new URLSearchParams(location.search)
 const initialScreen = params.get('screen')
-if (initialScreen && ['inventory', 'sales', 'purchase', 'config'].includes(initialScreen)) switchScreen(initialScreen)
+const SCREENS = ['inventory', 'sales', 'purchase', 'config', 'purchase-settings', 'hidden']
+if (initialScreen && SCREENS.includes(initialScreen)) switchScreen(initialScreen)
 const initialPanel = params.get('panel')
 if (initialPanel && Object.keys(PANEL_DOMAIN).includes(initialPanel)) switchPanel(initialPanel)
 if (params.get('strategy') === 'manual') $('[data-strategy="manual"]').click()
@@ -2733,6 +4199,8 @@ const DIALOGS = {
   'sku-factory': () => editSkuFactoryDialog(null),
   'manual-mode': () => editManualModeDialog(null),
   'manual-sku': () => editManualSkuDialog(null),
+  vat: () => editVatRuleDialog(VAT_RULES[0]),
+  'add-sku': addSkuDialog,
 }
 if (initialDialog && DIALOGS[initialDialog]) DIALOGS[initialDialog]()
 
