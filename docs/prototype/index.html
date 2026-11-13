@@ -767,6 +767,44 @@
       </div>
     </div>
 
+    <!-- ===================== 订单弹窗（下单之后的到货管理） ===================== -->
+    <div class="overlay" id="orderOverlay" hidden>
+      <div class="modal modal--order" role="dialog" aria-modal="true" aria-labelledby="orderTitle">
+        <div class="modal__head order-head">
+          <h2 class="modal__title" id="orderTitle">—</h2>
+          <span class="order-head__color" id="orderColor"></span>
+          <span class="order-head__spacer"></span>
+          <span class="order-head__count" id="orderCount"></span>
+          <button class="icon-btn modal__close" id="orderClose" aria-label="关闭">
+            <svg viewBox="0 0 16 16" fill="none">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- 一条进度带替代四张卡：订了多少、到了多少、还差多少，一眼读完 -->
+        <div class="order-sum" id="orderSum"></div>
+
+        <div class="order-body">
+          <section class="order-col">
+            <div class="order-col__head">
+              <span class="order-col__title">分订单</span>
+              <span class="order-col__hint" id="orderColHint"></span>
+            </div>
+            <div class="order-list" id="orderList"></div>
+          </section>
+
+          <section class="order-col order-col--receipts">
+            <div class="order-col__head">
+              <span class="order-col__title">到货记录</span>
+              <span class="order-col__hint" id="orderReceiptHint"></span>
+            </div>
+            <div class="order-list order-list--receipts" id="orderReceipts"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast" hidden></div>
 
     <script src="./vendor/echarts.min.js"></script>

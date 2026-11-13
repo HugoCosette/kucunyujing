@@ -209,13 +209,41 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return { order: updated, qty: amount }
   }
 
-  function removeLastReceipt(orderId) {
+  // 撤回一条到货：数量退回待收（receivedQty 由 receipts 派生），记录留在列表里灰显，
+  // 谁在什么时候撤的都能追溯；要彻底清掉请用 removeReceipt。
+  function voidReceipt(orderId, receiptId) {
     const at = nowIso()
     let updated = null
     const nextOrders = orders.value.orders.map((order) => {
-      if (order.id !== orderId || order.receipts.length === 0) return order
-      updated = order
-      return { ...order, receipts: order.receipts.slice(0, -1), updatedAt: at }
+      if (order.id !== orderId || order.status !== ORDER_STATUS.ACTIVE) return order
+      let hit = false
+      const receipts = order.receipts.map((receipt) => {
+        if (receipt.id !== receiptId || receipt.voidedAt) return receipt
+        hit = true
+        return { ...receipt, voidedAt: at }
+      })
+      if (!hit) return order
+      updated = { ...order, receipts, updatedAt: at }
+      return updated
+    })
+    if (!updated) return null
+    commitOrders({ ...orders.value, orders: nextOrders })
+    return updated
+  }
+
+  // 删除一条到货：连记录一起抹掉不留痕（录错数据时用），数量同样退回待收。
+  function removeReceipt(orderId, receiptId) {
+    const at = nowIso()
+    let updated = null
+    const nextOrders = orders.value.orders.map((order) => {
+      if (order.id !== orderId || order.status !== ORDER_STATUS.ACTIVE) return order
+      if (!order.receipts.some((receipt) => receipt.id === receiptId)) return order
+      updated = {
+        ...order,
+        receipts: order.receipts.filter((receipt) => receipt.id !== receiptId),
+        updatedAt: at,
+      }
+      return updated
     })
     if (!updated) return null
     commitOrders({ ...orders.value, orders: nextOrders })
@@ -271,7 +299,8 @@ export const usePurchaseStore = defineStore('purchase', () => {
     submitOrders,
     cancelOrder,
     receiveOrder,
-    removeLastReceipt,
+    voidReceipt,
+    removeReceipt,
     updateOrder,
     flushOrders,
     applySettings,

@@ -3952,3 +3952,426 @@ select.po-cell {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* ============================================================
+   订单弹窗：分订单（左）+ 到货记录（右）
+   ============================================================ */
+.modal--order {
+  display: flex;
+  flex-direction: column;
+  width: min(880px, calc(100vw - 32px));
+  min-height: 300px;
+  max-height: min(560px, calc(100vh - 40px));
+  overflow: hidden;
+}
+
+.order-head {
+  gap: 8px;
+  min-height: 42px;
+}
+
+.order-head__color {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(63, 113, 141, 0.12);
+  color: var(--industrial-primary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.order-head__spacer {
+  margin-left: auto;
+}
+
+.order-head__count {
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* ---------- 汇总：一条进度带 ---------- */
+.order-sum {
+  display: flex;
+  align-items: center;
+  gap: 30px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--industrial-grid);
+  background: #fff;
+}
+
+.order-sum__item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.order-sum__item span {
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.order-sum__item b {
+  color: var(--industrial-text);
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+
+.order-sum__item.is-pending b {
+  color: var(--industrial-danger);
+}
+
+/* 进度条和三个数字同处一行：通栏贴在底边会看成一条分隔线 */
+.order-sum__track {
+  flex: 1 1 auto;
+  min-width: 80px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dde5e9;
+}
+
+.order-sum__track i {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--industrial-primary);
+  transition: width 0.18s ease;
+}
+
+.order-sum__pct {
+  flex: 0 0 auto;
+  margin-left: -20px;
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 两栏 ---------- */
+.order-body {
+  display: grid;
+  flex: 1 1 auto;
+  overflow: hidden;
+  grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.order-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.order-col--receipts {
+  border-left: 1px solid var(--industrial-grid);
+}
+
+.order-col__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--industrial-grid-light);
+  background: #eef2f4;
+}
+
+.order-col__title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.order-col__hint {
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.order-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(420px, calc(100vh - 236px));
+  padding: 10px 12px 14px;
+  overflow: auto;
+}
+
+/* ---------- 分订单卡：三行读完 ---------- */
+.ord-card {
+  padding: 9px 11px 8px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.ord-card + .ord-card {
+  margin-top: 8px;
+}
+
+.ord-card:hover {
+  border-color: var(--industrial-grid);
+}
+
+.ord-card__top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.ord-card__factory {
+  overflow: hidden;
+  color: var(--industrial-text);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ord-card__meta {
+  margin-left: auto;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ord-card__nums {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 7px;
+}
+
+.ord-num {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--industrial-text);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ord-num em {
+  color: var(--industrial-muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 400;
+}
+
+.ord-num.is-pending {
+  color: var(--industrial-danger);
+}
+
+.ord-card__track {
+  flex: 1 1 auto;
+  min-width: 48px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe7ea;
+}
+
+.ord-card__track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--industrial-normal);
+}
+
+/* 操作行：输入 + 主按钮靠左，次要操作靠右，用虚线和大字号差把两拨分开 */
+.ord-card__act {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--industrial-grid-light);
+}
+
+.ord-recv {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  overflow: hidden;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.ord-recv:focus-within {
+  border-color: var(--industrial-primary);
+}
+
+.ord-recv input {
+  width: 62px;
+  height: 100%;
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  color: var(--industrial-text);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  outline: none;
+}
+
+.ord-recv input::placeholder {
+  color: #a9b4bb;
+}
+
+.ord-recv span {
+  padding: 0 6px 0 3px;
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.ord-card__max {
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.ord-card__links {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.ord-card__links button,
+.rcpt__acts button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--industrial-muted);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ord-card__links button:hover,
+.rcpt__acts button:hover {
+  color: var(--industrial-primary);
+}
+
+.ord-card__links button.is-warn:hover {
+  color: var(--industrial-replenish);
+}
+
+.ord-card__links button.is-danger {
+  color: rgba(184, 79, 72, 0.72);
+}
+
+.ord-card__links button.is-danger:hover,
+.rcpt__acts button.is-danger:hover {
+  color: var(--industrial-danger);
+}
+
+.ord-card__links button:disabled {
+  color: #c2cbd0;
+  cursor: default;
+}
+
+/* ---------- 到货记录 ---------- */
+.order-list--receipts {
+  padding: 4px 12px 14px;
+}
+
+.rcpt {
+  position: relative;
+  padding: 8px 0 8px 15px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.order-list--receipts .rcpt:last-child {
+  border-bottom: 0;
+}
+
+.rcpt::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  left: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--industrial-normal);
+}
+
+.rcpt__top {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.rcpt__time {
+  color: var(--industrial-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rcpt__qty {
+  color: #3f7d5a;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rcpt__acts {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.rcpt__sub {
+  margin-top: 3px;
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.rcpt.is-voided::before {
+  background: #c9d2d7;
+}
+
+.rcpt.is-voided .rcpt__qty {
+  color: #a9b4bb;
+  text-decoration: line-through;
+}
+
+.rcpt__void {
+  margin-left: auto;
+  color: #a9b4bb;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* ---------- 空态 ---------- */
+.ord-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 100%;
+  min-height: 180px;
+  padding: 24px 12px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ord-empty b {
+  color: var(--industrial-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ord-empty .btn {
+  margin-top: 10px;
+}

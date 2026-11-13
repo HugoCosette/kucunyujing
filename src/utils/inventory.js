@@ -53,8 +53,7 @@ export function calculateInventoryRow(item) {
     Number.isFinite(item.kgFactor) && item.kgFactor > 0 ? item.kgFactor : null
   // 需安排：人工按公斤填写（锁定态才算有效计划，未锁的草稿由页面另行展示）
   const planned = item.planned ?? 0
-  // 采购执行层：已下单 / 已到货来自订单流水（只统计 active）。待收 = 已下单 − 已到货。
-  // 两段加起来才是"已经安排了、还没到齐"的总量，所以只在这里各算一次，别再额外加已到货。
+  // 采购执行层：累计下单 / 到货来自订单流水（只统计 active），三列互为校验：累计下单 = 待收 + 到货。
   const ordered = Number(item.ordered) > 0 ? Number(item.ordered) : 0
   const received = Number(item.received) > 0 ? Number(item.received) : 0
   const pendingOrder = Math.max(0, ordered - received)
@@ -67,7 +66,9 @@ export function calculateInventoryRow(item) {
   const warehouseKg = kgFactor ? item.warehouseStock * kgFactor : null
   // 理论库存是事实层：只由导入数据派生（公斤）
   const theoreticalStock = warehouseKg === null ? null : warehouseKg + inTransitStock
-  // 预计库存 = 事实层 + 采购待收 + 采购已到货 + 锁定需安排（到货动作本身不改变总数）
+  // 预计库存 = 在仓kg + 在途 + 累计下单 + 锁定需安排。
+  // 写成「待收 + 到货」与「累计下单」等价（待收 = 累计下单 − 到货）：到货时一减一增，合计不变，
+  // 所以登记 / 撤销到货不会让预计库存跳动；超收（到货 > 累计下单）时也能把已到的货如实算进来。
   const projectedStock =
     theoreticalStock === null ? null : theoreticalStock + pendingOrder + received + planned
 
@@ -140,7 +141,7 @@ export function calculateInventoryRow(item) {
 }
 
 // 建议需安排（公斤）：补到「正常库存 80% 下限」的差额，基于理论库存；
-// 已在履约的订单（已下单）算作即将到货，先扣掉，避免同一缺口重复补两次。
+// 累计下单（含已到货）算作即将到货，先扣掉，避免同一缺口重复补两次。
 export function getSuggestedPlanned(row) {
   if (!row?.strategyAvailable) return 0
   const incoming = Number(row.ordered) > 0 ? Number(row.ordered) : 0

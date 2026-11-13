@@ -139,7 +139,26 @@
 | 89 | 解除（单个 SKU / 单个品名 / 选中批量 / 全部） | `restoreSku` / `restoreGroup` / `restoreSelected` / `restoreAll` | ✅（新增） | 全部解除要二次确认 |
 | 90 | 导航角标 = 被屏蔽 SKU 数 | `page-navigation-badge` | ✅（新增） | 整组屏蔽按当前数据里该品名的 SKU 数展开 |
 
-## 八、全局
+## 八、订单弹窗 `PurchaseOrderRecordsDialog.vue`
+
+下单之后才有：左栏是分订单（登记到货 / 改单 / 删除待收 / 撤销整单），右栏是到货流水（撤回 / 删除）。已到货与待收都由 `receipts` 派生，撤回一条记录数字自己回去。
+
+改版目标：**一张卡一行读完**，以及**把「登记到货」变成行内主操作**。原版每张卡 220px（三格带框 + 输入行 + 链接行），两张就滚动。
+
+| # | 功能 | 原实现 | 原型 | 落 Vue 要求 |
+|---|---|---|---|---|
+| 94 | 顶部进度带：累积下单 / 已到货 / 待收 + 行内进度条 + 百分比 | `summary` | ✅（重做） | 取代四张等宽卡；待收为 0 时不标红；进度 = 已到货 ÷ 累积下单 |
+| 95 | 分订单卡：染厂 + 缸数·分单人·时间·备注 + 下单·已到·待收 + 到货进度条 | `orders` | ✅（重做） | 三个数字从「三格带框」改成一行文字，只给待收加权；meta 时间只到分钟、不显示年份 |
+| 96 | 本次到货登记（按钮 + Enter） | `receiveDrafts` / `confirmReceive` | ✅ | 范围 0 < x ≤ 待收，超额时按钮直接禁用；输入过程只改按钮态、不重渲染（否则丢焦点） |
+| 97 | 到货流水（时间倒序 / 撤回留痕 / 删除抹掉） | `receipts` / `voidReceipt` / `removeReceipt` | ✅（重做） | 每条标注所属分订单「染厂 · N 缸」；已撤回整行灰 + 数量删除线，并写「已撤回 HH:MM」 |
+| 98 | 改单（改下单量，不低于已到货） | `handleEditQuantity` | ✅ | 表单弹窗，校验下限 = 已到货 |
+| 99 | 删除待收（下单量降到已到货） | `handleRemovePending` | ✅ | 确认文案写清「保留 X 公斤，下单量改成 X」 |
+| 100 | 撤销整单（含到货作废，退回需安排） | `handleCancel` | ✅ | 危险色文字（默认 rgba(184,79,72,.72)，悬停全红）；确认里写明已到货会一并作废 |
+| 101 | 空态（无分订单 / 无到货记录） | — | ✅（新增） | 两栏各自一句说明，居中对齐，不留大白块 |
+
+> 原型入口：`?screen=purchase&dialog=order`。落 Vue 时只动 `PurchaseOrderRecordsDialog.vue` 的 template + scoped style，`purchase` store 的 `orderSummary` / `receiveOrder` / `voidReceipt` / `removeReceipt` 不用改。
+
+## 九、全局
 
 | # | 功能 | 原实现 | 原型 | 落 Vue 要求 |
 |---|---|---|---|---|

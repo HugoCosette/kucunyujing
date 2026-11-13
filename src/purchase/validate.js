@@ -185,6 +185,8 @@ function normalizeReceipt(receipt, index) {
     at: text(receipt.at) || new Date().toISOString(),
     qty,
     by: text(receipt.by),
+    // 撤回留痕：有 voidedAt 的记录留在列表里灰显，但不计入已到货（数量退回待收）。
+    voidedAt: text(receipt.voidedAt) || null,
   }
 }
 
@@ -225,7 +227,7 @@ function normalizeOrder(order, index) {
     submittedAt,
     updatedAt: text(order.updatedAt) || submittedAt,
     month: text(order.month) || monthOf(submittedAt),
-    receivedQty: receipts.reduce((sum, receipt) => sum + receipt.qty, 0),
+    receivedQty: receipts.reduce((sum, receipt) => sum + (receipt.voidedAt ? 0 : receipt.qty), 0),
     receipts,
     revisions: asArray(order.revisions).filter(
       (revision) => revision && typeof revision === 'object',

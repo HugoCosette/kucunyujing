@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import {
   ElButton,
@@ -26,6 +27,7 @@ import VirtualList from '@/components/VirtualList.vue'
 import { useSourceImport } from '@/composables/useSourceImport'
 import { useSplitImport } from '@/composables/useSplitImport'
 import { useInventoryStore } from '@/stores/inventory'
+import { useInventoryViewStore } from '@/stores/inventoryView'
 import { usePurchaseStore } from '@/stores/purchase'
 import { persistFactLayer, schedulePlanPersist } from '@/data/persistence'
 import { categoryForSku, findFactoryById, orderSummaryOf, planOrderQuantity, resolveVatRule } from '@/purchase'
@@ -157,16 +159,22 @@ function purchaseRowVatPlan(row) {
     monthlyAvgCount: item?.monthlyAvgCount,
   })
 }
-const plannedDrafts = reactive({})
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
-const selectedWarningTones = ref([])
-const selectedModeLabels = ref([])
-const productFilter = ref('')
-const colorFilter = ref('')
+// 查看状态挂在 store 上：路由切换会重建本组件，筛选 / 展开 / 勾选 / 滚动位置不能跟着清空。
+const viewStore = useInventoryViewStore()
+const {
+  productFilter,
+  colorFilter,
+  selectedWarningTones,
+  selectedModeLabels,
+  expandedProductKeys,
+  selectedSkuIds,
+  selectedRowId,
+  tableScrollTop,
+} = storeToRefs(viewStore)
 const expandingProductKeys = ref(new Set())
-const selectedRowId = ref(null)
-// 批量补货勾选：只记 SKU 标识集合。行会随虚拟滚动装卸，选择状态不能挂在行上。
-const selectedSkuIds = ref(new Set())
+// 需安排草稿同样跟着 store 走：直接持有对象引用，手填的值切页回来还在（导入时统一清空）。
+const plannedDrafts = viewStore.plannedDrafts
 // SKU 详情弹窗只保留一个实例并挂在页面层级：放在虚拟滚动行里会随行卸载，
 // 遮罩还会被列表的 transform 容器裁掉。
 const skuDetailVisible = ref(false)
@@ -547,7 +555,7 @@ function openOrderDialog(row) {
 
 function orderCellTitle(row) {
   if (!row || row.isProductGroup) return ''
-  return `累计下单 ${formatQuantity(row.ordered)} 公斤，已到货 ${formatQuantity(
+  return `累计下单 ${formatQuantity(row.ordered)} 公斤，到货 ${formatQuantity(
     row.received,
   )} 公斤，待收 ${formatQuantity(row.pendingOrder)} 公斤`
 }
@@ -587,8 +595,9 @@ const hasActiveFilters = computed(
 )
 
 // 关键词筛选输入防抖，避免大表逐键全量过滤。
-const appliedProductFilter = ref('')
-const appliedColorFilter = ref('')
+// 初值直接取 store 里还原出来的输入：回到主面板时不能再等一次输入才生效。
+const appliedProductFilter = ref(productFilter.value.trim().toLocaleLowerCase('zh-CN'))
+const appliedColorFilter = ref(colorFilter.value.trim().toLocaleLowerCase('zh-CN'))
 let filterDebounceTimer = 0
 
 function applyKeywordFilters() {
@@ -657,8 +666,10 @@ function toggleWarningFilter(key) {
   selectedWarningTones.value = [...selectedTones]
 }
 
-const expandedProductKeys = ref(inventoryRows.value.map((row) => row.id))
-let knownProductKeys = new Set(expandedProductKeys.value)
+// null = 第一次进主面板，默认全部展开；恢复上次状态时原样沿用（空数组就是用户把品名都收起了）。
+if (!expandedProductKeys.value) expandedProductKeys.value = inventoryRows.value.map((row) => row.id)
+// 新出现的品名（导入 / 手动加行）自动展开。基准取当前数据，恢复「全部收起」时不会被强制展开。
+let knownProductKeys = new Set(inventoryRows.value.map((row) => row.id))
 const productTransitionTimers = new Map()
 const productTransitionDuration = 120
 
@@ -731,9 +742,10 @@ const TABLE_COLUMNS = [
   { key: 'urgency', label: '预警', width: 44, group: '商品' },
   { key: 'planned', label: '需安排', width: 142, group: '入口' },
   { key: 'producing', label: '生产中', width: 76, group: '入口' },
-  // 「备货」= 采购执行层：只来自订单流水，与导入数据无关。
-  { key: 'ordered', label: '已下单', width: 84, group: '备货' },
-  { key: 'received', label: '已到货', width: 84, group: '备货' },
+  // 「备货」= 采购执行层：只来自订单流水，与导入数据无关。三列互为校验：累积下单 = 待收 + 到货。
+  { key: 'ordered', label: '累积下单', width: 84, group: '备货' },
+  { key: 'pending', label: '待收', width: 76, group: '备货' },
+  { key: 'received', label: '到货', width: 76, group: '备货' },
   { key: 'orderAction', label: '订单', width: 64, group: '备货' },
   { key: 'backorder', label: '欠货', width: 68, group: '出口' },
   { key: 'weeklySales', label: '周销量', width: 76, group: '出口' },
@@ -762,7 +774,6 @@ const tableColumnGroups = (() => {
 })()
 
 const tableScrollRef = ref(null)
-const tableScrollTop = ref(0)
 const tableViewportHeight = ref(600)
 let tableScrollFrame = 0
 let tableResizeObserver = null
@@ -819,7 +830,35 @@ const tableVirtualRows = computed(() => {
 })
 const tableBodyHeight = computed(() => tableVirtualRows.value.total * TABLE_ROW_HEIGHT)
 
+// 组件是重建出来的，但筛选 / 展开 / 草稿都在 store 里，行会按同样的顺序重建，
+// 挂载时把滚动位置、草稿预览色与勾选补回来，看起来就跟没离开过一样。
+function restoreTableView() {
+  // 模式名可能随配置改名：留下的旧名字会把整表筛空，直接剔掉。
+  const modeNames = new Set(modeOptions.value)
+  const keptModes = selectedModeLabels.value.filter((label) => modeNames.has(label))
+  if (keptModes.length !== selectedModeLabels.value.length) selectedModeLabels.value = keptModes
+
+  const target = tableScrollTop.value
+  if (target > 0) {
+    // 排在筛选 watch 的「回到顶部」之后执行，否则会被它压回 0。
+    nextTick(() => {
+      const element = tableScrollRef.value
+      if (!element) return
+      element.scrollTop = target
+      tableScrollTop.value = element.scrollTop
+    })
+  }
+
+  // 预警预览色是按行的缓存：按草稿重算一遍。
+  for (const id of Object.keys(plannedDrafts)) {
+    refreshPlannedPreviewTone(itemById.value.get(id))
+  }
+  // 勾选可能来自屏蔽前的行，先剔掉已不可见的 SKU。
+  pruneHiddenSelection()
+}
+
 onMounted(() => {
+  restoreTableView()
   const element = tableScrollRef.value
   if (!element) return
   tableViewportHeight.value = element.clientHeight || tableViewportHeight.value
@@ -941,7 +980,10 @@ function hasPlannedUndo(id) {
 }
 
 function getPlannedDraft(row) {
-  return hasPlannedDraft(row.id) ? plannedDrafts[row.id] : row.planned
+  if (hasPlannedDraft(row.id)) return plannedDrafts[row.id]
+  // 0 与缺省都当作「还没填」：否则下单清零留下的一个 0 会把占位建议值挡住，看不出还差多少。
+  if (hasPlannedUndo(row.id)) return row.planned
+  return row.planned > 0 ? row.planned : null
 }
 
 // 需安排建议值：补到绿色带中位（正常库存）的差额，基于理论库存；批量补货的默认数量与单行占位同一口径。
@@ -950,8 +992,7 @@ function getPlannedPlaceholder(row) {
   // 订单货没有建议值：这一格就是客户电话报的量，提示人工填写。
   if (row.manualBehavior === 'order') return '按订单填写'
   if (!row.strategyAvailable) return ''
-  // 已有订单在履约时不再给建议值：那一格空着，避免引导重复补货（订单进度看「备货」列）。
-  if (Number(row.ordered) > 0) return ''
+  // 有订单在履约也照常给建议值（建议值本身已扣掉累计下单的量），缺口没补够就还能继续下。
   return `${formatQuantity(getSuggestedPlanned(row))}`
 }
 
@@ -963,7 +1004,11 @@ function getPlannedPlaceholderTitle(row) {
     return `备货模式缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
   }
 
-  return `建议填写 ${getPlannedPlaceholder(row)}，采纳后预计库存达到正常库存（绿色带中位）；该建议不会自动采纳，下单页会再按缸规则建议整缸数量`
+  const suggestion = getSuggestedPlanned(row)
+  if (suggestion > 0) {
+    return `建议填写 ${formatQuantity(suggestion)}，采纳后预计库存达到正常库存（绿色带中位）；该建议不会自动采纳，下单页会再按缸规则建议整缸数量`
+  }
+  return `预计库存（已含累计下单 ${formatQuantity(row.ordered)} 公斤）不低于正常库存下限，无需再补；要加量可直接填写`
 }
 
 function updatePlannedDraft(id, value) {
@@ -1386,7 +1431,7 @@ function buildPurchaseSheetXml(rows, columnWidths) {
 
 function exportPurchaseListToExcel() {
   const rows = [
-    ['品名', '颜色', '树形分类', '需安排', '缸数', '每缸公斤', '建议下单', '已下单', '已到货', '待收', '分单数量'],
+    ['品名', '颜色', '树形分类', '需安排', '缸数', '每缸公斤', '建议下单', '累积下单', '到货', '待收', '分单数量'],
     ...purchaseListRows.value.map((item) => {
       const orders = purchaseRowOrders(item)
       const plan = purchaseRowVatPlan(item)
@@ -1407,7 +1452,7 @@ function exportPurchaseListToExcel() {
   ]
 
   const detailRows = [
-    ['品名', '颜色', '树形分类', '染厂', '分单人员', '缸数', '每缸公斤', '数量（公斤）', '已到货', '待收', '备注'],
+    ['品名', '颜色', '树形分类', '染厂', '分单人员', '缸数', '每缸公斤', '数量（公斤）', '到货', '待收', '备注'],
   ]
   for (const item of purchaseListRows.value) {
     const skuId = purchaseRowSkuId(item)
@@ -1487,6 +1532,9 @@ function handleSourcesImported(summary) {
 
   rebuildLeafRows()
   selectedRowId.value = null
+  // 换了数据就从头看：旧的滚动位置在新表里没有意义。
+  tableScrollTop.value = 0
+  if (tableScrollRef.value) tableScrollRef.value.scrollTop = 0
 
   const messages = []
   if (summary.inventory) {
@@ -1957,6 +2005,13 @@ function downloadImportTemplate() {
               >
                 {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
               </div>
+              <div class="inventory-vtable__cell" :title="orderCellTitle(row)">
+                {{
+                  row.isProductGroup && !row.pendingOrder
+                    ? '—'
+                    : formatQuantity(row.pendingOrder)
+                }}
+              </div>
               <div
                 class="inventory-vtable__cell inventory-vtable__cell--received"
                 :title="orderCellTitle(row)"
@@ -2244,7 +2299,7 @@ function downloadImportTemplate() {
       align-center
     >
       <p class="purchase-list-hint">
-        已采纳的需安排会加入清单；同一商品颜色只保留一条。「已下单」是分订单数量合计，点「去下单」按染厂拆单。
+        已采纳的需安排会加入清单；同一商品颜色只保留一条。「累积下单」是分订单数量合计，点「去下单」按染厂拆单。
       </p>
       <div class="purchase-list-table" role="table" aria-label="本次采购清单">
         <VirtualList
@@ -2259,8 +2314,8 @@ function downloadImportTemplate() {
               <span role="columnheader">颜色</span>
               <span role="columnheader">树形分类</span>
               <span role="columnheader">需安排</span>
-              <span role="columnheader">已下单</span>
-              <span role="columnheader">已到货</span>
+              <span role="columnheader">累积下单</span>
+              <span role="columnheader">到货</span>
               <span role="columnheader">待收</span>
               <span role="columnheader">操作</span>
             </div>
