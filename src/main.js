@@ -20,10 +20,17 @@ import { createPinia } from 'pinia'
 
 import App from './App.vue'
 import router from './router'
+import { bootstrapPersistence } from './data/bootstrap'
 
 const app = createApp(App)
 
 app.use(createPinia())
-app.use(router)
 
-app.mount('#app')
+// 先把 IndexedDB 里的快照、需安排与订单读回内存，再挂载路由与页面。
+// 读失败不影响启动：退回演示种子数据，页面照常可用。
+bootstrapPersistence()
+  .catch((error) => console.warn('持久化数据加载失败', error))
+  .finally(() => {
+    app.use(router)
+    app.mount('#app')
+  })

@@ -1,5 +1,6 @@
 import { computed, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
+import { ElMessage } from 'element-plus'
 import {
   buildOrderIndex,
   loadOrders,
@@ -44,6 +45,14 @@ export const usePurchaseStore = defineStore('purchase', () => {
   const orderIndex = computed(() => buildOrderIndex(orders.value.orders))
 
   let ordersSaveTimer = 0
+  // 只提示一次：保存失败说明浏览器禁用了 IndexedDB，反复弹窗没有意义。
+  let orderSaveFailureNotified = false
+
+  function reportOrderSaveFailure() {
+    if (orderSaveFailureNotified) return
+    orderSaveFailureNotified = true
+    ElMessage.error('分订单没能存到本机（浏览器可能禁用了 IndexedDB），关闭页面会丢失')
+  }
 
   // 鍒嗚鍗曠紪杈戠殑鏄€岃崏绋裤€嶏細涓婚潰鏉垮畬鍏ㄦ劅鐭ヤ笉鍒帮紝纭涓嬪崟鍚庢墠杩?orders 娴佹按銆?
   function orderEntries(skuId) {
@@ -76,7 +85,9 @@ export const usePurchaseStore = defineStore('purchase', () => {
     if (ordersSaveTimer) clearTimeout(ordersSaveTimer)
     ordersSaveTimer = window.setTimeout(() => {
       ordersSaveTimer = 0
-      void saveOrders(orders.value)
+      void saveOrders(orders.value).then((result) => {
+        if (result?.persisted === false) reportOrderSaveFailure()
+      })
     }, 400)
   }
 
@@ -84,7 +95,9 @@ export const usePurchaseStore = defineStore('purchase', () => {
     if (!ordersSaveTimer) return
     clearTimeout(ordersSaveTimer)
     ordersSaveTimer = 0
-    await saveOrders(orders.value)
+    const result = await saveOrders(orders.value)
+    if (result?.persisted === false) reportOrderSaveFailure()
+    return result
   }
 
   // 涓嬪崟椤电紪杈戠殑鏄崏绋匡紙drafts锛夛紝纭涓嬪崟鍚庢墠鎴愪负璁㈠崟銆?

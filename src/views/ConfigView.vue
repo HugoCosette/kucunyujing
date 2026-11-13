@@ -17,6 +17,7 @@ import {
 } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import PurchaseSettingsPanel from '@/components/PurchaseSettingsPanel.vue'
+import DataStoragePanel from '@/components/DataStoragePanel.vue'
 import ScoringSettings from '@/components/ScoringSettings.vue'
 import SpuGradeSettings from '@/components/SpuGradeSettings.vue'
 import {
@@ -642,6 +643,8 @@ const activePanel = ref('strategy')
 // 设置页一个壳两个域：左侧分区决定顶部工具条用哪一套。
 const STOCKING_PANELS = ['strategy', 'weights', 'scoring', 'spu']
 const isStockingPanel = computed(() => STOCKING_PANELS.includes(activePanel.value))
+// 数据存储分区独立成域：它不编辑配置草稿，工具条不显示保存 / 放弃。
+const isDataPanel = computed(() => activePanel.value === 'data')
 
 // 下单配置的草稿在子组件里；外壳只读它暴露的 dirty / meta，动作走 purchaseCall。
 const purchasePanelRef = ref(null)
@@ -665,7 +668,7 @@ function purchaseCall(method) {
 const route = useRoute()
 onMounted(() => {
   const panel = String(route.query.panel ?? '')
-  const known = [...STOCKING_PANELS, 'vat', 'factories', 'people', 'categories', 'sku-factories']
+  const known = [...STOCKING_PANELS, 'vat', 'factories', 'people', 'categories', 'sku-factories', 'data']
   if (known.includes(panel)) activePanel.value = panel
 })
 
@@ -1122,7 +1125,7 @@ function handleProfileMenu(command) {
     </div>
 
     <!-- 下单配置：工具条跟着分区切换，保存 / 放弃走 PurchaseSettingsPanel 暴露的方法 -->
-    <div v-else class="config-bar">
+    <div v-else-if="!isDataPanel" class="config-bar">
       <h1 class="config-bar__title">设置</h1>
       <span class="config-bar__domain">下单配置</span>
       <span class="state" :class="{ 'state--dirty': purchaseDirty }">
@@ -1153,6 +1156,14 @@ function handleProfileMenu(command) {
           确定
         </button>
       </div>
+    </div>
+
+    <!-- 数据存储：只读展示 + 备份 / 恢复，没有草稿可保存 -->
+    <div v-else class="config-bar">
+      <h1 class="config-bar__title">设置</h1>
+      <span class="config-bar__domain">数据存储</span>
+      <span class="state">本机 IndexedDB</span>
+      <div class="config-bar__end"></div>
     </div>
 
     <div class="config-layout">
@@ -1245,6 +1256,19 @@ function handleProfileMenu(command) {
           >
             <span class="rail__title">SKU 可选染厂</span>
             <span class="rail__meta">{{ purchaseMeta.skus }} 个 SKU 有约束</span>
+          </button>
+        </div>
+
+        <div class="rail__group">
+          <div class="rail__group-title">数据</div>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': isDataPanel }"
+            @click="activePanel = 'data'"
+          >
+            <span class="rail__title">本机数据存储</span>
+            <span class="rail__meta">{{ inventoryItems.length }} 行</span>
           </button>
         </div>
       </aside>
@@ -1641,10 +1665,13 @@ function handleProfileMenu(command) {
 
           <!-- 下单配置：内容与旧「下单设置」一致，只换了外壳 -->
           <PurchaseSettingsPanel
-            v-show="!isStockingPanel"
+            v-show="!isStockingPanel && !isDataPanel"
             ref="purchasePanelRef"
             :active-panel="activePanel"
           />
+
+          <!-- 本机数据存储：占用 / 快照 / 导出备份 -->
+          <DataStoragePanel v-show="isDataPanel" />
         </div>
       </div>
     </div>

@@ -28,10 +28,17 @@ export function useSourceImport({ onApplied }) {
       return
     }
 
-    applySourceImport(inventoryStore, current)
+    const persisted = applySourceImport(inventoryStore, current)
 
     onApplied?.(current)
     cancel()
+
+    // 快照压缩落库要一两秒，不阻塞弹窗关闭；失败时明确提示，避免「界面说导入成功、刷新后没了」。
+    void persisted.then((snapshotId) => {
+      if (!snapshotId) {
+        ElMessage.error('导入的数据没能存到本机（浏览器禁用了存储或空间不足），刷新后会丢失，请先导出留底')
+      }
+    })
   }
 
   return {

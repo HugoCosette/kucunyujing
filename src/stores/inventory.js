@@ -1,6 +1,7 @@
 import { ref, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
 import { initialInventoryItems } from '@/data/inventoryItems'
+import { applyPlanLayer } from '@/data/serialize'
 
 // 演示数据缺少唯一标识、总出库数量、动销指标与公斤系数：按周消耗折算一组稳定数值，
 // 让模式判定在未导入 Excel 时同样可见；导入后一律以 Excel 为准。
@@ -24,13 +25,28 @@ function withDemoSourceFields(item) {
   }
 }
 
+// 启动时由 bootstrap 放进来的快照（事实层）与计划层；没有就用演示种子数据。
+let primedState = null
+export function primeInventoryState(state) {
+  primedState = state ?? null
+}
+
 function createInventoryState() {
-  const inventoryItems = ref(initialInventoryItems.map(withDemoSourceFields))
-  const purchaseList = ref([])
-  const plannedUndoHistory = ref({})
+  const primed = primedState
+  primedState = null
+
+  const baseItems = primed?.inventoryItems ?? initialInventoryItems.map(withDemoSourceFields)
+  // 需安排 / 采购清单 / 撤销快照按 skuId 挂回行上：行 id 会随导入重排，不能用 id 存。
+  const plan = primed?.planLayer
+    ? applyPlanLayer(baseItems, primed.planLayer)
+    : { purchaseList: [], plannedUndoHistory: {} }
+
+  const inventoryItems = ref(baseItems)
+  const purchaseList = ref(plan.purchaseList)
+  const plannedUndoHistory = ref(plan.plannedUndoHistory)
   // 销售表：在“销售表”面板导入的 1-12 月条数与重量，按唯一标识叠加到主面板行上。
   // 数据可达数万 SKU，用 shallowRef 保存整体替换的对象，不做逐行深度响应式。
-  const salesSheet = shallowRef(null)
+  const salesSheet = shallowRef(primed?.salesSheet ?? null)
 
   // 模式与系数在视图计算时按当前配置现算，store 只保存导入的原始数据。
   return { inventoryItems, purchaseList, plannedUndoHistory, salesSheet }

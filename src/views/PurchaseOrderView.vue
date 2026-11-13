@@ -5,6 +5,7 @@ import PanelNavigation from '@/components/PanelNavigation.vue'
 import SkuOrderEditor from '@/components/SkuOrderEditor.vue'
 import { useInventoryStore } from '@/stores/inventory'
 import { usePurchaseStore } from '@/stores/purchase'
+import { schedulePlanPersist } from '@/data/persistence'
 import { categoryForSku, planOrderQuantity, resolveVatRule } from '@/purchase'
 import { formatQuantity } from '@/utils/inventory'
 
@@ -145,6 +146,7 @@ async function revokeRow(row) {
   clearPlannedFor(row.skuId)
   const index = inventoryStore.purchaseList.findIndex((entry) => entry.id === row.id)
   if (index !== -1) inventoryStore.purchaseList.splice(index, 1)
+  schedulePlanPersist(inventoryStore)
   ElMessage.success(`已从采购清单剔除「${label}」`)
 }
 
@@ -171,6 +173,7 @@ function submitRows(targets) {
     )
     if (index !== -1) inventoryStore.purchaseList.splice(index, 1)
   }
+  schedulePlanPersist(inventoryStore)
   void purchaseStore.flushOrders()
   return result
 }

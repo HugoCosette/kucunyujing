@@ -27,6 +27,7 @@ import { useSourceImport } from '@/composables/useSourceImport'
 import { useSplitImport } from '@/composables/useSplitImport'
 import { useInventoryStore } from '@/stores/inventory'
 import { usePurchaseStore } from '@/stores/purchase'
+import { persistFactLayer, schedulePlanPersist } from '@/data/persistence'
 import { categoryForSku, findFactoryById, orderSummaryOf, planOrderQuantity, resolveVatRule } from '@/purchase'
 import { groupRowsByProduct } from '@/utils/productGroups'
 import {
@@ -271,6 +272,8 @@ function scheduleRevealSkuRow(item, attempt = 0) {
 }
 
 function handleSkuAdded(item) {
+  // 手动添加的行属于事实层：并入当前快照（不新建快照，否则 5 个名额很快被手动添加占满）。
+  persistFactLayer(inventoryStore, { createSnapshot: false, source: 'manual' })
   // watch(inventoryItems.length) 会在 nextTick 前重建行，这里等重建完成后再定位新行。
   nextTick(() => {
     // 品名级屏蔽会连新加的 SKU 一起挡住，这里直接给出解除入口，不让用户以为添加失败。
@@ -919,6 +922,7 @@ function applyRestockPlans(plans) {
   }
 
   refreshLeafRows(changedIds)
+  schedulePlanPersist(inventoryStore)
   return changedIds.length
 }
 
@@ -1037,6 +1041,7 @@ function acceptPlannedDraft(row) {
   delete plannedPreviewTones[row.id]
   refreshLeafRow(row.id)
   syncPurchaseItem(item)
+  schedulePlanPersist(inventoryStore)
 }
 
 function handlePlannedAction(row, event) {
@@ -1099,6 +1104,7 @@ function undoPlannedAcceptance(row) {
   delete plannedPreviewTones[row.id]
   delete plannedUndoHistory[row.id]
   refreshLeafRow(row.id)
+  schedulePlanPersist(inventoryStore)
 }
 
 // —— 批量补货 ——
