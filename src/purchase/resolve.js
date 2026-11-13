@@ -65,3 +65,53 @@ export function summarizeOrders(entries) {
   }
   return { total, counted, vats }
 }
+
+const EMPTY_ORDER_ENTRY = Object.freeze({
+  ordered: 0,
+  received: 0,
+  pending: 0,
+  count: 0,
+  vats: 0,
+  orders: [],
+})
+
+// 订单聚合索引：按唯一标识汇总 active 订单。主面板「备货」列与预计库存都只读它，
+// 作废（cancelled）的订单保留在流水里，但不参与任何统计。
+export function buildOrderIndex(orders) {
+  const index = new Map()
+
+  for (const order of orders ?? []) {
+    if (order?.status !== 'active') continue
+    const key = String(order.skuId ?? '').trim()
+    if (!key) continue
+
+    const entry = index.get(key) ?? {
+      ordered: 0,
+      received: 0,
+      pending: 0,
+      count: 0,
+      vats: 0,
+      orders: [],
+    }
+
+    const quantity = Number(order.quantity)
+    entry.ordered += Number.isFinite(quantity) && quantity > 0 ? quantity : 0
+    const received = Number(order.receivedQty)
+    entry.received += Number.isFinite(received) && received > 0 ? received : 0
+    const vatCount = Number(order.vatCount)
+    if (Number.isFinite(vatCount) && vatCount > 0) entry.vats += vatCount
+    entry.count += 1
+    entry.orders.push(order)
+    index.set(key, entry)
+  }
+
+  for (const entry of index.values()) {
+    entry.pending = Math.max(0, entry.ordered - entry.received)
+  }
+  return index
+}
+
+export function orderSummaryOf(index, skuId) {
+  const key = String(skuId ?? '').trim()
+  return (key && index?.get(key)) || EMPTY_ORDER_ENTRY
+}

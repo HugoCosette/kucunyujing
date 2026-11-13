@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { ElButton, ElCheckbox, ElInput, ElMessage } from 'element-plus'
+import { ElCheckbox, ElMessage, ElMessageBox } from 'element-plus'
 import { countHiddenSkus } from '@/stocking'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
@@ -210,6 +210,16 @@ async function restoreSku(sku) {
 
 async function restoreAll() {
   const count = hiddenSkuTotal.value
+  if (!count) return
+  const confirmed = await ElMessageBox.confirm(
+    `解除全部 ${count} 个 SKU 的屏蔽？解除后会立即回到主面板。`,
+    '全部解除屏蔽',
+    { confirmButtonText: '全部解除', cancelButtonText: '取消', type: 'warning' },
+  )
+    .then(() => true)
+    .catch(() => false)
+  if (!confirmed) return
+
   await stockingStore.restoreAllHidden()
   ElMessage.success(`已解除全部屏蔽（${count} 个 SKU）`)
   clearSelection()
@@ -218,16 +228,42 @@ async function restoreAll() {
 
 <template>
   <section class="hidden-panel" aria-label="屏蔽列表">
-    <div class="hidden-panel__toolbar">
-      <ElInput
-        v-model="searchKeyword"
-        class="hidden-panel__search"
-        placeholder="搜索品名 / 颜色 / SKU"
-        aria-label="搜索屏蔽记录"
-        clearable
-      />
+    <div class="page-head">
+      <h1 class="page-title">屏蔽列表</h1>
+      <div class="page-head__actions">
+        <span class="meta">{{ groups.length }} 个品名 · {{ hiddenSkuTotal }} 个 SKU</span>
+      </div>
+    </div>
+
+    <div class="page-toolbar" role="search">
+      <label class="field hidden-search">
+        <svg class="field__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.2" stroke="currentColor" stroke-width="1.4" />
+          <path d="m10.2 10.2 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+        <input
+          v-model="searchKeyword"
+          class="input input--search hidden-search__input"
+          type="text"
+          placeholder="搜索品名 / 颜色 / SKU"
+          aria-label="搜索屏蔽记录"
+          @keydown.esc="searchKeyword = ''"
+        />
+        <button
+          v-if="searchKeyword"
+          class="icon-btn hidden-search__clear"
+          type="button"
+          aria-label="清空搜索"
+          @click="searchKeyword = ''"
+        >
+          <svg viewBox="0 0 16 16" fill="none">
+            <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+        </button>
+      </label>
+
       <ElCheckbox
-        class="hidden-panel__select-all"
+        class="hidden-check"
         :model-value="allSelected"
         :indeterminate="someSelected"
         :disabled="visibleGroups.length === 0"
@@ -235,116 +271,124 @@ async function restoreAll() {
       >
         全选
       </ElCheckbox>
-      <span class="hidden-panel__count">
-        共 {{ hiddenSkuTotal }} 个 SKU，已选 {{ selectedCount }} 个
-      </span>
-      <div class="hidden-panel__actions">
-        <ElButton size="small" :disabled="hiddenSkuTotal === 0" @click="restoreAll">
+      <span class="toolbar__sep" />
+      <span class="meta">共 {{ hiddenSkuTotal }} 个 SKU，已选 {{ selectedCount }} 个</span>
+
+      <div class="toolbar__end">
+        <button
+          class="btn btn--sm"
+          type="button"
+          :disabled="hiddenSkuTotal === 0"
+          @click="restoreAll"
+        >
           全部解除
-        </ElButton>
-        <ElButton
-          size="small"
-          type="primary"
+        </button>
+        <button
+          class="btn btn--primary btn--sm"
+          type="button"
           :disabled="selectedCount === 0"
           @click="restoreSelected"
         >
           解除屏蔽（{{ selectedCount }}）
-        </ElButton>
+        </button>
       </div>
     </div>
 
-    <div class="hidden-panel__list">
-      <p v-if="groups.length === 0" class="hidden-panel__empty">还没有屏蔽任何品名或 SKU</p>
-      <p v-else-if="visibleGroups.length === 0" class="hidden-panel__empty">
-        没有匹配「{{ searchKeyword.trim() }}」的屏蔽记录
-      </p>
+    <div class="table-card">
+      <div class="hidden-list">
+        <p v-if="groups.length === 0" class="hidden-empty">
+          还没有屏蔽任何品名或 SKU
+          <span class="hidden-empty__hint">
+            在主面板勾选 SKU 后点右下角「屏蔽选中」即可记进这份清单，重新导入或刷新后仍然隐藏；解除后会立即回到主面板。
+          </span>
+        </p>
+        <p v-else-if="visibleGroups.length === 0" class="hidden-empty">
+          没有匹配「{{ searchKeyword.trim() }}」的屏蔽记录
+        </p>
 
-      <section v-for="group in visibleGroups" :key="group.product" class="hidden-skus-group">
-        <div
-          class="hidden-skus-group__head"
-          role="button"
-          tabindex="0"
-          :aria-expanded="isGroupExpanded(group.product)"
-          @click="toggleGroupExpanded(group.product)"
-          @keydown.enter.prevent="toggleGroupExpanded(group.product)"
-        >
-          <ElCheckbox
-            class="hidden-skus-check"
-            :model-value="groupState(group) === 'all'"
-            :indeterminate="groupState(group) === 'some'"
-            :aria-label="`选择品名 ${group.product}`"
-            @click.stop
-            @change="(checked) => toggleGroup(group, checked)"
-          />
-          <span
-            class="hidden-skus-caret"
-            :class="{ 'hidden-skus-caret--open': isGroupExpanded(group.product) }"
-            aria-hidden="true"
+        <section v-for="group in visibleGroups" :key="group.product" class="hidden-group">
+          <div
+            class="hidden-group__head"
+            role="button"
+            tabindex="0"
+            :aria-expanded="isGroupExpanded(group.product)"
+            @click="toggleGroupExpanded(group.product)"
+            @keydown.enter.prevent="toggleGroupExpanded(group.product)"
           >
-            <svg viewBox="0 0 12 12">
-              <path
-                d="M4 2.5 8 6l-4 3.5"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="1.4"
-              />
-            </svg>
-          </span>
-          <span class="hidden-skus-name">
-            <span class="hidden-skus-name__text" :title="group.product">
-              {{ group.product || '（未记录品名）' }}
-            </span>
-            <span v-if="group.whole" class="hidden-skus-tag">整组屏蔽</span>
-          </span>
-          <span class="hidden-skus-meta">
-            {{
-              group.whole
-                ? `当前数据 ${group.skus.length} 个 SKU`
-                : `${group.skus.length} 个 SKU`
-            }}
-          </span>
-          <ElButton
-            size="small"
-            text
-            type="primary"
-            class="hidden-skus-restore"
-            @click.stop="restoreGroup(group)"
-          >
-            解除
-          </ElButton>
-        </div>
-
-        <div v-if="isGroupExpanded(group.product)" class="hidden-skus-children">
-          <p v-if="group.visibleSkus.length === 0" class="hidden-skus-child-empty">
-            {{ group.skus.length === 0 ? '当前数据中没有该品名' : '没有匹配的 SKU' }}
-          </p>
-          <div v-for="sku in group.visibleSkus" :key="sku.skuId" class="hidden-skus-child">
             <ElCheckbox
-              v-if="!group.whole"
-              class="hidden-skus-check"
-              :model-value="selectedSkus.has(sku.skuId)"
-              :aria-label="`选择 SKU ${sku.skuId}`"
-              @change="(checked) => toggleSku(sku.skuId, checked)"
+              class="hidden-check"
+              :model-value="groupState(group) === 'all'"
+              :indeterminate="groupState(group) === 'some'"
+              :aria-label="`选择品名 ${group.product}`"
+              @click.stop
+              @change="(checked) => toggleGroup(group, checked)"
             />
-            <span v-else class="hidden-skus-child__dot" aria-hidden="true" />
-            <span class="hidden-skus-child__color" :title="sku.color">{{ sku.color || '—' }}</span>
-            <span class="hidden-skus-child__sku" :title="sku.skuId">{{ sku.skuId }}</span>
-            <ElButton
-              v-if="!group.whole"
-              size="small"
-              text
-              type="primary"
-              class="hidden-skus-restore"
-              @click.stop="restoreSku(sku)"
+            <span
+              class="hidden-caret"
+              :class="{ 'is-open': isGroupExpanded(group.product) }"
+              aria-hidden="true"
+            >
+              <svg viewBox="0 0 12 12">
+                <path
+                  d="M4 2.5 8 6l-4 3.5"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.4"
+                />
+              </svg>
+            </span>
+            <span class="hidden-group__name">
+              <span class="hidden-group__text" :title="group.product">
+                {{ group.product || '（未记录品名）' }}
+              </span>
+              <span v-if="group.whole" class="tag">整组屏蔽</span>
+            </span>
+            <span class="hidden-group__meta">
+              {{
+                group.whole
+                  ? `当前数据 ${group.skus.length} 个 SKU`
+                  : `${group.skus.length} 个 SKU`
+              }}
+            </span>
+            <button
+              class="btn btn--text btn--sm"
+              type="button"
+              @click.stop="restoreGroup(group)"
             >
               解除
-            </ElButton>
-            <span v-else />
+            </button>
           </div>
-        </div>
-      </section>
+
+          <div v-if="isGroupExpanded(group.product)" class="hidden-group__body">
+            <p v-if="group.visibleSkus.length === 0" class="hidden-empty hidden-empty--inline">
+              {{ group.skus.length === 0 ? '当前数据中没有该品名' : '没有匹配的 SKU' }}
+            </p>
+            <div v-for="sku in group.visibleSkus" :key="sku.skuId" class="hidden-child">
+              <ElCheckbox
+                v-if="!group.whole"
+                class="hidden-check"
+                :model-value="selectedSkus.has(sku.skuId)"
+                :aria-label="`选择 SKU ${sku.skuId}`"
+                @change="(checked) => toggleSku(sku.skuId, checked)"
+              />
+              <span v-else class="hidden-child__dot" aria-hidden="true" />
+              <span class="hidden-child__color" :title="sku.color">{{ sku.color || '—' }}</span>
+              <span class="hidden-child__sku" :title="sku.skuId">{{ sku.skuId }}</span>
+              <button
+                v-if="!group.whole"
+                class="btn btn--text btn--sm"
+                type="button"
+                @click.stop="restoreSku(sku)"
+              >
+                解除
+              </button>
+              <span v-else />
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   </section>
 </template>
@@ -352,228 +396,226 @@ async function restoreAll() {
 <style scoped>
 .hidden-panel {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-height: 0;
-  border: 1px solid var(--industrial-grid);
-  border-radius: 4px;
-  background: var(--industrial-surface);
 }
 
-.hidden-panel__toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 12px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--industrial-grid);
+.hidden-panel > .page-head {
+  flex: none;
 }
 
-.hidden-panel__search {
-  flex: 1 1 220px;
-  width: auto;
-  max-width: 320px;
+/* ---------- 工具条 ---------- */
+.hidden-search {
+  width: 232px;
 }
 
-.hidden-panel__count {
-  color: var(--industrial-muted);
+.hidden-search__input {
+  width: 100%;
+  height: 26px;
   font-size: 12px;
-  font-variant-numeric: tabular-nums;
 }
 
-.hidden-panel__actions {
-  display: flex;
-  gap: 8px;
-  margin-left: auto;
+.hidden-search__clear {
+  position: absolute;
+  right: 3px;
+  width: 18px;
+  height: 18px;
 }
 
-.hidden-panel__list {
-  max-height: min(62vh, 720px);
-  overflow: auto;
+.hidden-search__clear svg {
+  width: 11px;
+  height: 11px;
 }
 
-.hidden-panel__empty {
-  margin: 0;
-  padding: 40px 12px;
-  color: var(--industrial-muted);
-  font-size: 13px;
-  text-align: center;
-}
-
-.hidden-skus-group {
-  border-bottom: 1px solid var(--industrial-grid);
-}
-
-.hidden-skus-group:last-child {
-  border-bottom: 0;
-}
-
-.hidden-skus-check {
+.hidden-check {
+  height: 20px;
   margin-right: 0;
 }
 
-.hidden-skus-group__head {
+.hidden-check :deep(.el-checkbox__label) {
+  padding-left: 5px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+/* ---------- 清单 ---------- */
+.table-card {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 3px;
+  background: var(--industrial-surface);
+}
+
+.hidden-list {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0 8px;
+  overflow: auto;
+}
+
+.hidden-group + .hidden-group {
+  border-top: 1px solid var(--industrial-grid-light);
+}
+
+.hidden-group__head {
   display: grid;
-  grid-template-columns: 20px 16px minmax(0, 1fr) auto auto;
+  grid-template-columns: 16px 14px minmax(0, 1fr) 130px 56px;
   align-items: center;
   gap: 8px;
-  padding: 7px 12px;
-  background: var(--industrial-header);
+  min-height: 34px;
+  padding: 0 12px;
   cursor: pointer;
-  font-size: 13px;
 }
 
-.hidden-skus-group__head:hover {
-  background: #e8eff2;
+.hidden-group__head:hover {
+  background: var(--row-hover);
 }
 
-.hidden-skus-group__head:focus-visible {
+.hidden-group__head:focus-visible {
   outline: 2px solid var(--industrial-primary);
   outline-offset: -2px;
 }
 
-.hidden-skus-caret {
+.hidden-caret {
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
   color: var(--industrial-muted);
-  transition: transform 120ms ease;
+  transition: transform 0.12s ease;
 }
 
-.hidden-skus-caret--open {
-  transform: rotate(90deg);
-}
-
-.hidden-skus-caret svg {
+.hidden-caret svg {
   width: 12px;
   height: 12px;
 }
 
-.hidden-skus-name {
+.hidden-caret.is-open {
+  transform: rotate(90deg);
+}
+
+.hidden-group__name {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
-.hidden-skus-name__text {
+.hidden-group__text {
   overflow: hidden;
-  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.hidden-skus-tag {
-  flex: 0 0 auto;
-  padding: 0 6px;
-  color: var(--industrial-danger);
-  border: 1px solid #f0dcd9;
-  border-radius: 999px;
-  background: #faf2f1;
-  font-size: 11px;
-  line-height: 16px;
+.hidden-group__name .tag {
+  flex-shrink: 0;
+  font-weight: 400;
 }
 
-.hidden-skus-meta {
+.hidden-group__meta {
   color: var(--industrial-muted);
-  font-size: 12px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  text-align: right;
   white-space: nowrap;
 }
 
-.hidden-skus-restore {
-  height: 22px;
-  padding: 0 6px;
-  font-size: 12px;
+.hidden-group__body {
+  padding: 0 12px 6px 62px;
 }
 
-.hidden-skus-children {
-  padding: 3px 12px 6px 44px;
-}
-
-.hidden-skus-child {
+.hidden-child {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto 44px;
+  grid-template-columns: 16px 210px minmax(0, 1fr) 56px;
   align-items: center;
   gap: 8px;
-  padding: 3px 0;
-  font-size: 13px;
+  height: 28px;
+  border-top: 1px solid var(--line-soft);
 }
 
-.hidden-skus-child + .hidden-skus-child {
-  border-top: 1px dashed var(--industrial-grid-light);
-}
-
-.hidden-skus-child__dot {
-  width: 6px;
-  height: 6px;
-  margin-left: 7px;
+.hidden-child__dot {
+  justify-self: center;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: var(--industrial-muted);
-  opacity: 0.45;
+  background: var(--industrial-grid);
 }
 
-.hidden-skus-child__color {
+.hidden-child__color {
   overflow: hidden;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.hidden-skus-child__sku {
+.hidden-child__sku {
+  overflow: hidden;
   color: var(--industrial-muted);
-  font-size: 12px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.hidden-skus-child-empty {
+.hidden-empty {
   margin: 0;
-  padding: 6px 0 4px;
+  padding: 24px 12px;
   color: var(--industrial-muted);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.hidden-empty__hint {
+  display: block;
+  max-width: 560px;
+  margin: 4px auto 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  opacity: 0.85;
+}
+
+.hidden-empty--inline {
+  padding: 6px 0 4px;
   font-size: 12px;
+  text-align: left;
 }
 
 @media (max-width: 720px) {
-  .hidden-panel__toolbar {
-    align-items: stretch;
+  .hidden-search {
+    width: 100%;
   }
 
-  .hidden-panel__search {
-    flex-basis: 100%;
-    max-width: none;
-  }
-
-  .hidden-panel__actions {
-    margin-left: auto;
-  }
-
-  .hidden-skus-group__head {
+  .hidden-group__head {
     display: flex;
     flex-wrap: wrap;
     gap: 6px 8px;
+    padding: 6px 10px;
   }
 
-  .hidden-skus-name {
+  .hidden-group__name {
     flex: 1 1 120px;
   }
 
-  .hidden-skus-meta {
+  .hidden-group__meta {
     order: 5;
     flex: 1 1 100%;
     padding-left: 24px;
+    text-align: left;
   }
 
-  .hidden-skus-restore {
+  .hidden-group__head .btn--text {
     margin-left: auto;
   }
 
-  .hidden-skus-children {
-    padding-left: 28px;
+  .hidden-group__body {
+    padding: 0 10px 6px 34px;
   }
 
-  .hidden-skus-child {
-    grid-template-columns: 20px minmax(0, 1fr) auto 40px;
+  .hidden-child {
+    grid-template-columns: 16px 120px minmax(0, 1fr) 44px;
     gap: 6px;
   }
 }

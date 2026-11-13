@@ -1491,106 +1491,381 @@ select.input {
   margin-left: auto;
 }
 
-.meta-strip {
+/* SKU 弹窗：比通用弹窗宽一档，头部改浅底，和内容连成一张纸 */
+.modal--sku {
+  width: min(800px, 100%);
+}
+
+.modal--sku .modal__head {
+  min-height: 48px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--industrial-grid-light);
+  background: var(--industrial-surface);
+}
+
+.modal--sku .modal__body {
+  padding: 14px;
+}
+
+.sku-head__name {
+  color: var(--industrial-text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sku-head__color {
+  padding: 2px 7px;
+  border-radius: 2px;
+  background: #eef2f4;
+  color: #4c5c66;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sku-head__tone {
+  padding: 1px 8px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  font-size: 11px;
+}
+
+.sku-head__tone--color {
+  border-color: #e2d5e7;
+  background: #f5eff7;
+  color: #6f5b76;
+}
+
+.sku-head__tone--mono {
+  border-color: #dde2e5;
+  background: #eef1f3;
+  color: #5c6a72;
+}
+
+.sku-head__switch {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+  padding: 2px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 3px;
+  background: #edf1f4;
+}
+
+.sku-head__switch-btn {
+  height: 22px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sku-head__switch-btn:hover {
+  color: var(--industrial-primary);
+}
+
+.sku-head__switch-btn.is-active {
+  background: var(--industrial-surface);
+  box-shadow: 0 1px 2px rgba(47, 59, 67, 0.1);
+  color: var(--industrial-primary);
+  font-weight: 600;
+}
+
+/* SKU 弹窗：顶部指标卡 */
+.sku-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-bottom: 12px;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.sku-metric {
+  padding: 7px 10px 8px;
   border: 1px solid var(--industrial-grid-light);
+  border-radius: 3px;
+  background: #fbfcfd;
 }
 
-.meta-strip__item {
-  padding: 6px 9px;
-  border-right: 1px solid var(--industrial-grid-light);
-}
-
-.meta-strip__item:last-child {
-  border-right: 0;
-}
-
-.meta-strip__label {
+.sku-metric__label {
+  display: block;
   color: var(--industrial-muted);
   font-size: 11px;
 }
 
-.meta-strip__value {
-  margin-top: 1px;
-  font-size: 13px;
+.sku-metric__value {
+  display: block;
+  margin-top: 2px;
+  color: var(--industrial-text);
+  font-size: 15px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+
+.sku-metric__value em {
+  margin-left: 3px;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 400;
 }
 
 .modal .section-label {
   margin-top: 12px;
 }
 
-.score-block {
-  display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
+/* SKU 弹窗：评分区（色彩只做提示，不抢数字） */
+.sku-section {
+  margin-bottom: 16px;
 }
 
-.score-total {
-  padding: 8px 10px;
-  border: 1px solid var(--industrial-grid-light);
-  background: #eef2f4;
+.sku-section__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
-.score-total__label {
+.sku-section__title {
+  margin: 0;
+  color: var(--industrial-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.sku-section__meta {
   color: var(--industrial-muted);
   font-size: 11px;
 }
 
-.score-total__value {
-  font-size: 26px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.15;
+.score-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid;
+  border-left-width: 3px;
+  border-radius: 3px;
 }
 
-.score-total__tier {
+.score-summary--low {
+  border-color: #dce8de;
+  border-left-color: var(--industrial-normal);
+  background: #f3f8f4;
+}
+
+.score-summary--mid {
+  border-color: #eee1c7;
+  border-left-color: var(--industrial-replenish);
+  background: #fcf7ec;
+}
+
+.score-summary--high {
+  border-color: #f1d9d5;
+  border-left-color: var(--industrial-danger);
+  background: #fbf2f0;
+}
+
+.score-summary__label {
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+}
+
+.score-summary__score {
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.score-summary--low .score-summary__score {
+  color: #47624c;
+}
+
+.score-summary--mid .score-summary__score {
+  color: #8a6a24;
+}
+
+.score-summary--high .score-summary__score {
+  color: var(--industrial-danger);
+}
+
+.score-summary__badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.score-summary--low .score-summary__badge {
+  background: #dfebe1;
+  color: #47624c;
+}
+
+.score-summary--mid .score-summary__badge {
+  background: #f2e4c3;
+  color: #7d5f1c;
+}
+
+.score-summary--high .score-summary__badge {
+  background: #f2dcd8;
+  color: #9d443d;
+}
+
+.score-summary__hint {
+  margin-left: auto;
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+}
+
+.dim-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dim-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px 8px;
+  border: 1px solid;
+  border-radius: 3px;
+}
+
+.dim-card--low {
+  border-color: #dde8df;
+  background: #f5f9f6;
+}
+
+.dim-card--mid {
+  border-color: #efe3cd;
+  background: #fdf9f1;
+}
+
+.dim-card--high {
+  border-color: #f1dbd7;
+  background: #fcf4f2;
+}
+
+.dim-card__name {
+  overflow: hidden;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dim-card__score {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.dim-card__score em {
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.dim-card--low .dim-card__score {
+  color: #4b6650;
+}
+
+.dim-card--low .dim-card__score em {
+  color: #6b8570;
+}
+
+.dim-card--mid .dim-card__score {
+  color: #8a6a24;
+}
+
+.dim-card--mid .dim-card__score em {
+  color: #a4842f;
+}
+
+.dim-card--high .dim-card__score {
+  color: var(--industrial-danger);
+}
+
+.dim-card--high .dim-card__score em {
+  color: #c2635b;
+}
+
+.dim-card__value {
+  color: var(--industrial-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.dim-card__weight {
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+}
+
+/* SKU 弹窗：图表卡 */
+.sku-chart-card {
+  padding: 8px 10px 4px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 3px;
+  background: #fff;
+}
+
+.sku-chart-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sku-chart-card__title {
+  color: var(--industrial-text);
   font-size: 12px;
   font-weight: 600;
 }
 
-.score-total__weight {
-  margin-top: 2px;
+.sku-chart-card__unit {
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+}
+
+.sku-legend {
+  display: inline-flex;
+  gap: 12px;
+  margin-left: auto;
   color: var(--industrial-muted);
   font-size: 11px;
 }
 
-.score-bar {
-  height: 5px;
-  margin-top: 6px;
-  background: #d8e0e4;
-}
-
-.score-bar i {
-  display: block;
-  height: 100%;
-  background: var(--industrial-normal);
-}
-
-.dim-table td {
-  height: 28px;
-  font-size: 11.5px;
-}
-
-.dim-table td.is-num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 弹窗图表：小标题 + 可折叠，图本身交给 ECharts */
-.section-row {
-  display: flex;
+.sku-legend__item {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: 4px;
 }
 
-.section-row .section-label {
-  margin: 0;
+.sku-legend__dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.sku-legend__dot--bar {
+  background: #3f718d;
+}
+
+.sku-legend__dot--line {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: #c49a52;
 }
 
 .chart-toggle {
@@ -1602,7 +1877,7 @@ select.input {
   border: 0;
   background: none;
   color: var(--industrial-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -1620,12 +1895,15 @@ select.input {
   transform: rotate(180deg);
 }
 
-.chart {
-  height: 172px;
-  margin-bottom: 12px;
-  border: 1px solid var(--industrial-grid-light);
-  background: #f8fafb;
+.sku-chart {
+  height: 186px;
 }
+
+.sku-chart--short {
+  height: 126px;
+}
+
+
 
 .manual-box {
   margin-top: 12px;
@@ -1725,12 +2003,8 @@ select.input {
     flex-wrap: wrap;
   }
 
-  .meta-strip {
+  .sku-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .score-block {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -2482,58 +2756,71 @@ input[type='number']::-webkit-inner-spin-button {
   margin-bottom: 10px;
 }
 
-/* 顶部统计：label + 数字横向排，竖线分隔，不再各占一块 */
-.po-stats {
+/* ---------- 顶部：全局进度（只此一处汇总） ---------- */
+.po-progress {
   display: flex;
-  align-items: baseline;
-  margin: 0 0 0 auto;
-}
-
-.po-stats__item {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  padding: 0 11px;
-  border-left: 1px solid var(--industrial-grid-light);
-}
-
-.po-stats__item:first-child {
-  padding-left: 0;
-  border-left: 0;
-}
-
-.po-stats__item dt {
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  font-size: 11.5px;
   color: var(--industrial-muted);
-  font-size: 11px;
   white-space: nowrap;
 }
 
-.po-stats__item dd {
-  margin: 0;
+.po-progress__lead {
+  white-space: nowrap;
+}
+
+.po-progress__lead b {
+  margin: 0 1px;
   color: var(--industrial-text);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
-.po-stats__item dd.is-accent {
-  color: var(--industrial-primary);
+.po-progress__track {
+  position: relative;
+  flex: 0 0 132px;
+  width: 132px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dde5e9;
 }
 
-.po-stats__item dd.is-warn {
+.po-progress__track i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  width: 0;
+  border-radius: 999px;
+  background: var(--industrial-primary);
+  transition: width 0.2s ease;
+}
+
+.po-progress__filter {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 3px;
+  background: var(--industrial-surface);
   color: var(--industrial-replenish);
-}
-
-.po-stats__item.is-clickable {
+  font: inherit;
+  font-size: 11.5px;
   cursor: pointer;
-  border-radius: 2px;
 }
 
-.po-stats__item.is-clickable:hover dt,
-.po-stats__item.is-clickable:hover dd {
-  color: var(--industrial-primary);
+.po-progress__filter:hover {
+  border-color: var(--industrial-replenish);
 }
 
+.po-progress__filter.is-done {
+  border-color: var(--industrial-normal);
+  color: var(--industrial-normal);
+}
+
+/* ---------- 两栏骨架 ---------- */
 .po-layout {
   position: relative;
   display: grid;
@@ -2609,6 +2896,12 @@ input[type='number']::-webkit-inner-spin-button {
   background: var(--industrial-header);
 }
 
+/* 右面板头要放三个动作，抬高 3px 给按钮留出呼吸 */
+.po-panel__head--detail {
+  height: 34px;
+  gap: 8px;
+}
+
 .po-panel__title {
   font-size: 12.5px;
   font-weight: 600;
@@ -2625,36 +2918,84 @@ input[type='number']::-webkit-inner-spin-button {
   margin-left: auto;
 }
 
+/* ---------- 左：搜索 + 未下单筛选 ---------- */
 .po-tools {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--industrial-grid-light);
 }
 
-.po-tools__search {
+.po-search {
+  display: flex;
   flex: 1 1 auto;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
   height: 26px;
-  font-size: 12px;
+  padding: 0 7px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 3px;
+  background: #fff;
+  color: var(--industrial-muted);
+  cursor: text;
 }
 
-.po-check {
+.po-search:focus-within {
+  border-color: var(--industrial-primary);
+}
+
+.po-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--industrial-text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.po-search input::placeholder {
+  color: #a9b4bb;
+}
+
+/* 「未下单」既是筛选也是计数，比一个光秃秃的复选框信息量大 */
+.po-filter {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 3px;
+  background: var(--industrial-surface);
   color: var(--industrial-muted);
+  font: inherit;
   font-size: 11.5px;
   white-space: nowrap;
   cursor: pointer;
 }
 
-.po-check input {
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: var(--industrial-primary);
+.po-filter b {
+  color: var(--industrial-replenish);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.po-filter:hover {
+  border-color: var(--industrial-replenish);
+  color: var(--industrial-text);
+}
+
+.po-filter[aria-pressed='true'] {
+  border-color: var(--industrial-replenish);
+  background: #fbf3e4;
+  color: #8a6a2f;
 }
 
 .po-list__scroll {
@@ -2663,7 +3004,7 @@ input[type='number']::-webkit-inner-spin-button {
   overflow: auto;
 }
 
-/* 左侧清单：一行一个 SKU，像表格而不是卡片 */
+/* ---------- 左：SKU 清单 ---------- */
 .po-mini {
   width: 100%;
   border-collapse: collapse;
@@ -2686,7 +3027,7 @@ input[type='number']::-webkit-inner-spin-button {
 }
 
 .po-mini td {
-  height: 31px;
+  height: 32px;
   padding: 0 8px;
   overflow: hidden;
   border-bottom: 1px solid var(--line-soft);
@@ -2724,6 +3065,154 @@ input[type='number']::-webkit-inner-spin-button {
   color: #98a4ab;
 }
 
+/* 状态点：未下单灰、部分黄、完成绿、超出红，扫一眼就知道哪些还没动 */
+.po-mini__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.po-mini__state::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.po-mini__state.is-idle {
+  color: #a9b4bb;
+}
+
+.po-mini__state.is-part {
+  color: var(--industrial-replenish);
+}
+
+.po-mini__state.is-done {
+  color: var(--industrial-normal);
+  font-weight: 600;
+}
+
+.po-mini__state.is-over {
+  color: var(--industrial-danger);
+  font-weight: 600;
+}
+
+/* ---------- 右：标题与动作 ---------- */
+.po-detail__title {
+  margin: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.po-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: #5b6b74;
+  cursor: pointer;
+}
+
+.po-more:hover {
+  border-color: var(--industrial-grid);
+  background: var(--industrial-surface);
+  color: var(--industrial-text);
+}
+
+.po-more:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* ---------- 右：单 SKU 进度条 ---------- */
+.po-figure {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 42px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--industrial-grid-light);
+  background: #fff;
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.po-figure__lead {
+  white-space: nowrap;
+}
+
+.po-figure__lead b {
+  margin: 0 1px;
+  color: var(--industrial-text);
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.po-figure__track {
+  position: relative;
+  flex: 1 1 120px;
+  min-width: 70px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2eaee;
+}
+
+.po-figure__track i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  width: 0;
+  border-radius: 999px;
+  background: var(--industrial-primary);
+  transition: width 0.18s ease;
+}
+
+.po-figure__track i.is-over {
+  background: var(--industrial-danger);
+}
+
+.po-figure__gap b {
+  margin: 0 1px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.po-figure__gap.is-warn,
+.po-figure__gap.is-warn b {
+  color: var(--industrial-replenish);
+}
+
+.po-figure__gap.is-over,
+.po-figure__gap.is-over b {
+  color: var(--industrial-danger);
+}
+
+.po-figure__gap.is-ok,
+.po-figure__gap.is-ok b {
+  color: var(--industrial-normal);
+}
+
+.po-figure__note {
+  color: #98a4ab;
+}
+
 .is-num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -2742,66 +3231,11 @@ input[type='number']::-webkit-inner-spin-button {
   font-weight: 600;
 }
 
-/* 右侧详情 */
-.po-detail__title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.po-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 18px;
-  padding: 7px 10px;
-  border-bottom: 1px solid var(--industrial-grid-light);
-  color: var(--industrial-muted);
-  font-size: 11.5px;
-}
-
-.po-summary__item b {
-  margin: 0 2px;
-  color: var(--industrial-text);
-  font-size: 14px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.po-summary__item.is-warn,
-.po-summary__item.is-warn b {
-  color: var(--industrial-replenish);
-}
-
-.po-summary__item.is-over,
-.po-summary__item.is-over b {
-  color: var(--industrial-danger);
-}
-
-.po-summary__item.is-ok,
-.po-summary__item.is-ok b {
-  color: var(--industrial-normal);
-}
-
-.po-summary__item em {
-  margin-left: 7px;
-  color: var(--industrial-muted);
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 400;
-}
-
-.po-summary__tip {
-  margin-left: auto;
-  color: var(--industrial-muted);
-  font-size: 11px;
-  cursor: help;
-}
-
+/* ---------- 右：分订单表 ---------- */
 .po-order__scroll {
-  flex: 0 1 auto;
+  position: relative;
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: 100%;
   overflow: auto;
 }
 
@@ -2816,7 +3250,7 @@ input[type='number']::-webkit-inner-spin-button {
   position: sticky;
   top: 0;
   z-index: 1;
-  height: 26px;
+  height: 27px;
   padding: 0 8px;
   border-right: 1px solid var(--industrial-grid-light);
   border-bottom: 1px solid var(--industrial-grid);
@@ -2833,7 +3267,7 @@ input[type='number']::-webkit-inner-spin-button {
 }
 
 .po-order td {
-  height: 32px;
+  height: 34px;
   padding: 0 4px;
   border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
@@ -2853,8 +3287,8 @@ input[type='number']::-webkit-inner-spin-button {
 /* 单元格控件：静止时没有边框，眼睛读到的是表格，不是一堆输入框 */
 .po-cell {
   width: 100%;
-  height: 26px;
-  padding: 0 5px;
+  height: 28px;
+  padding: 0 6px;
   border: 1px solid transparent;
   border-radius: 2px;
   background-color: transparent;
@@ -2885,10 +3319,10 @@ input[type='number']::-webkit-inner-spin-button {
 
 select.po-cell {
   appearance: none;
-  padding-right: 16px;
+  padding-right: 18px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M1 1.2 4 4.2 7 1.2' fill='none' stroke='%238b979e' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 5px center;
+  background-position: right 6px center;
   text-overflow: ellipsis;
 }
 
@@ -2896,18 +3330,26 @@ select.po-cell {
   color: #96a2a9;
 }
 
+/* 删除平时很淡、鼠标进入该行才显形：既不抢注意力，也不会找不到入口 */
 .po-order__del {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: 2px;
   background: none;
   color: var(--industrial-muted);
+  opacity: 0.28;
   cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+
+.po-order tbody tr:hover .po-order__del,
+.po-order__del:focus-visible {
+  opacity: 1;
 }
 
 .po-order__del:hover {
@@ -2915,31 +3357,32 @@ select.po-cell {
   color: var(--industrial-danger);
 }
 
+/* 表尾新增行：整行都是点击区，不再是一个藏在角落的小字 */
 .po-add-row td {
+  height: auto;
   padding: 0;
   border-bottom: 0;
 }
 
 .po-add {
-  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  height: 30px;
   padding: 0 10px;
   border: 0;
+  border-bottom: 1px dashed var(--industrial-grid);
   background: none;
   color: var(--industrial-primary);
+  font: inherit;
   font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
 
 .po-add:hover {
   background: #eef4f7;
-}
-
-.po-add--muted {
-  color: var(--industrial-muted);
-}
-
-.po-add--muted:hover {
-  color: var(--industrial-primary);
 }
 
 .po-add:disabled {
@@ -2948,29 +3391,95 @@ select.po-cell {
   background: none;
 }
 
-.po-order tfoot td {
-  height: 30px;
-  border-top: 1px solid var(--industrial-grid);
-  background: #eef2f4;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
+/* ---------- 右：空态引导 ---------- */
+/* 空态块相对滚动区绝对定位，避开展开后表头的 27px，视觉重心落在面板中间 */
+.po-blank-row td {
+  height: 0;
+  padding: 0;
+  border-bottom: 0;
 }
 
-.po-order tfoot .po-foot__label {
-  padding-left: 10px;
+.po-blank {
+  position: absolute;
+  inset: 27px 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 24px;
+  text-align: center;
+}
+
+.po-blank__title {
+  margin: 0 0 4px;
+  color: var(--industrial-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.po-blank__hint {
+  margin: 0 0 16px;
   color: var(--industrial-muted);
+  font-size: 11.5px;
+}
+
+.po-blank__actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
+.po-blank__link {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--industrial-muted);
+  font: inherit;
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.po-blank__link:hover {
+  color: var(--industrial-primary);
+}
+
+/* ---------- 右：底部合计条 ---------- */
+.po-foot {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  height: 34px;
+  padding: 0 12px;
+  border-top: 1px solid var(--industrial-grid);
+  background: #eef2f4;
+  font-size: 12px;
+}
+
+.po-foot__label {
+  color: var(--industrial-muted);
+}
+
+.po-foot__sum {
+  color: var(--industrial-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.po-foot__sum em {
+  margin-left: 3px;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  font-style: normal;
   font-weight: 400;
 }
 
 .po-foot__state {
-  padding-right: 10px !important;
+  margin-left: auto;
   font-size: 11.5px;
-  font-weight: 400;
-  text-align: right;
-  white-space: nowrap;
-}
-
-.po-order tfoot .is-num {
   white-space: nowrap;
 }
 
@@ -2986,21 +3495,18 @@ select.po-cell {
   color: var(--industrial-normal);
 }
 
-.po-rule {
-  flex: 0 0 auto;
-  margin: 0;
-  padding: 6px 10px;
-  border-top: 1px solid var(--industrial-grid-light);
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
 .po-empty {
   margin: auto;
   padding: 40px 0;
   color: var(--industrial-muted);
   font-size: 12.5px;
   text-align: center;
+}
+
+@media (max-width: 1180px) {
+  .po-figure__note {
+    display: none;
+  }
 }
 
 /* ============================================================
@@ -3438,4 +3944,11 @@ select.po-cell {
   min-width: 16px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+}
+
+/* 很窄时才让维度卡换行：5 → 3，避免最后一张单独占一行 */
+@media (max-width: 640px) {
+  .dim-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }

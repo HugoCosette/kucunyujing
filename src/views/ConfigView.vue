@@ -1,23 +1,22 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   ElButton,
+  ElDialog,
   ElDropdown,
   ElDropdownItem,
   ElDropdownMenu,
-  ElIcon,
   ElInput,
   ElInputNumber,
   ElMessage,
   ElMessageBox,
   ElOption,
   ElSelect,
-  ElTable,
-  ElTableColumn,
   ElTooltip,
 } from 'element-plus'
-import { Delete } from '@element-plus/icons-vue'
 import PanelNavigation from '@/components/PanelNavigation.vue'
+import PurchaseSettingsPanel from '@/components/PurchaseSettingsPanel.vue'
 import ScoringSettings from '@/components/ScoringSettings.vue'
 import SpuGradeSettings from '@/components/SpuGradeSettings.vue'
 import {
@@ -26,9 +25,9 @@ import {
   MANUAL_BEHAVIOR_LABELS,
   MANUAL_BEHAVIOR_NAMES,
   MODE_METRICS,
-  SALES_WINDOW_DEFAULTS,
+  SALES_WINDOW_MAX_MONTHS,
   createDefaultManualMode,
-  expandMonthWeights,
+  createDefaultSalesWeights,
   exportConfigFile,
   findBaselineMonth,
   findDanglingSkuIds,
@@ -44,11 +43,11 @@ import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
 
 // 备货配置只有一份（src/stocking/config.json），改这里即全局生效。
-const WEIGHT_FIELDS = [
-  { key: 'm1', label: '近 1 个月' },
-  { key: 'm3', label: '近 3 个月月均' },
-  { key: 'm12', label: '近 12 个月月均' },
-]
+// 销量加权是「近 N 个月的月均 × 权重」的列表，档位可增删，月数可填 1–12。
+function weightLabel(months) {
+  const value = Number(months)
+  return value === 1 ? '近 1 个月' : `近 ${value} 个月月均`
+}
 
 const inventoryStore = useInventoryStore()
 const stockingStore = useStockingConfigStore()
@@ -84,15 +83,13 @@ const validation = computed(() => validateConfig(configDraft.value))
 
 // —— 销量权重 ——
 const salesWeights = computed(
-  () => configDraft.value.salesWindow?.weights ?? { ...SALES_WINDOW_DEFAULTS },
+  () => configDraft.value.salesWindow?.weights ?? createDefaultSalesWeights(),
 )
-const weightsTotal = computed(
-  () => salesWeights.value.m1 + salesWeights.value.m3 + salesWeights.value.m12,
+const weightsTotal = computed(() =>
+  salesWeights.value.reduce((sum, entry) => sum + Number(entry.weight || 0), 0),
 )
 const weightsBalanced = computed(() => Math.abs(weightsTotal.value - 1) <= 0.001)
-const monthWeights = computed(() => expandMonthWeights(salesWeights.value))
-// 12 个月权重默认收起，标题行先给一行摘要，展开才看明细。
-const weightsOpen = ref(false)
+const weightsDigest = computed(() => salesWeights.value.map((entry) => shortPercent(entry.weight)).join(' / '))
 
 function formatPercent(value) {
   const number = Number(value)
@@ -104,23 +101,11 @@ function shortPercent(value) {
   return Number.isFinite(number) ? `${Number((number * 100).toFixed(2))}%` : '—'
 }
 
-const weightsSummary = computed(
-  () =>
-    `${shortPercent(salesWeights.value.m1)} / ${shortPercent(salesWeights.value.m3)} / ${shortPercent(salesWeights.value.m12)} · 合计 ${shortPercent(weightsTotal.value)}`,
-)
-const weightsIntro =
-  '加权月销量 = 近 1 个月 × 权重 + 近 3 个月月均 × 权重 + 近 12 个月月均 × 权重；' +
-  '只影响「够卖多少天」的系数比较，不参与模式判定。三档权重之和应为 100%。'
 const strategyIntro = computed(() =>
   activeStrategy.value === 'auto'
     ? '自动策略按「月均条数」判定 5 个模式：热销 / 常规 按「够卖多少天」比较系数，按量按库存公斤数比较，尾货 / 滞销 仅标注不参与计算。判定从上一个模式往下依次进行，先命中先归属。'
     : '手动策略是人对单个 SKU 的长期决定：在 SKU 弹窗里切到手动模式即可加入清单，跨导入与刷新保留，不写进配置方案文件。',
 )
-
-function resetWeights() {
-  beforeStructuralChange()
-  configDraft.value.salesWindow = { weights: { ...SALES_WINDOW_DEFAULTS } }
-}
 
 // —— 健康度评分 ——
 // 评分规则挂在方案里的 config.scoring 上；设置面板（摘要 + 编辑弹窗）整体由 ScoringSettings 组件负责。
@@ -646,1070 +631,1640 @@ function handleFileCommand(command) {
   else if (command === 'import') triggerImport()
   else if (command === 'restore') restoreDefaults()
 }
+
+// ---------------------------------------------------------------------------
+// 以下只服务于新的展示层：分区切换、只读表格的弹窗草稿与派生文案。
+// 不新增任何配置字段，保存路径仍走 configDraft + 原有 store 动作。
+// ---------------------------------------------------------------------------
+
+const activePanel = ref('strategy')
+
+// 设置页一个壳两个域：左侧分区决定顶部工具条用哪一套。
+const STOCKING_PANELS = ['strategy', 'weights', 'scoring', 'spu']
+const isStockingPanel = computed(() => STOCKING_PANELS.includes(activePanel.value))
+
+// 下单配置的草稿在子组件里；外壳只读它暴露的 dirty / meta，动作走 purchaseCall。
+const purchasePanelRef = ref(null)
+const purchaseDirty = computed(() => Boolean(purchasePanelRef.value?.dirty))
+const purchaseMeta = computed(
+  () =>
+    purchasePanelRef.value?.meta ?? {
+      vatRules: 0,
+      factories: 0,
+      enabledFactories: 0,
+      people: 0,
+      categories: 0,
+      skus: 0,
+    },
+)
+function purchaseCall(method) {
+  purchasePanelRef.value?.[method]?.()
+}
+
+// 旧「下单设置」深链会带 ?panel=vat 跳到本页，直接落到对应分区。
+const route = useRoute()
+onMounted(() => {
+  const panel = String(route.query.panel ?? '')
+  const known = [...STOCKING_PANELS, 'vat', 'factories', 'people', 'categories', 'sku-factories']
+  if (known.includes(panel)) activePanel.value = panel
+})
+
+// 分区脏点：与 configDirty 同一口径，只是按分区拆分，纯展示。
+const savedConfig = computed(() => normalizeConfig(stockingStore.config))
+const dirtySections = computed(() => ({
+  strategy:
+    JSON.stringify(configDraft.value.strategies) !== JSON.stringify(savedConfig.value.strategies),
+  weights:
+    JSON.stringify(configDraft.value.salesWindow) !== JSON.stringify(savedConfig.value.salesWindow),
+  scoring:
+    JSON.stringify(configDraft.value.scoring) !== JSON.stringify(savedConfig.value.scoring),
+  spu: JSON.stringify(configDraft.value.spuGrades) !== JSON.stringify(savedConfig.value.spuGrades),
+}))
+
+const scoringDimensionCount = computed(() => Object.keys(scoring.value.dimensions ?? {}).length)
+
+const allManualSelected = computed(
+  () => manualRows.value.length > 0 && manualSelection.value.length === manualRows.value.length,
+)
+const someManualSelected = computed(
+  () =>
+    manualSelection.value.length > 0 && manualSelection.value.length < manualRows.value.length,
+)
+
+function toggleManualAll(event) {
+  manualSelection.value = event.target?.checked
+    ? manualRows.value.map((row) => row.skuId)
+    : []
+}
+
+function manualCoefficientSummary(row) {
+  if (row.mode?.behavior !== 'custom') return '按订单填量'
+  const source = row.entry.coefficients ?? row.mode?.defaultCoefficients ?? {}
+  return COEFFICIENT_KEYS.map((coefficient) => source[coefficient.key] ?? '—').join(' / ')
+}
+
+const panelStateText = computed(() => {
+  if (!configDirty.value) return '已保存'
+  const count = validation.value.errors.length
+  return count ? `待修正 ${count} 项` : '未保存'
+})
+
+const panelStateTone = computed(() => {
+  if (!configDirty.value) return ''
+  return validation.value.errors.length ? 'state--error' : 'state--dirty'
+})
+
+function numberText(value) {
+  if (value === null || value === undefined || value === '') return '不限'
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '不限'
+  return String(Math.round(number * 100) / 100)
+}
+
+// 模式的月均条数区间，只用于展示。
+function strategyRangeText(mode) {
+  const from = mode?.range?.from ?? null
+  const to = mode?.range?.to ?? null
+  if (from === null && to === null) return '不限区间'
+  if (to === null) return `≥ ${numberText(from)} 条/月`
+  if (from === null) return `≤ ${numberText(to)} 条/月`
+  return `${numberText(from)} ~ ${numberText(to)} 条/月`
+}
+
+function strategyRowCount(mode) {
+  const kinds = coefficientKinds(mode)
+  let count = 0
+  for (const kind of kinds) {
+    count += Object.keys(mode.coefficients[kind] ?? {}).length
+  }
+  return count
+}
+
+function healthScoringRows(mode) {
+  if (!mode?.healthScoring) return []
+  const ratio = mode.healthScoring.ratio
+  const customers = mode.healthScoring.customers
+  return [
+    {
+      key: 'ratio',
+      label: '本次进销比',
+      text:
+        ratio.normalFrom === null && ratio.normalTo === null
+          ? '不限'
+          : `${numberText(ratio.normalFrom)}% ~ ${numberText(ratio.normalTo)}% 为正常`,
+    },
+    {
+      key: 'customers',
+      label: '累积客户数',
+      text:
+        customers.normalFrom === null && customers.normalTo === null
+          ? '不限'
+          : `${numberText(customers.normalFrom)} ~ ${numberText(customers.normalTo)} 个为中风险`,
+    },
+  ]
+}
+
+// —— 模式编辑弹窗 ——
+const modeDialogVisible = ref(false)
+const modeDraft = reactive({
+  name: '',
+  from: null,
+  to: null,
+  coefficients: {},
+  healthScoring: null,
+})
+
+function openModeDialog() {
+  const mode = activeMode.value
+  if (!mode) return
+  modeDraft.name = mode.name
+  modeDraft.from = mode.range?.from ?? null
+  modeDraft.to = mode.range?.to ?? null
+  modeDraft.coefficients = mode.coefficients
+    ? JSON.parse(JSON.stringify(mode.coefficients))
+    : null
+  modeDraft.healthScoring = mode.healthScoring
+    ? JSON.parse(JSON.stringify(mode.healthScoring))
+    : null
+  modeDialogVisible.value = true
+}
+
+const modeDraftKinds = computed(() => {
+  if (!modeDraft.coefficients) return []
+  return Object.keys(modeDraft.coefficients).filter((kind) => modeDraft.coefficients[kind])
+})
+
+function saveModeDraft() {
+  const mode = activeMode.value
+  if (!mode) return
+  beforeStructuralChange()
+  mode.name = String(modeDraft.name ?? '').trim()
+  mode.range.from = modeDraft.from ?? null
+  mode.range.to = modeDraft.to ?? null
+  if (mode.coefficients && modeDraft.coefficients) {
+    for (const kind of Object.keys(mode.coefficients)) {
+      if (!mode.coefficients[kind]) continue
+      // 直接写回同一份对象，保持 configDraft 的引用不变。
+      for (const category of Object.keys(mode.coefficients[kind])) {
+        for (const coefficient of COEFFICIENT_KEYS) {
+          mode.coefficients[kind][category][coefficient.key] =
+            modeDraft.coefficients[kind]?.[category]?.[coefficient.key] ?? null
+        }
+      }
+    }
+  }
+  if (mode.healthScoring && modeDraft.healthScoring) {
+    mode.healthScoring.ratio.normalFrom = modeDraft.healthScoring.ratio?.normalFrom ?? null
+    mode.healthScoring.ratio.normalTo = modeDraft.healthScoring.ratio?.normalTo ?? null
+    mode.healthScoring.customers.normalFrom =
+      modeDraft.healthScoring.customers?.normalFrom ?? null
+    mode.healthScoring.customers.normalTo = modeDraft.healthScoring.customers?.normalTo ?? null
+  }
+  draftVersion.value += 1
+  modeDialogVisible.value = false
+}
+
+// —— 销量加权弹窗 ——
+// 草稿用「百分比整数」编辑（50 而不是 0.5），保存时再除以 100 写回配置。
+const weightsDialogVisible = ref(false)
+const weightsDraft = ref([])
+const weightsDraftTotal = computed(() =>
+  weightsDraft.value.reduce((sum, entry) => sum + (Number(entry.weight) || 0), 0),
+)
+const weightsDraftError = computed(() => {
+  if (weightsDraft.value.some((entry) => !Number.isInteger(Number(entry.months)))) {
+    return '月数必须是整数'
+  }
+  if (
+    weightsDraft.value.some(
+      (entry) => Number(entry.months) < 1 || Number(entry.months) > SALES_WINDOW_MAX_MONTHS,
+    )
+  ) {
+    return `月数需在 1–${SALES_WINDOW_MAX_MONTHS} 之间`
+  }
+  if (weightsDraft.value.some((entry) => !(Number(entry.weight) >= 0))) {
+    return '权重不能为负'
+  }
+  if (Math.abs(weightsDraftTotal.value - 100) > 0.1) {
+    return `合计需为 100%，当前 ${weightsDraftTotal.value.toFixed(2)}%`
+  }
+  return ''
+})
+const weightsDraftBalanced = computed(() => weightsDraftError.value === '')
+
+function openWeightsDialog() {
+  weightsDraft.value = salesWeights.value.map((entry) => ({
+    months: Number(entry.months),
+    weight: Number((Number(entry.weight || 0) * 100).toFixed(2)),
+  }))
+  weightsDialogVisible.value = true
+}
+
+function addWeightDraft() {
+  if (weightsDraft.value.length >= SALES_WINDOW_MAX_MONTHS) return
+  const used = new Set(weightsDraft.value.map((entry) => Number(entry.months)))
+  let months = SALES_WINDOW_MAX_MONTHS
+  for (let candidate = 1; candidate <= SALES_WINDOW_MAX_MONTHS; candidate += 1) {
+    if (!used.has(candidate)) {
+      months = candidate
+      break
+    }
+  }
+  weightsDraft.value.push({ months, weight: 0 })
+}
+
+function removeWeightDraft(index) {
+  if (weightsDraft.value.length <= 1) return
+  weightsDraft.value.splice(index, 1)
+}
+
+function saveWeightsDraft() {
+  if (!weightsDraftBalanced.value) return
+  beforeStructuralChange()
+  configDraft.value.salesWindow = {
+    weights: weightsDraft.value.map((entry) => ({
+      months: Math.trunc(Number(entry.months)),
+      weight: Number(entry.weight) / 100,
+    })),
+  }
+  weightsDialogVisible.value = false
+}
+
+// —— 手动模式弹窗 ——
+const manualModeDialogVisible = ref(false)
+const manualModeEditingId = ref('')
+const manualModeDraft = reactive({
+  name: '',
+  behavior: 'custom',
+  description: '',
+  redLine: 20,
+  normal: 40,
+  peak: 60,
+})
+
+function openCreateManualMode() {
+  const behavior = 'custom'
+  const template = createDefaultManualMode({
+    behavior,
+    name: nextManualModeName(behavior),
+  })
+  manualModeEditingId.value = ''
+  manualModeDraft.name = template.name
+  manualModeDraft.behavior = template.behavior
+  manualModeDraft.description = template.description ?? ''
+  manualModeDraft.redLine = template.defaultCoefficients?.redLine ?? 20
+  manualModeDraft.normal = template.defaultCoefficients?.normal ?? 40
+  manualModeDraft.peak = template.defaultCoefficients?.peak ?? 60
+  manualModeDialogVisible.value = true
+}
+
+function openManualModeDialog(mode) {
+  manualModeEditingId.value = mode.id
+  manualModeDraft.name = mode.name
+  manualModeDraft.behavior = mode.behavior
+  manualModeDraft.description = mode.description ?? ''
+  manualModeDraft.redLine = mode.defaultCoefficients?.redLine ?? null
+  manualModeDraft.normal = mode.defaultCoefficients?.normal ?? null
+  manualModeDraft.peak = mode.defaultCoefficients?.peak ?? null
+  manualModeDialogVisible.value = true
+}
+
+function saveManualModeDraft() {
+  const target = manualModes.value.find((mode) => mode.id === manualModeEditingId.value)
+  beforeStructuralChange()
+  const payload = {
+    name: String(manualModeDraft.name ?? '').trim(),
+    description: String(manualModeDraft.description ?? '').trim(),
+  }
+  if (target) {
+    Object.assign(target, payload)
+    if (target.behavior === 'custom') {
+      target.defaultCoefficients = {
+        redLine: manualModeDraft.redLine ?? null,
+        normal: manualModeDraft.normal ?? null,
+        peak: manualModeDraft.peak ?? null,
+      }
+    }
+  } else {
+    const mode = createDefaultManualMode({
+      behavior: manualModeDraft.behavior,
+      name: payload.name,
+      description: payload.description,
+    })
+    if (mode.behavior === 'custom') {
+      mode.defaultCoefficients = {
+        redLine: manualModeDraft.redLine ?? null,
+        normal: manualModeDraft.normal ?? null,
+        peak: manualModeDraft.peak ?? null,
+      }
+    }
+    if (manualStrategy.value) manualStrategy.value.modes.push(mode)
+  }
+  manualModeDialogVisible.value = false
+}
+
+// —— 手动 SKU 弹窗 ——
+const manualSkuDialogVisible = ref(false)
+const manualSkuRowKey = ref('')
+const manualSkuDraft = reactive({ modeId: '', coefficients: {} })
+const manualSkuRow = computed(
+  () => manualRows.value.find((row) => row.skuId === manualSkuRowKey.value) ?? null,
+)
+const manualSkuBehavior = computed(
+  () => manualModes.value.find((mode) => mode.id === manualSkuDraft.modeId)?.behavior ?? '',
+)
+
+function openManualSkuDialog(row) {
+  manualSkuRowKey.value = row.skuId
+  manualSkuDraft.modeId = row.entry.modeId ?? manualModes.value[0]?.id ?? ''
+  const mode = manualModes.value.find((entry) => entry.id === manualSkuDraft.modeId)
+  const source = row.entry.coefficients ?? mode?.defaultCoefficients ?? {}
+  manualSkuDraft.coefficients = {
+    redLine: source.redLine ?? null,
+    normal: source.normal ?? null,
+    peak: source.peak ?? null,
+  }
+  manualSkuDialogVisible.value = true
+}
+
+async function saveManualSkuDraft() {
+  const row = manualSkuRow.value
+  const mode = manualModes.value.find((entry) => entry.id === manualSkuDraft.modeId)
+  if (!row || !mode) return
+  const entry = { modeId: mode.id }
+  if (mode.behavior === 'custom') {
+    entry.coefficients = {
+      redLine: manualSkuDraft.coefficients.redLine ?? null,
+      normal: manualSkuDraft.coefficients.normal ?? null,
+      peak: manualSkuDraft.coefficients.peak ?? null,
+    }
+  }
+  await stockingStore.setManualEntry(row.skuId, entry)
+  manualSkuDialogVisible.value = false
+}
+
+// —— 顶栏方案菜单 ——
+function handleProfileMenu(command) {
+  if (typeof command === 'string' && command.startsWith('profile:')) {
+    const profileId = command.slice('profile:'.length)
+    profileSelection.value = profileId
+    switchProfile(profileId)
+    return
+  }
+  if (command === 'duplicate') duplicateProfile()
+  else if (command === 'rename') renameProfile()
+  else if (command === 'delete') deleteProfile()
+  else handleFileCommand(command)
+}
 </script>
 
 <template>
-  <main class="config-page">
-    <div class="config-content">
-      <PanelNavigation />
+  <main class="config-shell">
+    <PanelNavigation />
 
-      <div class="config-body">
-        <header class="config-heading">
-          <h1>{{ configLabel }}</h1>
-          <p>维护模式判定与备货系数；修改会写回 src/stocking/config.json。</p>
-        </header>
+    <div v-if="isStockingPanel" class="config-bar">
+      <h1 class="config-bar__title">设置</h1>
+      <span class="config-bar__domain">备货配置</span>
 
-        <!-- 工作条：方案切换 + 保存状态 + 保存动作，滚动时吸顶 -->
-        <div class="config-bar">
-          <div class="config-bar__group">
-            <span class="config-bar__label">配置方案</span>
-            <ElTooltip content="每个方案独立保存阈值与系数；切换方案不影响其他方案。" placement="top">
-              <span class="config-info">i</span>
-            </ElTooltip>
-            <ElSelect
-              v-model="profileSelection"
-              size="small"
-              class="profile-bar__select"
-              aria-label="配置方案"
-              @change="switchProfile"
-            >
-              <ElOption
-                v-for="profile in profiles"
-                :key="profile.id"
-                :label="profile.name"
-                :value="profile.id"
-              />
-            </ElSelect>
-            <ElButton size="small" @click="duplicateProfile">复制</ElButton>
-            <ElButton size="small" @click="renameProfile">重命名</ElButton>
-            <ElButton size="small" :disabled="profiles.length <= 1" @click="deleteProfile">
-              删除
-            </ElButton>
-          </div>
-
-          <div class="config-bar__group config-bar__group--end">
-            <span class="config-bar__state" :class="{ 'config-bar__state--dirty': configDirty }">
-              {{ configDirty ? '有未保存的修改' : '已保存' }}
-            </span>
-            <ElButton size="small" :disabled="!canUndo" title="回退上一步改动（Ctrl+Z）" @click="undo">
-              撤销
-            </ElButton>
-            <ElButton
-              size="small"
-              :disabled="!canRedo"
-              title="恢复刚撤销的改动（Ctrl+Shift+Z）"
-              @click="redo"
-            >
-              重做
-            </ElButton>
-            <ElButton
-              size="small"
-              :disabled="!configDirty"
-              title="放弃所有未保存的改动，回到上次保存的配置"
-              @click="discardChanges"
-            >
-              放弃
-            </ElButton>
-            <ElDropdown trigger="click" @command="handleFileCommand">
-              <ElButton size="small">方案文件</ElButton>
-              <template #dropdown>
-                <ElDropdownMenu>
-                  <ElDropdownItem command="export">导出全部方案（JSON）</ElDropdownItem>
-                  <ElDropdownItem command="import">导入方案文件</ElDropdownItem>
-                  <ElDropdownItem command="restore" divided>当前方案恢复默认</ElDropdownItem>
-                </ElDropdownMenu>
-              </template>
-            </ElDropdown>
-            <ElButton size="small" type="primary" :disabled="!configDirty" @click="confirmConfig">
-              确定
-            </ElButton>
-            <input
-              ref="importInputRef"
-              type="file"
-              accept="application/json,.json"
-              class="profile-import-input"
-              @change="handleImportFile"
+      <ElDropdown trigger="click" placement="bottom-start" @command="handleProfileMenu">
+        <button type="button" class="btn btn--plan" aria-label="配置方案">
+          {{ activeProfileName }}
+          <svg class="btn__caret" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path
+              d="M3 4.5 6 7.5l3-3"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              stroke-linejoin="round"
             />
+          </svg>
+        </button>
+        <template #dropdown>
+          <ElDropdownMenu>
+            <ElDropdownItem
+              v-for="profile in profiles"
+              :key="profile.id"
+              :command="`profile:${profile.id}`"
+            >
+              <span class="profile-menu__check">{{ profile.id === activeProfileId ? '✓' : '' }}</span>
+              {{ profile.name }}
+            </ElDropdownItem>
+            <ElDropdownItem divided command="duplicate">复制为新方案</ElDropdownItem>
+            <ElDropdownItem command="rename">重命名</ElDropdownItem>
+            <ElDropdownItem command="delete" :disabled="profiles.length <= 1">删除方案</ElDropdownItem>
+            <ElDropdownItem divided command="export">导出方案文件</ElDropdownItem>
+            <ElDropdownItem command="import">导入方案文件</ElDropdownItem>
+            <ElDropdownItem divided command="restore">恢复默认</ElDropdownItem>
+          </ElDropdownMenu>
+        </template>
+      </ElDropdown>
+
+      <span class="state" :class="panelStateTone">{{ panelStateText }}</span>
+
+      <div class="config-bar__end">
+        <button
+          type="button"
+          class="icon-btn"
+          title="撤销（Ctrl+Z）"
+          :disabled="!canUndo"
+          @click="undo"
+        >
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M6 3.5 3 6.5l3 3"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path d="M3 6.5h5.6a3.4 3.4 0 0 1 0 6.8H6.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="icon-btn"
+          title="重做（Ctrl+Shift+Z）"
+          :disabled="!canRedo"
+          @click="redo"
+        >
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M10 3.5 13 6.5l-3 3"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path d="M13 6.5H7.4a3.4 3.4 0 0 0 0 6.8h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+        </button>
+        <span class="config-bar__divider"></span>
+        <button
+          type="button"
+          class="btn btn--text"
+          :disabled="!configDirty"
+          title="放弃所有未保存的改动，回到上次保存的配置"
+          @click="discardChanges"
+        >
+          放弃
+        </button>
+        <button type="button" class="btn btn--primary" :disabled="!configDirty" @click="confirmConfig">
+          保存
+        </button>
+        <input
+          ref="importInputRef"
+          type="file"
+          accept="application/json,.json"
+          class="profile-import-input"
+          @change="handleImportFile"
+        />
+      </div>
+    </div>
+
+    <!-- 下单配置：工具条跟着分区切换，保存 / 放弃走 PurchaseSettingsPanel 暴露的方法 -->
+    <div v-else class="config-bar">
+      <h1 class="config-bar__title">设置</h1>
+      <span class="config-bar__domain">下单配置</span>
+      <span class="state" :class="{ 'state--dirty': purchaseDirty }">
+        {{ purchaseDirty ? '未保存' : '已保存' }}
+      </span>
+      <div class="config-bar__end">
+        <button type="button" class="btn btn--sm" @click="purchaseCall('pickSettingsFile')">
+          导入设置文件
+        </button>
+        <button type="button" class="btn btn--sm" @click="purchaseCall('exportSettings')">
+          导出设置文件
+        </button>
+        <span class="config-bar__divider"></span>
+        <button
+          type="button"
+          class="btn btn--text"
+          :disabled="!purchaseDirty"
+          @click="purchaseCall('discard')"
+        >
+          放弃
+        </button>
+        <button
+          type="button"
+          class="btn btn--primary"
+          :disabled="!purchaseDirty"
+          @click="purchaseCall('confirm')"
+        >
+          确定
+        </button>
+      </div>
+    </div>
+
+    <div class="config-layout">
+      <aside class="rail">
+        <div class="rail__group">
+          <div class="rail__group-title">备货配置</div>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'strategy', 'is-dirty': dirtySections.strategy }"
+            @click="activePanel = 'strategy'"
+          >
+            <span class="rail__title">策略与模式</span>
+            <span class="rail__meta">{{ autoModes.length }} 个模式 · {{ manualRows.length }} 个手动 SKU</span>
+          </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'weights', 'is-dirty': dirtySections.weights }"
+            @click="activePanel = 'weights'"
+          >
+            <span class="rail__title">销量加权</span>
+            <span class="rail__meta">{{ weightsDigest }}</span>
+          </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'scoring', 'is-dirty': dirtySections.scoring }"
+            @click="activePanel = 'scoring'"
+          >
+            <span class="rail__title">健康度评分</span>
+            <span class="rail__meta">{{ scoringDimensionCount }} 个维度</span>
+          </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'spu', 'is-dirty': dirtySections.spu }"
+            @click="activePanel = 'spu'"
+          >
+            <span class="rail__title">SPU 分级</span>
+            <span class="rail__meta">{{ spuGrades.tiers.length }} 档</span>
+          </button>
+        </div>
+
+        <div class="rail__group">
+          <div class="rail__group-title">下单配置</div>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'vat' }"
+            @click="activePanel = 'vat'"
+          >
+            <span class="rail__title">缸规则</span>
+            <span class="rail__meta">{{ purchaseMeta.vatRules }} 条规则</span>
+          </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'factories' }"
+            @click="activePanel = 'factories'"
+          >
+            <span class="rail__title">染厂清单</span>
+            <span class="rail__meta">
+              {{ purchaseMeta.factories }} 家 · {{ purchaseMeta.enabledFactories }} 家启用
+            </span>
+          </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'people' }"
+            @click="activePanel = 'people'"
+          >
+            <span class="rail__title">分单人员表</span>
+            <span class="rail__meta">{{ purchaseMeta.people }} 人</span>
+          </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'categories' }"
+            @click="activePanel = 'categories'"
+          >
+            <span class="rail__title">树形分类与分单</span>
+            <span class="rail__meta">{{ purchaseMeta.categories }} 个分类</span>
+          </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'sku-factories' }"
+            @click="activePanel = 'sku-factories'"
+          >
+            <span class="rail__title">SKU 可选染厂</span>
+            <span class="rail__meta">{{ purchaseMeta.skus }} 个 SKU 有约束</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="config-panels">
+        <div class="config-panels__inner">
+          <!-- 策略与模式 -->
+          <section v-show="activePanel === 'strategy'" class="panel">
+            <div class="panel__head">
+              <h2 class="panel__title">策略与模式</h2>
+              <div class="segmented" role="tablist" aria-label="策略">
+                <button
+                  type="button"
+                  role="tab"
+                  class="segmented__btn"
+                  :class="{ 'is-active': activeStrategy === 'auto' }"
+                  :aria-selected="activeStrategy === 'auto'"
+                  @click="activeStrategy = 'auto'"
+                >
+                  自动策略
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="segmented__btn"
+                  :class="{ 'is-active': activeStrategy === 'manual' }"
+                  :aria-selected="activeStrategy === 'manual'"
+                  @click="activeStrategy = 'manual'"
+                >
+                  手动策略
+                </button>
+              </div>
+            </div>
+
+            <div v-if="activeStrategy === 'auto'" class="master">
+              <nav class="mode-list" aria-label="模式">
+                <button
+                  v-for="mode in autoModes"
+                  :key="mode.key"
+                  type="button"
+                  class="mode-item"
+                  :class="{ 'is-active': mode.key === activeMode?.key }"
+                  :aria-current="mode.key === activeMode?.key"
+                  @click="activeModeKey = mode.key"
+                >
+                  <span class="mode-item__row">
+                    <span class="mode-item__name">{{ mode.name }}</span>
+                    <span class="mode-item__hits">{{ modeHitCount(mode.key) ?? '--' }}</span>
+                  </span>
+                  <span class="mode-item__range">{{ strategyRangeText(mode) }}</span>
+                </button>
+              </nav>
+
+              <div v-if="activeMode" :key="`${activeMode.key}-${draftVersion}`" class="mode-editor">
+                <div class="editor-head">
+                  <h3 class="editor-head__title">{{ activeMode.name }}</h3>
+                  <span class="tag">{{ strategyRangeText(activeMode) }}</span>
+                  <ElTooltip :content="metricTitle(activeMode)" placement="top">
+                    <span class="tag tag--muted">{{ metricBadge(activeMode) }}</span>
+                  </ElTooltip>
+                  <span class="editor-head__meta">
+                    命中 {{ modeHitCount(activeMode.key) ?? '--' }} 个 SKU<template
+                      v-if="activeMode.splitByCustomer"
+                    >（专属品 {{ exclusiveHitCount(activeMode.key) ?? 0 }}）</template>
+                  </span>
+                </div>
+
+                <div class="tbl-block">
+                  <div class="section-label">
+                    备货系数
+                    <span v-if="activeMode.participates">单位：{{ coefficientUnit(activeMode) }}</span>
+                  </div>
+                  <div v-if="!activeMode.participates" class="table-empty">不参与备货计算</div>
+                  <template v-else>
+                    <table
+                      v-for="kind in coefficientKinds(activeMode)"
+                      :key="kind"
+                      class="coef-table"
+                    >
+                      <thead>
+                        <tr>
+                          <th class="coef-table__cat">客户类别</th>
+                          <th class="coef-table__color">色彩</th>
+                          <th class="is-num">红线（{{ coefficientUnit(activeMode) }}）</th>
+                          <th class="is-num">正常（{{ coefficientUnit(activeMode) }}）</th>
+                          <th class="is-num">峰值（{{ coefficientUnit(activeMode) }}）</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(category, index) in CATEGORIES" :key="category">
+                          <td v-if="index === 0" :rowspan="CATEGORIES.length" class="coef-table__cat">
+                            {{ kind }}
+                          </td>
+                          <td class="coef-table__color">{{ category }}</td>
+                          <td
+                            v-for="coefficient in COEFFICIENT_KEYS"
+                            :key="coefficient.key"
+                            class="is-num"
+                          >
+                            {{ activeMode.coefficients[kind]?.[category]?.[coefficient.key] ?? '—' }}
+                          </td>
+                        </tr>
+                        <tr v-if="activeMode.splitByCustomer">
+                          <td class="coef-table__cat">专属品</td>
+                          <td colspan="4" class="coef-table__skip">不设系数</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </template>
+                  <div class="tbl-foot">
+                    <span class="tbl-foot__hint">
+                      {{ activeMode.participates ? thresholdHint(activeMode) : '该模式只在主面板标注，不参与计算' }}
+                    </span>
+                    <button type="button" class="btn btn--sm" @click="openModeDialog">编辑</button>
+                  </div>
+                </div>
+
+                <div v-if="activeMode.healthScoring" class="tbl-block tbl-block--gap">
+                  <div class="section-label">
+                    健康度判定
+                    <span>按量模式 · SKU 弹窗里的 2 项判定</span>
+                  </div>
+                  <table class="coef-table">
+                    <tbody>
+                      <tr v-for="row in healthScoringRows(activeMode)" :key="row.key">
+                        <td class="coef-table__cat">{{ row.label }}</td>
+                        <td>{{ row.text }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div
+                  v-if="validation.errors.length || validation.warnings.length"
+                  class="rule-validation"
+                >
+                  <p
+                    v-for="error in validation.errors"
+                    :key="error.message"
+                    class="rule-validation__error"
+                  >
+                    ✕ {{ error.message }}
+                  </p>
+                  <p
+                    v-for="warning in validation.warnings"
+                    :key="warning.message"
+                    class="rule-validation__warning"
+                  >
+                    ! {{ warning.message }}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div v-else class="manual-config">
+              <div class="tbl-block">
+                <div class="tbl-cap">
+                  <span class="tbl-cap__title">手动模式</span>
+                  <span class="tbl-cap__meta">
+                    {{ manualModes.length }} 个模式 · 内置行为各保留一个
+                  </span>
+                </div>
+                <table class="score-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 168px">名称</th>
+                      <th style="width: 92px">行为</th>
+                      <th>说明</th>
+                      <th class="is-num" style="width: 70px">红线</th>
+                      <th class="is-num" style="width: 70px">正常</th>
+                      <th class="is-num" style="width: 70px">峰值</th>
+                      <th class="is-actions" style="width: 64px">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="mode in manualModes" :key="mode.id">
+                      <td>{{ mode.name }}</td>
+                      <td>
+                        {{ MANUAL_BEHAVIOR_LABELS[mode.behavior] ?? MANUAL_BEHAVIOR_LABELS.custom }}
+                      </td>
+                      <td class="score-table__muted">{{ mode.description || '—' }}</td>
+                      <template v-if="mode.behavior === 'custom'">
+                        <td
+                          v-for="coefficient in COEFFICIENT_KEYS"
+                          :key="coefficient.key"
+                          class="is-num"
+                        >
+                          {{ mode.defaultCoefficients?.[coefficient.key] ?? '—' }}
+                        </td>
+                      </template>
+                      <td v-else colspan="3" class="is-num score-table__muted">按订单填量</td>
+                      <td class="is-actions">
+                        <span class="row-acts">
+                          <button
+                            type="button"
+                            class="icon-btn"
+                            title="编辑"
+                            @click="openManualModeDialog(mode)"
+                          >
+                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                              <path
+                                d="m10.6 2.9 2.5 2.5-7.1 7.1-3.1.6.6-3.1 7.1-7.1Z"
+                                stroke="currentColor"
+                                stroke-width="1.2"
+                                stroke-linejoin="round"
+                              />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            class="icon-btn icon-btn--danger"
+                            :title="isRequiredManualMode(mode) ? '内置行为必须保留一个' : '删除模式'"
+                            :disabled="isRequiredManualMode(mode)"
+                            @click="removeManualMode(mode)"
+                          >
+                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                              <path
+                                d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8h5l.5-8M6.7 6.6v4M9.3 6.6v4"
+                                stroke="currentColor"
+                                stroke-width="1.2"
+                                stroke-linecap="round"
+                              />
+                            </svg>
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="tbl-foot">
+                  <span class="tbl-foot__hint">系数单位：公斤</span>
+                  <button type="button" class="btn btn--sm" @click="openCreateManualMode">新增</button>
+                </div>
+              </div>
+
+              <div class="tbl-block tbl-block--gap">
+                <div class="tbl-cap">
+                  <span class="tbl-cap__title">手动 SKU</span>
+                  <span class="tbl-cap__meta">{{ manualRows.length }} 个 SKU</span>
+                </div>
+
+                <p v-if="danglingSkuIds.length" class="manual-list__dangling">
+                  清单中有 {{ danglingSkuIds.length }} 个商品不在当前数据里（可能已下架或改号）。
+                  <button type="button" class="btn btn--text btn--sm" @click="clearDanglingEntries">
+                    一键清理
+                  </button>
+                </p>
+
+                <table v-if="manualRows.length" class="score-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 32px">
+                        <input
+                          type="checkbox"
+                          aria-label="全选手动 SKU"
+                          :checked="allManualSelected"
+                          :indeterminate.prop="someManualSelected"
+                          @change="toggleManualAll"
+                        />
+                      </th>
+                      <th style="width: 146px">唯一标识</th>
+                      <th>品名 / 颜色</th>
+                      <th style="width: 118px">模式</th>
+                      <th style="width: 176px" class="is-num">红线 / 正常 / 峰值</th>
+                      <th class="is-actions" style="width: 64px">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in manualRows" :key="row.skuId">
+                      <td>
+                        <input
+                          v-model="manualSelection"
+                          type="checkbox"
+                          :value="row.skuId"
+                          :aria-label="`选择 ${row.item.product} ${row.item.color}`"
+                        />
+                      </td>
+                      <td class="score-table__mono">{{ row.skuId }}</td>
+                      <td>{{ row.item.product }} · {{ row.item.color }}</td>
+                      <td>{{ row.mode?.name ?? '—' }}</td>
+                      <td class="is-num">{{ manualCoefficientSummary(row) }}</td>
+                      <td class="is-actions">
+                        <span class="row-acts">
+                          <button
+                            type="button"
+                            class="icon-btn"
+                            title="编辑"
+                            @click="openManualSkuDialog(row)"
+                          >
+                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                              <path
+                                d="m10.6 2.9 2.5 2.5-7.1 7.1-3.1.6.6-3.1 7.1-7.1Z"
+                                stroke="currentColor"
+                                stroke-width="1.2"
+                                stroke-linejoin="round"
+                              />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            class="icon-btn icon-btn--danger"
+                            title="恢复自动"
+                            @click="clearManualRow(row)"
+                          >
+                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                              <path
+                                d="M5.5 3.5 3 6l2.5 2.5M3 6h6a4 4 0 0 1 0 8H6"
+                                stroke="currentColor"
+                                stroke-width="1.2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                              />
+                            </svg>
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p v-else class="manual-block__empty">
+                  还没有手动 SKU。到主面板点击颜色单元格旁的详情按钮打开 SKU 弹窗，把策略切成「手动策略」即可。
+                </p>
+
+                <div class="tbl-foot">
+                  <span class="tbl-foot__hint">
+                    {{ manualRows.length ? '勾选后可批量恢复自动' : '手动 SKU 跨导入与刷新保留' }}
+                  </span>
+                  <button
+                    type="button"
+                    class="btn btn--text btn--sm"
+                    :disabled="manualSelection.length === 0"
+                    @click="clearManualSelection"
+                  >
+                    恢复自动（{{ manualSelection.length }}）
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 销量加权 -->
+          <section v-show="activePanel === 'weights'" class="panel">
+            <div class="panel__head">
+              <h2 class="panel__title">销量加权</h2>
+            </div>
+            <div class="panel__body">
+              <div class="tbl-block">
+                <table class="score-table">
+                  <thead>
+                    <tr>
+                      <th>统计区间</th>
+                      <th class="is-num" style="width: 120px">权重</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(entry, index) in salesWeights" :key="index">
+                      <td>{{ weightLabel(entry.months) }}</td>
+                      <td class="is-num">{{ formatPercent(entry.weight) }}</td>
+                    </tr>
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td>合计</td>
+                      <td class="is-num" :class="{ 'is-bad': !weightsBalanced }">
+                        {{ formatPercent(weightsTotal) }}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+                <div class="tbl-foot">
+                  <span class="tbl-foot__hint">
+                    {{
+                      weightsBalanced
+                        ? '各档权重只影响「够卖多少天」的系数比较，不参与模式判定'
+                        : `合计需为 100%，当前 ${formatPercent(weightsTotal)}`
+                    }}
+                  </span>
+                  <button type="button" class="btn btn--sm" @click="openWeightsDialog">编辑</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 健康度评分 -->
+          <ScoringSettings v-show="activePanel === 'scoring'" :scoring="scoring" @apply="applyScoring" />
+
+          <!-- SPU 分级 -->
+          <SpuGradeSettings
+            v-show="activePanel === 'spu'"
+            :grades="spuGrades"
+            :totals="spuMonthlyTotals"
+            @apply="applySpuGrades"
+          />
+
+          <!-- 下单配置：内容与旧「下单设置」一致，只换了外壳 -->
+          <PurchaseSettingsPanel
+            v-show="!isStockingPanel"
+            ref="purchasePanelRef"
+            :active-panel="activePanel"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- 模式编辑 -->
+    <ElDialog
+      v-model="modeDialogVisible"
+      class="ui-dialog"
+      width="560px"
+      append-to-body
+      align-center
+      :title="`编辑模式 · ${activeMode?.name ?? ''}`"
+    >
+      <div class="form">
+        <div class="form__row">
+          <span class="form__row-label">名称</span>
+          <div class="form__row-ctrl">
+            <ElInput v-model="modeDraft.name" size="small" aria-label="模式名称" />
+          </div>
+        </div>
+        <div class="form__row">
+          <span class="form__row-label">月均条数</span>
+          <div class="form__row-ctrl">
+            <ElInputNumber
+              v-model="modeDraft.from"
+              :controls="false"
+              :value-on-clear="null"
+              :precision="2"
+              placeholder="不限"
+              size="small"
+              aria-label="月均条数下界"
+            />
+            <span class="form__static">~</span>
+            <ElInputNumber
+              v-model="modeDraft.to"
+              :controls="false"
+              :value-on-clear="null"
+              :precision="2"
+              placeholder="不限"
+              size="small"
+              aria-label="月均条数上界"
+            />
+            <span class="form__row-hint">留空表示不限；判定按模式列表顺序，先命中先归属。</span>
           </div>
         </div>
 
-        <section class="config-card config-card--open config-workspace">
-          <div class="config-card__head">
-            <div class="strategy-tabs" role="tablist" aria-label="策略">
-              <button
-                type="button"
-                role="tab"
-                class="strategy-tab"
-                :class="{ 'strategy-tab--active': activeStrategy === 'auto' }"
-                :aria-selected="activeStrategy === 'auto'"
-                @click="activeStrategy = 'auto'"
-              >
-                自动策略
-                <span class="strategy-tab__count">{{ autoModes.length }}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                class="strategy-tab"
-                :class="{ 'strategy-tab--active': activeStrategy === 'manual' }"
-                :aria-selected="activeStrategy === 'manual'"
-                @click="activeStrategy = 'manual'"
-              >
-                手动策略
-                <span class="strategy-tab__count">{{ manualRows.length }}</span>
-              </button>
-            </div>
-
-            <span class="config-workspace__hint">
-              {{ activeStrategy === 'auto' ? '按「月均条数」从高到低判定' : '人为指定，跨导入保留' }}
-            </span>
-            <ElTooltip :content="strategyIntro" placement="top">
-              <span class="config-info">i</span>
-            </ElTooltip>
-            <span class="config-card__spacer" />
+        <div v-for="kind in modeDraftKinds" :key="kind" class="form__group">
+          <div class="form__group-head">
+            备货系数 · {{ kind }}
+            <span class="form__group-unit">单位：{{ coefficientUnit(activeMode) }}</span>
           </div>
-
-          <div v-if="activeStrategy === 'auto'" class="mode-workspace">
-            <nav class="mode-list" aria-label="模式">
-              <button
-                v-for="mode in autoModes"
-                :key="mode.key"
-                type="button"
-                class="mode-list__item"
-                :class="{ 'mode-list__item--active': mode.key === activeMode?.key }"
-                :aria-current="mode.key === activeMode?.key"
-                @click="activeModeKey = mode.key"
-              >
-                <span class="mode-list__name">{{ mode.name }}</span>
-                <span class="mode-list__count">{{ modeHitCount(mode.key) ?? 0 }}</span>
-                <span class="mode-list__metric">{{ metricBadge(mode) }}</span>
-              </button>
-            </nav>
-
-            <div v-if="activeMode" :key="`${activeMode.key}-${draftVersion}`" class="mode-editor">
-              <div class="mode-editor__head">
-                <ElInput
-                  v-model="activeMode.name"
-                  size="small"
-                  class="rule-name-input"
-                  aria-label="模式名称"
-                />
-                <ElTooltip :content="metricTitle(activeMode)" placement="top">
-                  <span class="mode-editor__badge">{{ metricBadge(activeMode) }}</span>
-                </ElTooltip>
-                <span class="config-card__spacer" />
-                <span class="mode-editor__badge mode-editor__badge--muted">
-                  命中 {{ modeHitCount(activeMode.key) ?? '--' }} 个 SKU<template
-                    v-if="activeMode.splitByCustomer"
-                  >（专属品 {{ exclusiveHitCount(activeMode.key) ?? 0 }}）</template>
-                </span>
-              </div>
-
-              <div class="mode-editor__row">
-                <span class="mode-editor__label">月均条数</span>
-                <ElInputNumber
-                  v-model="activeMode.range.from"
-                  :min="0"
-                  :step="1"
-                  :precision="2"
-                  :controls="false"
-                  :value-on-clear="null"
-                  placeholder="不限"
-                  size="small"
-                  class="mode-threshold__input"
-                  :aria-label="`${activeMode.name}的月均条数下界`"
-                />
-                <span class="mode-editor__tilde">~</span>
-                <ElInputNumber
-                  v-model="activeMode.range.to"
-                  :min="0"
-                  :step="1"
-                  :precision="2"
-                  :controls="false"
-                  :value-on-clear="null"
-                  placeholder="不限"
-                  size="small"
-                  class="mode-threshold__input"
-                  :aria-label="`${activeMode.name}的月均条数上界`"
-                />
-                <span class="mode-editor__note">{{ thresholdHint(activeMode) }}</span>
-              </div>
-
-              <p v-if="!activeMode.participates" class="mode-editor__empty">
-                该模式不参与计算，只在主面板「模式」列标注。
-              </p>
-
-              <template v-else>
-                <div v-for="kind in coefficientKinds(activeMode)" :key="kind" class="coefficient-table">
-                  <div class="coefficient-table__title">
-                    {{ kind }}
-                    <span class="coefficient-table__unit">单位：{{ coefficientUnit(activeMode) }}</span>
-                  </div>
-                  <div class="coefficient-table__head">
-                    <span>色彩</span>
-                    <span v-for="coefficient in COEFFICIENT_KEYS" :key="coefficient.key">
-                      {{ coefficient.label }}
-                    </span>
-                  </div>
-                  <div v-for="category in CATEGORIES" :key="category" class="coefficient-table__row">
-                    <span class="coefficient-table__category">{{ category }}</span>
-                    <ElInputNumber
-                      v-for="coefficient in COEFFICIENT_KEYS"
-                      :key="coefficient.key"
-                      v-model="activeMode.coefficients[kind][category][coefficient.key]"
-                      :min="0"
-                      :step="1"
-                      :precision="1"
-                      :controls="false"
-                      size="small"
-                      class="coefficient-table__input"
-                      :aria-label="`${activeMode.name} ${kind} ${category} ${coefficient.label}系数`"
-                    />
-                  </div>
-                </div>
-                <p v-if="activeMode.splitByCustomer" class="mode-editor__empty">
-                  专属品（累计客户 = 1）不设系数，只在主面板标注。
-                </p>
-
-                <div v-if="activeMode.key === 'bulk'" class="bulk-score-rules">
-                  <div class="coefficient-table__title">
-                    健康度判定
-                    <span class="coefficient-table__unit">按量模式 · SKU 弹窗里的 2 项判定</span>
-                  </div>
-                  <div class="mode-editor__row">
-                    <span class="mode-editor__label">本次进销比</span>
-                    <ElInputNumber
-                      v-model="activeMode.healthScoring.ratio.normalFrom"
-                      :min="0"
-                      :step="1"
-                      :precision="1"
-                      :controls="false"
-                      size="small"
-                      class="mode-threshold__input"
-                      aria-label="本次进销比正常区间下界"
-                    />
-                    <span class="mode-editor__tilde">~</span>
-                    <ElInputNumber
-                      v-model="activeMode.healthScoring.ratio.normalTo"
-                      :min="0"
-                      :step="1"
-                      :precision="1"
-                      :controls="false"
-                      size="small"
-                      class="mode-threshold__input"
-                      aria-label="本次进销比正常区间上界"
-                    />
-                    <span class="mode-editor__note">
-                      % 为正常：低于下界低风险，高于上界高风险
-                    </span>
-                  </div>
-                  <div class="mode-editor__row">
-                    <span class="mode-editor__label">累积客户数</span>
-                    <ElInputNumber
-                      v-model="activeMode.healthScoring.customers.normalFrom"
-                      :min="0"
-                      :step="1"
-                      :precision="0"
-                      :controls="false"
-                      size="small"
-                      class="mode-threshold__input"
-                      aria-label="累积客户数中风险区间下界"
-                    />
-                    <span class="mode-editor__tilde">~</span>
-                    <ElInputNumber
-                      v-model="activeMode.healthScoring.customers.normalTo"
-                      :min="0"
-                      :step="1"
-                      :precision="0"
-                      :controls="false"
-                      size="small"
-                      class="mode-threshold__input"
-                      aria-label="累积客户数中风险区间上界"
-                    />
-                    <span class="mode-editor__note">
-                      个为中风险：少于下界高风险，多于上界低风险
-                    </span>
-                  </div>
-                </div>
-              </template>
-
-              <div v-if="validation.errors.length || validation.warnings.length" class="rule-validation">
-                <p v-for="error in validation.errors" :key="error.message" class="rule-validation__error">
-                  ✕ {{ error.message }}
-                </p>
-                <p
-                  v-for="warning in validation.warnings"
-                  :key="warning.message"
-                  class="rule-validation__warning"
-                >
-                  ! {{ warning.message }}
-                </p>
-              </div>
+          <div class="coef-grid">
+            <div class="coef-grid__head">
+              <span>色彩</span>
+              <span>红线</span>
+              <span>正常</span>
+              <span>峰值</span>
             </div>
-          </div>
-
-          <div v-else class="manual-config">
-            <div class="manual-block">
-              <div class="manual-block__head">
-                <h3>手动模式</h3>
-                <ElTooltip
-                  content="行为由系统提供（自定系数 / 订单货），名称、说明与默认系数可自行调整；内置的两种行为各保留一个。"
-                  placement="top"
-                >
-                  <span class="config-info">i</span>
-                </ElTooltip>
-                <span class="config-card__spacer" />
-                <ElButton size="small" text class="config-card__action" @click="addManualMode">
-                  ＋ 新增手动模式
-                </ElButton>
-              </div>
-
-              <div class="manual-mode-list">
-                <div class="manual-mode-row manual-mode-row--head">
-                  <span>名称</span>
-                  <span>行为</span>
-                  <span>说明</span>
-                  <span>红线</span>
-                  <span>正常</span>
-                  <span>峰值</span>
-                  <span />
-                </div>
-                <div v-for="mode in manualModes" :key="mode.id" class="manual-mode-row">
-                  <ElInput
-                    v-model="mode.name"
-                    size="small"
-                    class="manual-mode-row__name"
-                    aria-label="手动模式名称"
-                  />
-                  <span class="manual-mode-row__behavior">
-                    {{ MANUAL_BEHAVIOR_LABELS[mode.behavior] ?? MANUAL_BEHAVIOR_LABELS.custom }}
-                  </span>
-                  <ElInput
-                    v-model="mode.description"
-                    size="small"
-                    class="manual-mode-row__desc"
-                    placeholder="说明（可选）"
-                    aria-label="手动模式说明"
-                  />
-                  <template v-if="mode.behavior === 'custom'">
-                    <ElInputNumber
-                      v-for="coefficient in COEFFICIENT_KEYS"
-                      :key="coefficient.key"
-                      v-model="mode.defaultCoefficients[coefficient.key]"
-                      :min="0"
-                      :step="1"
-                      :precision="1"
-                      :controls="false"
-                      size="small"
-                      class="manual-mode-row__coefficient"
-                      :aria-label="`${mode.name}默认${coefficient.label}系数（公斤）`"
-                    />
-                  </template>
-                  <template v-else>
-                    <span class="manual-mode-row__skip">按订单填量</span>
-                    <span class="manual-mode-row__skip" />
-                    <span class="manual-mode-row__skip" />
-                  </template>
-                  <ElButton
-                    size="small"
-                    text
-                    type="danger"
-                    class="rule-row-remove"
-                    :disabled="isRequiredManualMode(mode)"
-                    :title="isRequiredManualMode(mode) ? '内置行为必须保留一个' : '删除模式'"
-                    @click="removeManualMode(mode)"
-                  >
-                    <ElIcon><Delete /></ElIcon>
-                  </ElButton>
-                </div>
-              </div>
-            </div>
-
-            <div class="manual-block">
-              <div class="manual-block__head">
-                <h3>手动 SKU 清单</h3>
-                <ElTooltip
-                  content="在 SKU 弹窗里切换策略后会自动出现在这里；这里也可直接改模式、改系数或恢复自动。自定系数按「公斤」比较；订单货按客户订单填量。"
-                  placement="top"
-                >
-                  <span class="config-info">i</span>
-                </ElTooltip>
-                <span class="config-card__spacer" />
-                <ElButton
-                  size="small"
-                  :disabled="manualSelection.length === 0"
-                  @click="clearManualSelection"
-                >
-                  恢复自动（{{ manualSelection.length }}）
-                </ElButton>
-              </div>
-
-              <p v-if="danglingSkuIds.length" class="manual-list__dangling">
-                清单中有 {{ danglingSkuIds.length }} 个商品不在当前数据里（可能已下架或改号）。
-                <ElButton size="small" text class="config-card__action" @click="clearDanglingEntries">
-                  一键清理
-                </ElButton>
-              </p>
-
-              <ElTable
-                v-if="manualRows.length"
-                class="manual-table"
-                :data="manualRows"
-                row-key="skuId"
-                max-height="320"
-                border
+            <div v-for="category in CATEGORIES" :key="category" class="coef-grid__row">
+              <span>{{ category }}</span>
+              <ElInputNumber
+                v-for="coefficient in COEFFICIENT_KEYS"
+                :key="coefficient.key"
+                v-model="modeDraft.coefficients[kind][category][coefficient.key]"
+                :min="0"
+                :step="1"
+                :precision="1"
+                :controls="false"
                 size="small"
-                @selection-change="(rows) => (manualSelection = rows.map((row) => row.skuId))"
-              >
-                <ElTableColumn type="selection" width="42" />
-                <ElTableColumn label="品名" min-width="140">
-                  <template #default="{ row }">
-                    <span :title="row.item.product">{{ row.item.product }}</span>
-                  </template>
-                </ElTableColumn>
-                <ElTableColumn label="颜色" min-width="120">
-                  <template #default="{ row }">{{ row.item.color }}</template>
-                </ElTableColumn>
-                <ElTableColumn label="模式" width="150">
-                  <template #default="{ row }">
-                    <ElSelect
-                      :model-value="row.entry.modeId"
-                      size="small"
-                      class="manual-table__select"
-                      @update:model-value="(value) => updateManualRowMode(row, value)"
-                    >
-                      <ElOption
-                        v-for="mode in manualModes"
-                        :key="mode.id"
-                        :label="mode.name"
-                        :value="mode.id"
-                      />
-                    </ElSelect>
-                  </template>
-                </ElTableColumn>
-                <ElTableColumn label="系数（红线 / 正常 / 峰值，公斤）" min-width="220">
-                  <template #default="{ row }">
-                    <template v-if="row.mode?.behavior === 'custom'">
-                      <ElInputNumber
-                        v-for="coefficient in COEFFICIENT_KEYS"
-                        :key="coefficient.key"
-                        :model-value="row.entry.coefficients?.[coefficient.key] ?? null"
-                        :min="0"
-                        :step="1"
-                        :precision="1"
-                        :controls="false"
-                        size="small"
-                        class="manual-table__coefficient"
-                        :aria-label="`${row.item.product} ${coefficient.label}系数`"
-                        @update:model-value="(value) => updateManualRowCoefficient(row, coefficient.key, value)"
-                      />
-                    </template>
-                    <span v-else class="manual-table__note">订单货：按客户订单填量</span>
-                  </template>
-                </ElTableColumn>
-                <ElTableColumn label="操作" width="96" align="center">
-                  <template #default="{ row }">
-                    <ElButton size="small" text @click="clearManualRow(row)">恢复自动</ElButton>
-                  </template>
-                </ElTableColumn>
-              </ElTable>
-              <p v-else class="manual-block__empty">
-                还没有手动 SKU。到主面板点击颜色单元格旁的详情按钮打开 SKU 弹窗，把策略切成「手动策略」即可。
-              </p>
+                :aria-label="`${category} ${coefficient.label}系数`"
+              />
             </div>
           </div>
-        </section>
+          <p class="form__group-hint">同一行需满足 红线 ≤ 正常 ≤ 峰值。</p>
+        </div>
 
-        <section class="config-card" :class="{ 'config-card--open': weightsOpen }">
-          <div class="config-card__head">
+        <div v-if="modeDraft.healthScoring" class="form__group">
+          <div class="form__group-head">健康度判定</div>
+          <div class="form__row">
+            <span class="form__row-label">本次进销比</span>
+            <div class="form__row-ctrl">
+              <ElInputNumber
+                v-model="modeDraft.healthScoring.ratio.normalFrom"
+                :controls="false"
+                :precision="1"
+                :value-on-clear="null"
+                size="small"
+              />
+              <span class="form__static">~</span>
+              <ElInputNumber
+                v-model="modeDraft.healthScoring.ratio.normalTo"
+                :controls="false"
+                :precision="1"
+                :value-on-clear="null"
+                size="small"
+              />
+              <span class="form__row-hint">% 为正常：低于下界低风险，高于上界高风险。</span>
+            </div>
+          </div>
+          <div class="form__row">
+            <span class="form__row-label">累积客户数</span>
+            <div class="form__row-ctrl">
+              <ElInputNumber
+                v-model="modeDraft.healthScoring.customers.normalFrom"
+                :controls="false"
+                :precision="0"
+                :value-on-clear="null"
+                size="small"
+              />
+              <span class="form__static">~</span>
+              <ElInputNumber
+                v-model="modeDraft.healthScoring.customers.normalTo"
+                :controls="false"
+                :precision="0"
+                :value-on-clear="null"
+                size="small"
+              />
+              <span class="form__row-hint">个为中风险：少于下界高风险，多于上界低风险。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="form__foot">
+          <span class="form__foot-spacer"></span>
+          <button type="button" class="btn btn--sm" @click="modeDialogVisible = false">取消</button>
+          <button type="button" class="btn btn--primary btn--sm" @click="saveModeDraft">确定</button>
+        </div>
+      </template>
+    </ElDialog>
+
+    <!-- 销量加权编辑 -->
+    <ElDialog
+      v-model="weightsDialogVisible"
+      class="ui-dialog"
+      width="480px"
+      append-to-body
+      align-center
+      title="编辑销量加权"
+    >
+      <p class="form__note">
+        各档权重相加必须等于 100%；每档是「最近 N 个月的月均 × 权重」，月数可填 1–12。加权结果决定备货系数的基数。
+      </p>
+      <div class="form">
+        <div v-for="(entry, index) in weightsDraft" :key="index" class="form__row">
+          <span class="form__row-label">第 {{ index + 1 }} 档</span>
+          <div class="form__row-ctrl">
+            <span class="form__static">近</span>
+            <div class="num-field">
+              <input
+                v-model.number="entry.months"
+                class="input input--num weight-draft__months"
+                type="number"
+                min="1"
+                :max="SALES_WINDOW_MAX_MONTHS"
+                step="1"
+                :aria-label="`第 ${index + 1} 档的月数`"
+              />
+              <span class="num-field__unit">个月月均</span>
+            </div>
+            <span class="form__static">×</span>
+            <div class="num-field">
+              <input
+                v-model.number="entry.weight"
+                class="input input--num weight-draft__percent"
+                type="number"
+                min="0"
+                max="100"
+                step="5"
+                :aria-label="`第 ${index + 1} 档的权重`"
+              />
+              <span class="num-field__unit">%</span>
+            </div>
             <button
               type="button"
-              class="config-card__toggle"
-              :aria-expanded="weightsOpen"
-              @click="weightsOpen = !weightsOpen"
+              class="icon-btn weight-draft__remove"
+              :disabled="weightsDraft.length <= 1"
+              :aria-label="`删除第 ${index + 1} 档`"
+              title="删除这一档"
+              @click="removeWeightDraft(index)"
             >
-              <span class="config-card__chevron">▾</span>
-              <span class="config-card__title">销量加权</span>
-              <span class="config-card__summary">{{ weightsSummary }}</span>
-            </button>
-            <ElTooltip :content="weightsIntro" placement="top">
-              <span class="config-info">i</span>
-            </ElTooltip>
-            <span class="config-card__spacer" />
-            <ElButton size="small" text class="config-card__action" @click="resetWeights">
-              恢复 50 / 30 / 20
-            </ElButton>
-          </div>
-
-          <div v-show="weightsOpen" class="config-card__body">
-            <div class="sales-window">
-              <label v-for="field in WEIGHT_FIELDS" :key="field.key" class="sales-window__item">
-                <span class="sales-window__label">{{ field.label }}</span>
-                <ElInputNumber
-                  v-model="salesWeights[field.key]"
-                  :min="0"
-                  :max="1"
-                  :step="0.05"
-                  :precision="2"
-                  :controls="false"
-                  size="small"
-                  class="sales-window__input"
-                  :aria-label="`${field.label}权重`"
+              <svg viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M4 4l8 8M12 4l-8 8"
+                  stroke="currentColor"
+                  stroke-width="1.3"
+                  stroke-linecap="round"
                 />
-                <span class="sales-window__value">{{ formatPercent(salesWeights[field.key]) }}</span>
-              </label>
-              <span
-                class="sales-window__total"
-                :class="{ 'sales-window__total--warn': !weightsBalanced }"
-              >
-                合计 {{ formatPercent(weightsTotal) }}
-              </span>
-            </div>
-
-            <div class="sales-window__months">
-              <span v-for="(share, index) in monthWeights" :key="index" class="sales-window__month">
-                {{ index === 0 ? '最新月' : `${index + 1} 个月前` }}
-                <strong>{{ formatPercent(share) }}</strong>
-              </span>
-            </div>
+              </svg>
+            </button>
           </div>
-        </section>
+        </div>
 
-        <ScoringSettings :scoring="scoring" @apply="applyScoring" />
+        <div class="form__inline">
+          <button
+            type="button"
+            class="btn btn--text btn--sm"
+            :disabled="weightsDraft.length >= SALES_WINDOW_MAX_MONTHS"
+            @click="addWeightDraft"
+          >
+            + 添加一档
+          </button>
+        </div>
 
-        <SpuGradeSettings :grades="spuGrades" :totals="spuMonthlyTotals" @apply="applySpuGrades" />
+        <div class="form__sum">
+          合计
+          <b :class="{ 'is-bad': !weightsDraftBalanced }">
+            {{ weightsDraftTotal.toFixed(2) }}%
+          </b>
+        </div>
+        <p v-if="weightsDraftError" class="form__error">{{ weightsDraftError }}</p>
       </div>
-    </div>
+      <template #footer>
+        <div class="form__foot">
+          <span class="form__foot-spacer"></span>
+          <button type="button" class="btn btn--sm" @click="weightsDialogVisible = false">取消</button>
+          <button
+            type="button"
+            class="btn btn--primary btn--sm"
+            :disabled="!weightsDraftBalanced"
+            @click="saveWeightsDraft"
+          >
+            确定
+          </button>
+        </div>
+      </template>
+    </ElDialog>
+
+    <!-- 手动模式编辑 -->
+    <ElDialog
+      v-model="manualModeDialogVisible"
+      class="ui-dialog"
+      width="480px"
+      append-to-body
+      align-center
+      :title="manualModeEditingId ? '编辑手动模式' : '新增手动模式'"
+    >
+      <div class="form">
+        <div class="form__row">
+          <span class="form__row-label">名称</span>
+          <div class="form__row-ctrl">
+            <ElInput v-model="manualModeDraft.name" size="small" aria-label="手动模式名称" />
+          </div>
+        </div>
+        <div class="form__row">
+          <span class="form__row-label">行为</span>
+          <div class="form__row-ctrl">
+            <span class="tag">
+              {{ MANUAL_BEHAVIOR_LABELS[manualModeDraft.behavior] ?? MANUAL_BEHAVIOR_LABELS.custom }}
+            </span>
+            <span class="form__row-hint">行为由系统提供，新增只会是「自定系数」。</span>
+          </div>
+        </div>
+        <div class="form__row">
+          <span class="form__row-label">说明</span>
+          <div class="form__row-ctrl">
+            <ElInput v-model="manualModeDraft.description" size="small" placeholder="说明（可选）" />
+          </div>
+        </div>
+        <div v-if="manualModeDraft.behavior === 'custom'" class="form__row">
+          <span class="form__row-label">默认系数</span>
+          <div class="form__row-ctrl">
+            <div v-for="coefficient in COEFFICIENT_KEYS" :key="coefficient.key" class="num-field">
+              <input
+                class="input input--num"
+                type="number"
+                min="0"
+                step="1"
+                :value="manualModeDraft[coefficient.key]"
+                :aria-label="`默认${coefficient.label}系数`"
+                @input="
+                  manualModeDraft[coefficient.key] =
+                    $event.target.value === '' ? null : Number($event.target.value)
+                "
+              />
+              <span class="num-field__unit">{{ coefficient.label }}</span>
+            </div>
+            <span class="form__row-hint">单位：公斤。</span>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <div class="form__foot">
+          <span class="form__foot-spacer"></span>
+          <button type="button" class="btn btn--sm" @click="manualModeDialogVisible = false">
+            取消
+          </button>
+          <button type="button" class="btn btn--primary btn--sm" @click="saveManualModeDraft">
+            确定
+          </button>
+        </div>
+      </template>
+    </ElDialog>
+
+    <!-- 手动 SKU 编辑 -->
+    <ElDialog
+      v-model="manualSkuDialogVisible"
+      class="ui-dialog"
+      width="480px"
+      append-to-body
+      align-center
+      title="编辑手动 SKU"
+    >
+      <div v-if="manualSkuRow" class="form">
+        <div class="form__row">
+          <span class="form__row-label">唯一标识</span>
+          <div class="form__row-ctrl">
+            <span class="form__static score-table__mono">{{ manualSkuRow.skuId }}</span>
+          </div>
+        </div>
+        <div class="form__row">
+          <span class="form__row-label">品名 / 颜色</span>
+          <div class="form__row-ctrl">
+            <span class="form__static">
+              {{ manualSkuRow.item.product }} · {{ manualSkuRow.item.color }}
+            </span>
+          </div>
+        </div>
+        <div class="form__row">
+          <span class="form__row-label">模式</span>
+          <div class="form__row-ctrl">
+            <ElSelect v-model="manualSkuDraft.modeId" size="small" aria-label="手动模式">
+              <ElOption
+                v-for="mode in manualModes"
+                :key="mode.id"
+                :label="mode.name"
+                :value="mode.id"
+              />
+            </ElSelect>
+          </div>
+        </div>
+        <div v-if="manualSkuBehavior === 'custom'" class="form__row">
+          <span class="form__row-label">系数</span>
+          <div class="form__row-ctrl">
+            <div v-for="coefficient in COEFFICIENT_KEYS" :key="coefficient.key" class="num-field">
+              <input
+                class="input input--num"
+                type="number"
+                min="0"
+                step="1"
+                :value="manualSkuDraft.coefficients[coefficient.key]"
+                :aria-label="coefficient.label"
+                @input="
+                  manualSkuDraft.coefficients[coefficient.key] =
+                    $event.target.value === '' ? null : Number($event.target.value)
+                "
+              />
+              <span class="num-field__unit">{{ coefficient.label }}</span>
+            </div>
+            <span class="form__row-hint">单位：公斤。</span>
+          </div>
+        </div>
+        <p v-else class="form__note" style="margin: 0">
+          订单货：按客户订单填量，不计预警、不做评分。
+        </p>
+      </div>
+      <template #footer>
+        <div class="form__foot">
+          <span class="form__foot-spacer"></span>
+          <button type="button" class="btn btn--sm" @click="manualSkuDialogVisible = false">
+            取消
+          </button>
+          <button type="button" class="btn btn--primary btn--sm" @click="saveManualSkuDraft">
+            确定
+          </button>
+        </div>
+      </template>
+    </ElDialog>
   </main>
 </template>
 
-
-
 <style scoped>
-.config-page {
-  min-height: 100vh;
-  padding: 8px 0 24px;
-  color: var(--industrial-text);
-  background: var(--industrial-page);
-  /* 控件统一 28px 高，避免 24px 与 32px 混排 */
-  --el-component-size-small: 28px;
-}
-
-.config-content {
-  width: 100%;
-  max-width: 100%;
-  margin: 0 auto;
-  padding: 0 12px;
-  box-sizing: border-box;
-}
-
-/* 规则区居中限宽：宽屏下不再把输入框拉成一整行 */
-.config-body {
-  width: 100%;
-  max-width: 1180px;
-  margin: 0 auto;
-}
-
-.config-heading {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin: 2px 0 10px;
-}
-
-.config-heading h1 {
-  margin: 0;
-  font-size: 18px;
-}
-
-.config-heading p {
-  margin: 0;
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-/* —— 顶部工作条：方案 + 保存状态 + 保存动作 —— */
-.config-bar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--industrial-grid);
-  border-radius: 6px;
-  background: var(--industrial-surface);
-  box-shadow: 0 2px 8px rgba(47, 59, 67, 0.08);
-}
-
-.config-bar__group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.config-bar__group--end {
-  margin-left: auto;
-}
-
-.config-bar__label {
-  color: var(--industrial-muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.config-bar__state {
-  padding: 2px 8px;
-  border-radius: 10px;
-  color: var(--industrial-muted);
-  background: rgba(47, 59, 67, 0.06);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.config-bar__state--dirty {
-  color: #fff;
-  background: var(--industrial-replenish);
-}
-
-.profile-bar__select {
-  width: 170px;
-}
-
 .profile-import-input {
   display: none;
 }
 
-.config-bar + .config-card {
-  margin-top: 12px;
+.profile-menu__check {
+  display: inline-block;
+  width: 14px;
+  color: var(--industrial-primary);
+  font-weight: 700;
 }
 
-/* —— 策略 / 模式工作区 —— */
-.config-workspace {
-  overflow: hidden;
-}
-
-.config-workspace > .config-card__head {
-  background: var(--industrial-page);
-}
-
-.config-workspace__hint {
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.strategy-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 4px;
-  border-radius: 6px;
-  background: rgba(47, 59, 67, 0.06);
-}
-
-.strategy-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border: 0;
-  border-radius: 4px;
-  color: var(--industrial-text);
-  background: transparent;
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.strategy-tab--active {
-  color: #fff;
-  background: var(--industrial-primary);
-  font-weight: 600;
-}
-
-.strategy-tab__count {
-  padding: 0 6px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.1);
-  font-size: 11px;
-}
-
-.mode-workspace {
+/* 模式列表 + 编辑器 */
+.master {
   display: grid;
-  grid-template-columns: 176px minmax(0, 1fr);
-  gap: 12px;
-  padding: 10px;
+  grid-template-columns: 200px minmax(0, 1fr);
 }
 
 .mode-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  padding: 6px;
+  border-right: 1px solid var(--industrial-grid-light);
 }
 
-.mode-list__item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 2px 6px;
-  padding: 7px 9px;
+.mode-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
   border: 1px solid transparent;
-  border-left: 3px solid transparent;
-  border-radius: 5px;
-  color: inherit;
-  background: var(--industrial-page);
-  font: inherit;
+  border-left: 2px solid transparent;
+  border-radius: 2px;
+  background: none;
   text-align: left;
   cursor: pointer;
 }
 
-.mode-list__item:hover {
-  border-color: var(--industrial-grid-light);
+.mode-item:hover {
+  background: #e9eff2;
 }
 
-.mode-list__item--active {
+.mode-item.is-active {
   border-color: var(--industrial-grid-light);
   border-left-color: var(--industrial-primary);
-  background: var(--industrial-surface);
+  background: #e5edf1;
 }
 
-.mode-list__name {
-  font-size: 13px;
+.mode-item__row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.mode-item__name {
+  font-size: 12.5px;
   font-weight: 600;
 }
 
-.mode-list__count {
-  padding: 0 6px;
-  border-radius: 9px;
+.mode-item__hits {
+  margin-left: auto;
   color: var(--industrial-muted);
-  background: rgba(47, 59, 67, 0.08);
-  font-size: 11px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
 
-.mode-list__metric {
-  grid-column: 1 / -1;
+.mode-item__range {
+  display: block;
+  margin-top: 1px;
   color: var(--industrial-muted);
   font-size: 11px;
 }
 
 .mode-editor {
   min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 5px;
+  padding: 10px 12px 12px;
 }
 
-.mode-editor__head {
+.editor-head {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.rule-name-input {
-  width: 148px;
-}
-
-.mode-editor__badge {
-  padding: 1px 8px;
-  border-radius: 10px;
-  color: var(--industrial-primary);
-  background: var(--industrial-header);
-  font-size: 11px;
-}
-
-.mode-editor__badge--muted {
-  color: var(--industrial-muted);
-  background: rgba(47, 59, 67, 0.05);
-}
-
-.mode-editor__row {
-  display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 10px;
 }
 
-.mode-editor__label,
-.mode-editor__note {
+.editor-head__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.editor-head__meta {
+  margin-left: auto;
   color: var(--industrial-muted);
   font-size: 12px;
 }
 
-.mode-editor__empty {
-  margin: 0 0 8px;
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.mode-threshold__input {
-  width: 96px;
-  font-variant-numeric: tabular-nums;
-}
-
-.mode-editor__tilde {
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.coefficient-table + .coefficient-table {
-  margin-top: 10px;
-}
-
-/* 按量模式在系数表下方追加的两项健康度判定区间 */
-.bulk-score-rules {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--industrial-grid-light);
-}
-
-.bulk-score-rules .mode-editor__label {
-  min-width: 72px;
-}
-
-.coefficient-table__title {
+.section-label {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--industrial-text);
   font-size: 12px;
   font-weight: 600;
 }
 
-.coefficient-table__unit {
+.section-label span {
   color: var(--industrial-muted);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 400;
 }
 
-.coefficient-table__head,
-.coefficient-table__row {
-  display: grid;
-  grid-template-columns: 72px repeat(3, 118px);
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-}
-
-.coefficient-table__head {
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
-.coefficient-table__row + .coefficient-table__row {
-  border-top: 1px dashed var(--industrial-grid-light);
-}
-
-.coefficient-table__category {
+.coef-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--industrial-grid);
+  background: var(--industrial-surface);
   font-size: 12px;
+  table-layout: fixed;
 }
 
-.coefficient-table__input {
-  width: 118px;
+.coef-table th {
+  height: 27px;
+  padding: 0 8px;
+  border-right: 1px solid var(--industrial-grid);
+  border-bottom: 1px solid var(--industrial-grid);
+  background: var(--industrial-header);
+  color: #33424b;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.coef-table th:last-child {
+  border-right: 0;
+}
+
+.coef-table td {
+  height: 36px;
+  padding: 0 8px;
+  border-right: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--industrial-text);
+  vertical-align: middle;
+}
+
+.coef-table td:last-child {
+  border-right: 0;
+}
+
+.coef-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.coef-table__cat {
+  width: 120px;
+  color: var(--industrial-muted);
+}
+
+.coef-table__color {
+  width: 76px;
+}
+
+.coef-table__skip {
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+}
+
+.coef-table th.is-num,
+.coef-table td.is-num {
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-.rule-validation {
-  margin-top: 10px;
-  padding: 6px 10px;
-  border-radius: 4px;
-  background: var(--industrial-header);
-  font-size: 12px;
-  line-height: 1.7;
-}
-
-.rule-validation__error {
-  margin: 0;
-  color: var(--industrial-danger);
-}
-
-.rule-validation__warning {
-  margin: 0;
-  color: var(--industrial-muted);
-}
-
-/* —— 手动策略 —— */
 .manual-config {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
   padding: 10px;
-}
-
-.manual-block__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.manual-block__head h3 {
-  margin: 0;
-  font-size: 13px;
 }
 
 .manual-block__empty {
   margin: 0;
+  padding: 14px 10px;
+  border: 1px solid var(--industrial-grid-light);
+  background: #f0f4f6;
   color: var(--industrial-muted);
   font-size: 12px;
-}
-
-.manual-mode-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.manual-mode-row {
-  display: grid;
-  grid-template-columns: 132px 72px minmax(0, 1fr) repeat(3, 76px) 28px;
-  align-items: center;
-  gap: 8px;
-}
-
-.manual-mode-row--head {
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
-.manual-mode-row__behavior {
-  color: var(--industrial-muted);
-  font-size: 12px;
-  text-align: center;
-}
-
-.manual-mode-row__name,
-.manual-mode-row__desc,
-.manual-mode-row__coefficient {
-  width: 100%;
-}
-
-.manual-mode-row__coefficient {
-  font-variant-numeric: tabular-nums;
-}
-
-.manual-mode-row__skip {
-  color: var(--industrial-muted);
-  font-size: 12px;
-  text-align: center;
-}
-
-.rule-row-remove {
-  padding: 0;
-  color: var(--industrial-danger);
 }
 
 .manual-list__dangling {
-  margin: 0 0 8px;
-  padding: 6px 10px;
-  border-radius: 4px;
-  background: var(--industrial-header);
-  font-size: 12px;
-}
-
-.manual-table {
-  width: 100%;
-}
-
-.manual-table__select {
-  width: 100%;
-}
-
-.manual-table__coefficient {
-  width: 62px;
-  margin-right: 4px;
-  font-variant-numeric: tabular-nums;
-}
-
-.manual-table__note {
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-/* —— 折叠卡片里的文字操作 —— */
-.config-card__action {
-  padding: 0;
-  color: var(--industrial-primary);
-}
-
-/* —— 销量加权 —— */
-.sales-window {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 18px;
-}
-
-.sales-window__item {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--industrial-text);
-  font-size: 12px;
+  margin: 0 0 8px;
+  padding: 6px 9px;
+  border-left: 2px solid var(--industrial-replenish);
+  background: #f8f3e8;
+  color: #7d6330;
+  font-size: 11.5px;
 }
 
-.sales-window__input {
-  width: 76px;
-  font-variant-numeric: tabular-nums;
+.rule-validation {
+  margin-top: 10px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--industrial-danger);
+  background: #f9efee;
 }
 
-.sales-window__value {
-  min-width: 50px;
-  color: var(--industrial-muted);
-  font-variant-numeric: tabular-nums;
+.rule-validation__error,
+.rule-validation__warning {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
 }
 
-.sales-window__total {
-  color: var(--industrial-normal);
-  font-size: 12px;
-}
-
-.sales-window__total--warn {
+.rule-validation__error {
   color: var(--industrial-danger);
 }
 
-.sales-window__months {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-  color: var(--industrial-muted);
-  font-size: 11px;
+.rule-validation__warning {
+  color: #8a6a24;
 }
 
-.sales-window__month {
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--industrial-page);
-  font-variant-numeric: tabular-nums;
+.weight-draft__months {
+  width: 64px;
 }
 
-@media (max-width: 720px) {
-  .mode-workspace {
-    grid-template-columns: 1fr;
-  }
+.weight-draft__percent {
+  width: 76px;
+}
 
-  .mode-list {
-    flex-direction: row;
-    overflow-x: auto;
-  }
+.weight-draft__remove {
+  margin-left: 2px;
+}
 
-  .mode-list__item {
-    min-width: 120px;
-  }
+.weight-draft__remove:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
 
-  .manual-mode-row {
-    grid-template-columns: 1fr 1fr;
-  }
+:deep(.ui-dialog .el-input-number) {
+  width: 100%;
+}
 
-  .manual-mode-row--head {
-    display: none;
-  }
+:deep(.coef-grid .el-input-number) {
+  width: 100%;
+}
+
+:deep(.el-input-number .el-input__wrapper) {
+  min-height: 28px;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px var(--industrial-grid) inset;
 }
 </style>

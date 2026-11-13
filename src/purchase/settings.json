@@ -235,10 +235,7 @@
       "remainderThreshold": 0.5,
       "minVats": 1,
       "bands": [
-        { "upTo": 30, "action": "skip", "value": 0 },
-        { "upTo": 120, "action": "fixed", "value": 80 },
-        { "upTo": 200, "action": "fixed", "value": 200 },
-        { "upTo": null, "action": "round", "value": 100 }
+        { "upTo": null, "action": "ladder", "value": 0, "sizes": [80, 160, 240] }
       ]
     },
     {

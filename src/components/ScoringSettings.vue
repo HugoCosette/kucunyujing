@@ -1,12 +1,12 @@
 <script setup>
-// 评分设置：摘要 + 编辑弹窗都收在这个组件里，配置页只负责把结果并入草稿。
+// 健康度评分：只读表格 + 一条轴两个分界值的编辑弹窗。
+// 计算与校验仍走 src/stocking/scoring.js，组件只负责把结果回传给配置页。
 import { computed, reactive, ref, watch } from 'vue'
-import { ElButton, ElDialog, ElInputNumber, ElMessage, ElTooltip } from 'element-plus'
+import { ElDialog, ElMessage } from 'element-plus'
 import {
   SCORING_DIMENSIONS,
   SCORING_TIERS,
   SCORING_TIER_LABELS,
-  SCORING_TIER_TONES,
   createDefaultScoring,
   describeScoringBand,
   normalizeScoring,
@@ -24,75 +24,126 @@ const props = defineProps({
 const emit = defineEmits(['apply'])
 
 const current = computed(() => normalizeScoring(props.scoring))
-const weightTotalText = computed(() =>
-  String(
-    Math.round(
-      SCORING_DIMENSIONS.reduce((sum, definition) => sum + current.value.dimensions[definition.key].weight, 0) * 100,
-    ) / 100,
-  ),
-)
-// 每个维度一行、每档一列：比连成一整段的说明更容易扫读。
+
 const rows = computed(() =>
   SCORING_DIMENSIONS.map((definition) => {
     const entry = current.value.dimensions[definition.key]
     return {
       key: definition.key,
       label: definition.label,
+      unit: definition.unit,
       weightText: `${Math.round(entry.weight * 100) / 100}%`,
-      bands: SCORING_TIERS.map((tier) => ({
-        key: tier,
-        tone: SCORING_TIER_TONES[tier],
-        text: describeScoringBand(entry.ranges[tier], definition),
-      })),
+      low: describeScoringBand(entry.ranges.low, definition),
+      mid: describeScoringBand(entry.ranges.mid, definition),
+      high: describeScoringBand(entry.ranges.high, definition),
     }
   }),
 )
-const totalText = computed(
-  () =>
-    `${current.value.total.midFrom ?? '不限'} ~ ${current.value.total.midTo ?? '不限'} 分`,
-)
-const summaryText = computed(
-  () => `权重合计 ${weightTotalText.value}% · ${totalText.value}为中风险`,
-)
-const introText =
-  'SKU 弹窗里的 5 维健康度评分：每个维度各配低 / 中 / 高三条风险区间，命中哪条就取对应得分，再按权重加权。' +
-  '综合评分落在中风险区间视为正常，高于为绿、低于为红；区间两端都包含，端点留空表示不限。'
-const expanded = ref(false)
 
-// —— 编辑弹窗 ——
-const dialogVisible = ref(false)
-const draft = reactive(normalizeScoring(props.scoring))
+const scoreText = computed(
+  () => `${current.value.scores.low} / ${current.value.scores.mid} / ${current.value.scores.high}`,
+)
 
-watch(dialogVisible, (visible) => {
-  if (!visible) return
-  const next = normalizeScoring(props.scoring)
-  draft.scores = { ...next.scores }
-  draft.total = { ...next.total }
-  draft.dimensions = next.dimensions
+const hintText = computed(() => {
+  const from = current.value.total.midFrom ?? '不限'
+  const to = current.value.total.midTo ?? '不限'
+  return `三档得分 ${scoreText.value} · 综合分档 ≤ ${from} 红 · ${from} ~ ${to} 黄 · ≥ ${to} 绿`
 })
 
-const draftRows = computed(() =>
-  SCORING_DIMENSIONS.map((definition) => ({
-    ...definition,
-    entry: draft.dimensions[definition.key],
-  })),
-)
+// —— 编辑弹窗 ——
+// 一条轴上只有两个分界值：相邻两档共用同一个数，提交时再展开成每档的 from / to。
+const TIER_SHORT = { low: '低', mid: '中', high: '高' }
+const TIER_BAND_TONE = { low: 'low', mid: 'mid', high: 'high' }
+const dialogVisible = ref(false)
 
-const tierRows = SCORING_TIERS.map((tier) => ({
-  key: tier,
-  label: SCORING_TIER_LABELS[tier],
-  tone: tier,
-}))
+const form = reactive({
+  chains: [],
+  scores: { low: 80, mid: 60, high: 40 },
+  total: { b1: 50, b2: 70 },
+})
+
+function orderTiers(ranges) {
+  return [...SCORING_TIERS].sort(
+    (a, b) =>
+      (ranges[a].from ?? Number.NEGATIVE_INFINITY) - (ranges[b].from ?? Number.NEGATIVE_INFINITY),
+  )
+}
+
+function buildRow(definition, entry) {
+  const order = orderTiers(entry.ranges)
+  const first = entry.ranges[order[0]]
+  const second = entry.ranges[order[1]]
+  const third = entry.ranges[order[2]]
+  return {
+    key: definition.key,
+    label: definition.label,
+    unit: definition.unit,
+    decimals: definition.decimals,
+    weight: Math.round(entry.weight * 100) / 100,
+    order,
+    b1: first.to ?? second.from,
+    b2: second.to ?? third.from,
+    outerFrom: first.from,
+    outerTo: third.to,
+    segs: order.map((tier) => ({ tier, label: TIER_SHORT[tier], tone: TIER_BAND_TONE[tier] })),
+  }
+}
+
+function syncForm() {
+  const next = normalizeScoring(props.scoring)
+  form.chains = SCORING_DIMENSIONS.map((definition) =>
+    buildRow(definition, next.dimensions[definition.key]),
+  )
+  form.scores = { ...next.scores }
+  form.total = { b1: next.total.midFrom, b2: next.total.midTo }
+}
+
+watch(dialogVisible, (visible) => {
+  if (visible) syncForm()
+})
+
+const formWeightTotal = computed(
+  () => Math.round(form.chains.reduce((sum, row) => sum + (Number(row.weight) || 0), 0) * 100) / 100,
+)
+const formWeightBalanced = computed(() => Math.abs(formWeightTotal.value - 100) <= 0.001)
+
+function toNumber(value) {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function addStep(value, step) {
+  const number = toNumber(value)
+  return number === null ? null : number + step
+}
 
 function restoreDefaults() {
   const defaults = createDefaultScoring()
-  draft.scores = { ...defaults.scores }
-  draft.total = { ...defaults.total }
-  draft.dimensions = defaults.dimensions
+  form.chains = SCORING_DIMENSIONS.map((definition) =>
+    buildRow(definition, defaults.dimensions[definition.key]),
+  )
+  form.scores = { ...defaults.scores }
+  form.total = { b1: defaults.total.midFrom, b2: defaults.total.midTo }
 }
 
 function confirm() {
-  const next = normalizeScoring(draft)
+  const dimensions = {}
+  for (const row of form.chains) {
+    // 区间两端都包含：整数维度相邻档留 1 的整数间隔，其余维度共用分界值。
+    const step = row.decimals === 0 ? 1 : 0
+    const ranges = {}
+    ranges[row.order[0]] = { from: row.outerFrom ?? null, to: toNumber(row.b1) }
+    ranges[row.order[1]] = { from: addStep(row.b1, step), to: toNumber(row.b2) }
+    ranges[row.order[2]] = { from: addStep(row.b2, step), to: row.outerTo ?? null }
+    dimensions[row.key] = { weight: Number(row.weight) || 0, ranges }
+  }
+
+  const next = normalizeScoring({
+    scores: form.scores,
+    total: { midFrom: toNumber(form.total.b1), midTo: toNumber(form.total.b2) },
+    dimensions,
+  })
   const errors = validateScoring(next)
   if (errors.length) {
     ElMessage.error(errors[0].message)
@@ -104,161 +155,180 @@ function confirm() {
 </script>
 
 <template>
-  <section class="config-card" :class="{ 'config-card--open': expanded }">
-    <div class="config-card__head">
-      <button
-        type="button"
-        class="config-card__toggle"
-        :aria-expanded="expanded"
-        @click="expanded = !expanded"
-      >
-        <span class="config-card__chevron">▾</span>
-        <span class="config-card__title">评分设置</span>
-        <span class="config-card__summary">{{ summaryText }}</span>
-      </button>
-      <ElTooltip :content="introText" placement="top">
-        <span class="config-info">i</span>
-      </ElTooltip>
-      <span class="config-card__spacer" />
-      <ElButton size="small" text class="scoring-settings__edit" @click="dialogVisible = true">
-        编辑规则
-      </ElButton>
+  <section class="panel">
+    <div class="panel__head">
+      <h2 class="panel__title">健康度评分</h2>
     </div>
 
-    <div v-show="expanded" class="config-card__body">
-      <div class="scoring-settings__grid">
-        <div class="scoring-settings__grid-head">
-          <span>维度</span>
-          <span>权重</span>
-          <span v-for="tier in tierRows" :key="tier.key">{{ tier.label }}</span>
-        </div>
-        <div v-for="row in rows" :key="row.key" class="scoring-settings__grid-row">
-          <span class="scoring-settings__dim">{{ row.label }}</span>
-          <span class="scoring-settings__weight-cell">{{ row.weightText }}</span>
-          <span
-            v-for="band in row.bands"
-            :key="band.key"
-            class="scoring-settings__band"
-            :class="`scoring-settings__band--${band.tone}`"
-          >
-            {{ band.text }}
-          </span>
+    <div class="panel__body">
+      <div class="tbl-block">
+        <table class="score-table">
+          <thead>
+            <tr>
+              <th style="width: 132px">维度</th>
+              <th class="is-num" style="width: 64px">权重</th>
+              <th>低风险</th>
+              <th>中风险</th>
+              <th>高风险</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in rows" :key="row.key">
+              <td>
+                {{ row.label }}
+                <em class="scoring__unit">{{ row.unit }}</em>
+              </td>
+              <td class="is-num">{{ row.weightText }}</td>
+              <td>{{ row.low }}</td>
+              <td>{{ row.mid }}</td>
+              <td>{{ row.high }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="tbl-foot">
+          <span class="tbl-foot__hint">{{ hintText }}</span>
+          <button type="button" class="btn btn--sm" @click="dialogVisible = true">编辑</button>
         </div>
       </div>
     </div>
 
     <ElDialog
       v-model="dialogVisible"
-      class="scoring-settings__dialog"
-      width="760px"
+      class="ui-dialog"
+      width="780px"
       append-to-body
       align-center
-      title="评分设置"
+      title="编辑健康度评分"
     >
-      <p class="scoring-settings__dialog-hint">
-        每个维度配三条风险区间，区间两端都包含；端点留空表示不限，区间重叠时按「中风险 → 高风险 → 低风险」的顺序取第一条命中的区间。
-        综合评分 = Σ(各维度得分 × 权重) ÷ 参与维度权重合计。
+      <p class="form__note">
+        三档按数值从小到大排成一条轴，只填两个分界值，左右两档共用；权重合计需为 100%。
       </p>
 
-      <div class="scoring-settings__rows">
-        <div v-for="row in draftRows" :key="row.key" class="scoring-settings__row">
-          <div class="scoring-settings__row-head">
-            <span class="scoring-settings__name">{{ row.label }}</span>
-            <label class="scoring-settings__weight">
-              权重
-              <ElInputNumber
-                v-model="row.entry.weight"
-                :min="0"
-                :controls="false"
-                :value-on-clear="0"
-                size="small"
-                class="scoring-settings__weight-input"
-                aria-label="权重"
-              />
-              %
-            </label>
-          </div>
-          <div class="scoring-settings__ranges">
-            <label
-              v-for="tier in tierRows"
-              :key="tier.key"
-              class="scoring-settings__range"
-              :class="`scoring-settings__range--${tier.tone}`"
+      <div class="rule-head">
+        <span>维度</span>
+        <span>风险分档</span>
+        <span class="is-right">权重</span>
+      </div>
+      <div class="rule-body">
+        <div v-for="row in form.chains" :key="row.key" class="rule-row">
+          <span class="rule-row__name">
+            {{ row.label }}
+            <em>{{ row.unit }}</em>
+          </span>
+          <div class="bandbar">
+            <span class="bandbar__seg" :class="`bandbar__seg--${row.segs[0].tone}`">
+              {{ row.segs[0].label }}
+            </span>
+            <input
+              v-model.number="row.b1"
+              class="bandbar__cut"
+              type="number"
+              inputmode="decimal"
+              step="1"
+              placeholder="不限"
+              aria-label="第 1 个分界值"
+            />
+            <span
+              class="bandbar__seg"
+              :class="[`bandbar__seg--${row.segs[1].tone}`, { 'is-empty': row.b1 === row.b2 }]"
+              :title="row.b1 === row.b2 ? '该档区间为空，不会命中' : ''"
             >
-              <span class="scoring-settings__tier">{{ tier.label }}</span>
-              <ElInputNumber
-                v-model="row.entry.ranges[tier.key].from"
-                :controls="false"
-                :value-on-clear="null"
-                placeholder="不限"
-                size="small"
-                class="scoring-settings__input"
-                :aria-label="`${row.label} ${tier.label}下界`"
-              />
-              <span class="scoring-settings__tilde">~</span>
-              <ElInputNumber
-                v-model="row.entry.ranges[tier.key].to"
-                :controls="false"
-                :value-on-clear="null"
-                placeholder="不限"
-                size="small"
-                class="scoring-settings__input"
-                :aria-label="`${row.label} ${tier.label}上界`"
-              />
-              <span class="scoring-settings__unit">{{ row.unit }}</span>
-            </label>
+              {{ row.segs[1].label }}
+            </span>
+            <input
+              v-model.number="row.b2"
+              class="bandbar__cut"
+              type="number"
+              inputmode="decimal"
+              step="1"
+              placeholder="不限"
+              aria-label="第 2 个分界值"
+            />
+            <span class="bandbar__seg" :class="`bandbar__seg--${row.segs[2].tone}`">
+              {{ row.segs[2].label }}
+            </span>
+          </div>
+          <div class="num-field">
+            <input
+              v-model.number="row.weight"
+              class="input input--num"
+              type="number"
+              min="0"
+              max="100"
+              step="5"
+              :aria-label="`${row.label}权重`"
+            />
+            <span class="num-field__unit">%</span>
           </div>
         </div>
       </div>
-
-      <div class="scoring-settings__group">
-        <span class="scoring-settings__group-title">三档得分</span>
-        <label v-for="tier in tierRows" :key="tier.key" class="scoring-settings__field">
-          <span>{{ tier.label }}</span>
-          <ElInputNumber
-            v-model="draft.scores[tier.key]"
-            :min="0"
-            :controls="false"
-            :value-on-clear="0"
-            size="small"
-            class="scoring-settings__input"
-          />
-        </label>
+      <div class="rule-foot">
+        <span>分界值同时属于相邻两档，按中风险优先</span>
+        <span>
+          权重合计
+          <b :class="{ 'is-bad': !formWeightBalanced }">{{ formWeightTotal }}</b>%
+        </span>
       </div>
 
-      <div class="scoring-settings__group">
-        <span class="scoring-settings__group-title">综合评分分档</span>
-        <label class="scoring-settings__field">
-          <span>中风险</span>
-          <ElInputNumber
-            v-model="draft.total.midFrom"
-            :controls="false"
-            :value-on-clear="null"
-            placeholder="不限"
-            size="small"
-            class="scoring-settings__input"
-            aria-label="综合评分中风险下界"
-          />
-          <span class="scoring-settings__tilde">~</span>
-          <ElInputNumber
-            v-model="draft.total.midTo"
-            :controls="false"
-            :value-on-clear="null"
-            placeholder="不限"
-            size="small"
-            class="scoring-settings__input"
-            aria-label="综合评分中风险上界"
-          />
-          <span class="scoring-settings__unit">分</span>
-        </label>
+      <div class="rule-head rule-head--sub">
+        <span>总分规则</span>
+        <span></span>
+        <span></span>
+      </div>
+      <div class="rule-body">
+        <div class="rule-row">
+          <span class="rule-row__name">三档得分</span>
+          <div class="form__inline">
+            <label v-for="tier in SCORING_TIERS" :key="tier" class="form__inline-item">
+              {{ SCORING_TIER_LABELS[tier].replace('风险', '') }}
+              <input
+                v-model.number="form.scores[tier]"
+                class="input input--num form__score"
+                type="number"
+                min="0"
+                max="100"
+                step="5"
+                :aria-label="`${SCORING_TIER_LABELS[tier]}得分`"
+              />
+            </label>
+          </div>
+          <span></span>
+        </div>
+        <div class="rule-row">
+          <span class="rule-row__name">综合分档<em>分</em></span>
+          <div class="bandbar">
+            <span class="bandbar__seg bandbar__seg--high">红</span>
+            <input
+              v-model.number="form.total.b1"
+              class="bandbar__cut"
+              type="number"
+              inputmode="decimal"
+              step="1"
+              placeholder="不限"
+              aria-label="综合分档第 1 个分界值"
+            />
+            <span class="bandbar__seg bandbar__seg--mid">黄</span>
+            <input
+              v-model.number="form.total.b2"
+              class="bandbar__cut"
+              type="number"
+              inputmode="decimal"
+              step="1"
+              placeholder="不限"
+              aria-label="综合分档第 2 个分界值"
+            />
+            <span class="bandbar__seg bandbar__seg--low">绿</span>
+          </div>
+          <span></span>
+        </div>
       </div>
 
       <template #footer>
-        <div class="scoring-settings__footer">
-          <ElButton size="small" @click="restoreDefaults">恢复默认</ElButton>
-          <span class="scoring-settings__spacer" />
-          <ElButton size="small" @click="dialogVisible = false">取消</ElButton>
-          <ElButton size="small" type="primary" @click="confirm">确定</ElButton>
+        <div class="form__foot">
+          <button type="button" class="btn btn--text btn--sm" @click="restoreDefaults">恢复默认</button>
+          <span class="form__foot-spacer"></span>
+          <button type="button" class="btn btn--sm" @click="dialogVisible = false">取消</button>
+          <button type="button" class="btn btn--primary btn--sm" @click="confirm">确定</button>
         </div>
       </template>
     </ElDialog>
@@ -266,185 +336,17 @@ function confirm() {
 </template>
 
 <style scoped>
-.scoring-settings__edit {
-  padding: 0;
-  color: var(--industrial-primary);
-}
-
-.scoring-settings__grid {
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.scoring-settings__grid-head,
-.scoring-settings__grid-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) 56px repeat(3, minmax(0, 1fr));
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.scoring-settings__grid-head {
-  color: var(--industrial-muted);
-  background: var(--industrial-page);
+.scoring__unit {
+  margin-left: 5px;
+  color: #8b979e;
   font-size: 11px;
+  font-style: normal;
 }
 
-.scoring-settings__grid-row {
-  border-top: 1px solid var(--industrial-grid-light);
-  font-size: 12px;
-}
-
-.scoring-settings__dim {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.scoring-settings__weight-cell {
-  color: var(--industrial-muted);
+.form__score {
+  width: 64px;
+  height: 28px;
   text-align: right;
-}
-
-.scoring-settings__band--red {
-  color: var(--industrial-urgent);
-}
-
-.scoring-settings__band--yellow {
-  color: var(--industrial-replenish);
-}
-
-.scoring-settings__band--green {
-  color: var(--industrial-normal);
-}
-
-:global(.el-dialog.scoring-settings__dialog) {
-  --el-color-primary: var(--industrial-primary);
-  --el-dialog-bg-color: var(--industrial-surface);
-  --el-text-color-primary: var(--industrial-text);
-  --el-text-color-regular: var(--industrial-text);
-  --el-border-color: var(--industrial-grid);
-  --el-border-color-light: var(--industrial-grid-light);
-  width: min(760px, calc(100vw - 32px));
-}
-
-.scoring-settings__dialog-hint {
-  margin: 0 0 12px;
-  color: var(--industrial-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.scoring-settings__rows {
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 4px;
-}
-
-.scoring-settings__row {
-  padding: 7px 10px;
-  border-bottom: 1px solid var(--industrial-grid-light);
-}
-
-.scoring-settings__row:last-child {
-  border-bottom: 0;
-}
-
-.scoring-settings__row-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 4px;
-}
-
-.scoring-settings__name {
-  overflow: hidden;
-  font-size: 13px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.scoring-settings__weight {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.scoring-settings__ranges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-}
-
-.scoring-settings__range {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.scoring-settings__tier {
-  min-width: 42px;
-  font-size: 12px;
-}
-
-.scoring-settings__range--high .scoring-settings__tier {
-  color: var(--industrial-urgent);
-}
-
-.scoring-settings__range--mid .scoring-settings__tier {
-  color: var(--industrial-replenish);
-}
-
-.scoring-settings__range--low .scoring-settings__tier {
-  color: var(--industrial-normal);
-}
-
-.scoring-settings__input {
-  width: 56px;
-}
-
-.scoring-settings__weight-input {
-  width: 52px;
-}
-
-.scoring-settings__tilde,
-.scoring-settings__unit {
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.scoring-settings__group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.scoring-settings__group-title {
-  color: var(--industrial-muted);
-  font-size: 12px;
-}
-
-.scoring-settings__field {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-
-.scoring-settings__footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.scoring-settings__spacer {
-  flex: 1 1 auto;
+  font-variant-numeric: tabular-nums;
 }
 </style>

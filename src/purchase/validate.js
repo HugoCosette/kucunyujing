@@ -4,7 +4,7 @@
 import { VAT_RULE_NONE, normalizeVatRules } from './vat.js'
 
 export const SETTINGS_VERSION = 3
-export const ORDERS_VERSION = 1
+export const ORDERS_VERSION = 2
 
 function text(value) {
   return String(value ?? '').trim()
@@ -141,7 +141,7 @@ export function normalizeSettings(raw) {
   }
 }
 
-function normalizeOrderEntry(entry, index, keepBlankEntries) {
+function normalizeDraftEntry(entry, index, keepBlankEntries) {
   if (!entry || typeof entry !== 'object') return null
 
   const factoryId = text(entry.factoryId)
@@ -161,31 +161,139 @@ function normalizeOrderEntry(entry, index, keepBlankEntries) {
     assignee,
     quantity: quantity > 0 ? quantity : 0,
     // 缸快照：下单时的缸数与每缸公斤，导出与对账要能还原当时按什么缸规下的单。
-    vatCount: toNumber(entry.vatCount) > 0 ? toNumber(entry.vatCount) : null,
+    // 缸数只存整数（公斤可以不整缸，此时 vatCount 为空、只留每缸公斤）。
+    vatCount: toNumber(entry.vatCount) >= 1 ? Math.round(toNumber(entry.vatCount)) : null,
     kgPerVat: toNumber(entry.kgPerVat) > 0 ? toNumber(entry.kgPerVat) : null,
     note,
   }
 }
 
-export function normalizeOrders(raw, { keepBlankEntries = false } = {}) {
-  const source = asObject(raw)
-  const orders = {}
+// 订单状态只两种：有效 / 作废。到货进度由 receipts 求和派生，不另设状态。
+export const ORDER_STATUS = { ACTIVE: 'active', CANCELLED: 'cancelled' }
 
-  for (const [skuId, entries] of Object.entries(asObject(source.orders))) {
+function monthOf(iso) {
+  const stamp = text(iso)
+  return /^\d{4}-\d{2}/.test(stamp) ? stamp.slice(0, 7) : ''
+}
+
+function normalizeReceipt(receipt, index) {
+  if (!receipt || typeof receipt !== 'object') return null
+  const qty = toNumber(receipt.qty ?? receipt.quantity)
+  if (!(qty > 0)) return null
+  return {
+    id: text(receipt.id) || `rc-${index + 1}`,
+    at: text(receipt.at) || new Date().toISOString(),
+    qty,
+    by: text(receipt.by),
+  }
+}
+
+// 一张分订单 = SKU × 染厂的一行流水，只追加、不物理删除。
+// receivedQty 一律由 receipts 求和派生，不信任外部传入的旧值。
+function normalizeOrder(order, index) {
+  if (!order || typeof order !== 'object') return null
+
+  const skuId = text(order.skuId)
+  const factoryId = text(order.factoryId)
+  const factoryName = text(order.factoryName)
+  const assignee = text(order.assignee)
+  const note = text(order.note)
+  const quantity = toNumber(order.quantity ?? 0)
+  const isBlank = !skuId || (!factoryId && !factoryName && !assignee && !(quantity > 0) && !note)
+  if (isBlank) return null
+
+  const receipts = asArray(order.receipts)
+    .map((receipt, receiptIndex) => normalizeReceipt(receipt, receiptIndex))
+    .filter(Boolean)
+  const submittedAt = text(order.submittedAt) || text(order.createdAt) || new Date().toISOString()
+
+  return {
+    id: text(order.id) || `so-${index + 1}`,
+    batchId: text(order.batchId),
+    skuId,
+    product: text(order.product),
+    color: text(order.color),
+    factoryId,
+    factoryName,
+    assignee,
+    quantity: quantity > 0 ? quantity : 0,
+    vatCount: toNumber(order.vatCount) >= 1 ? Math.round(toNumber(order.vatCount)) : null,
+    kgPerVat: toNumber(order.kgPerVat) > 0 ? toNumber(order.kgPerVat) : null,
+    note,
+    status:
+      text(order.status) === ORDER_STATUS.CANCELLED ? ORDER_STATUS.CANCELLED : ORDER_STATUS.ACTIVE,
+    submittedAt,
+    updatedAt: text(order.updatedAt) || submittedAt,
+    month: text(order.month) || monthOf(submittedAt),
+    receivedQty: receipts.reduce((sum, receipt) => sum + receipt.qty, 0),
+    receipts,
+    revisions: asArray(order.revisions).filter(
+      (revision) => revision && typeof revision === 'object',
+    ),
+    cancelledAt: text(order.cancelledAt) || null,
+  }
+}
+
+function normalizeDrafts(raw, keepBlankEntries) {
+  const drafts = {}
+  for (const [skuId, entries] of Object.entries(asObject(raw))) {
     const key = text(skuId)
     if (!key) continue
     const normalized = []
     for (const entry of asArray(entries)) {
-      const orderEntry = normalizeOrderEntry(entry, normalized.length, keepBlankEntries)
-      if (orderEntry) normalized.push(orderEntry)
+      const draftEntry = normalizeDraftEntry(entry, normalized.length, keepBlankEntries)
+      if (draftEntry) normalized.push(draftEntry)
     }
-    if (normalized.length) orders[key] = normalized
+    if (normalized.length) drafts[key] = normalized
   }
+  return drafts
+}
+
+// v1 的 orders 是按 SKU 覆盖的 map，逐条迁成 active 订单：老数据都是已经发给染厂的单，按已下单处理。
+function migrateLegacyOrders(source, updatedAt) {
+  const orders = []
+  for (const [skuId, entries] of Object.entries(asObject(source.orders))) {
+    const key = text(skuId)
+    if (!key) continue
+    for (const entry of asArray(entries)) {
+      const draftEntry = normalizeDraftEntry(entry, orders.length, false)
+      if (!draftEntry) continue
+      orders.push({
+        ...draftEntry,
+        id: `so-legacy-${orders.length + 1}`,
+        batchId: `legacy-${updatedAt}`,
+        skuId: key,
+        product: text(entry.product),
+        color: text(entry.color),
+        status: ORDER_STATUS.ACTIVE,
+        submittedAt: updatedAt,
+        updatedAt,
+        month: monthOf(updatedAt),
+        receivedQty: 0,
+        receipts: [],
+        revisions: [],
+        cancelledAt: null,
+      })
+    }
+  }
+  return orders
+}
+
+export function normalizeOrders(raw, { keepBlankEntries = false } = {}) {
+  const source = asObject(raw)
+  const updatedAt =
+    typeof source.updatedAt === 'string' ? source.updatedAt : new Date().toISOString()
+
+  const drafts = normalizeDrafts(source.drafts, keepBlankEntries)
+  // v2 的 orders 是流水数组；v1 是 map，读一次即迁移成 active 订单。
+  const orders = Array.isArray(source.orders)
+    ? source.orders.map((order, index) => normalizeOrder(order, index)).filter(Boolean)
+    : migrateLegacyOrders(source, updatedAt)
 
   return {
     version: ORDERS_VERSION,
-    updatedAt:
-      typeof source.updatedAt === 'string' ? source.updatedAt : new Date().toISOString(),
+    updatedAt,
+    drafts,
     orders,
   }
 }

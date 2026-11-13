@@ -1,4 +1,4 @@
-import { CUSTOMER_EXCLUSIVE, CUSTOMER_FLOW } from './constants.js'
+import { CUSTOMER_EXCLUSIVE, CUSTOMER_FLOW, SALES_WINDOW_DEFAULTS } from './constants.js'
 import { getAutoModes, getManualModes, getSalesWeights, normalizeConfig } from './validate.js'
 
 const DAYS_PER_MONTH = 30
@@ -17,7 +17,8 @@ function lastActiveMonth(counts) {
   return 0
 }
 
-// 加权月销量 = 近1个月 ×w1 + 近3个月月均 ×w3 + 近12个月月均 ×w12。
+// 加权月销量 = Σ(最近 N 个月的月均 × 该档权重)；默认 1 / 3 / 12 三档即
+// 近1个月 ×w1 + 近3个月月均 ×w3 + 近12个月月均 ×w12。
 // 缺失月份按 0 计入（与「12 个月全平均、含 0」的口径一致）。
 export function weightedMonthlySales(counts, baselineMonth, weights) {
   if (!Array.isArray(counts) || counts.length === 0) return null
@@ -27,25 +28,23 @@ export function weightedMonthlySales(counts, baselineMonth, weights) {
       : lastActiveMonth(counts)
   if (!base) return 0
 
-  const pick = (offset) => {
-    const month = base - offset
-    if (month < 1) return 0
-    const value = Number(counts[month - 1])
-    return Number.isFinite(value) ? value : 0
-  }
+  const entries = Array.isArray(weights) && weights.length > 0 ? weights : SALES_WINDOW_DEFAULTS
+  let total = 0
+  for (const entry of entries) {
+    const months = Math.min(Math.max(Math.trunc(Number(entry?.months)) || 0, 1), counts.length)
+    const weight = Number(entry?.weight)
+    if (!Number.isFinite(weight) || weight === 0) continue
 
-  let sum1 = 0
-  let sum3 = 0
-  let sum12 = 0
-  for (let offset = 0; offset < 12; offset += 1) {
-    const value = pick(offset)
-    sum12 += value
-    if (offset < 3) sum3 += value
-    if (offset === 0) sum1 = value
+    let sum = 0
+    for (let offset = 0; offset < months; offset += 1) {
+      const month = base - offset
+      if (month < 1) break
+      const value = Number(counts[month - 1])
+      if (Number.isFinite(value)) sum += value
+    }
+    total += weight * (sum / months)
   }
-
-  const w = weights ?? { m1: 0.5, m3: 0.3, m12: 0.2 }
-  return w.m1 * sum1 + w.m3 * (sum3 / 3) + w.m12 * (sum12 / 12)
+  return total
 }
 
 // 模式判定只看月均条数：按顺序命中第一条「区间包含该值」的模式（顺序即优先级）。

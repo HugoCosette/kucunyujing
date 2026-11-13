@@ -1,6 +1,6 @@
 <script setup>
-// 顶部导航：左侧是主面板组（主面板 → 销售表 → 采购下单 → 下单设置 → 配置信息），
-// 右侧是屏蔽列表这类辅助入口。
+// 顶部导航：左侧是主面板组（主面板 → 销售表 → 采购下单 → 设置），
+// 右侧是屏蔽列表这类辅助入口，辅助入口不带角标（数量在屏蔽列表页内按 SKU 统计）。
 import { mainNavEntries, utilityNavEntries } from '@/data/panels'
 </script>
 
@@ -37,25 +37,29 @@ import { mainNavEntries, utilityNavEntries } from '@/data/panels'
   align-items: flex-end;
   justify-content: space-between;
   gap: 6px 12px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
   border-bottom: 1px solid var(--industrial-grid);
 }
 
 .page-navigation-group {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 2px;
   min-width: 0;
 }
 
 .page-navigation-group--utility {
-  align-items: center;
+  align-items: flex-end;
 }
 
 .page-navigation-link {
   flex-shrink: 0;
-  padding: 9px 16px;
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 18px;
   color: var(--industrial-muted);
+  font-size: 13.5px;
   border-bottom: 2px solid transparent;
   text-decoration: none;
   white-space: nowrap;
@@ -74,6 +78,8 @@ import { mainNavEntries, utilityNavEntries } from '@/data/panels'
 .page-navigation-link--utility {
   display: inline-flex;
   align-items: center;
+  height: 38px;
+  font-size: 12.5px;
 }
 
 @media (max-width: 720px) {
@@ -86,7 +92,8 @@ import { mainNavEntries, utilityNavEntries } from '@/data/panels'
   }
 
   .page-navigation-link {
-    padding: 8px 10px;
+    height: 34px;
+    padding: 0 10px;
     font-size: 13px;
   }
 }

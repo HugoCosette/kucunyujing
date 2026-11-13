@@ -9,7 +9,8 @@ export {
   MODE_KEYS,
   MODE_METRICS,
   SALES_WINDOW_DEFAULTS,
-  expandMonthWeights,
+  SALES_WINDOW_MAX_MONTHS,
+  createDefaultSalesWeights,
 } from './constants.js'
 
 export {

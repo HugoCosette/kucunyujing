@@ -3,7 +3,6 @@ import InventoryPanelView from '../views/InventoryPanelView.vue'
 import SalesPanelView from '../views/SalesPanelView.vue'
 import ConfigView from '../views/ConfigView.vue'
 import PurchaseOrderView from '../views/PurchaseOrderView.vue'
-import PurchaseSettingsView from '../views/PurchaseSettingsView.vue'
 import HiddenSkusView from '../views/HiddenSkusView.vue'
 import { MAIN_PANEL } from '@/data/panels'
 
@@ -26,9 +25,9 @@ const router = createRouter({
       component: PurchaseOrderView,
     },
     {
+      // 旧「下单设置」入口：并入 /config 的「下单配置」分组，保留深链兼容并自动落到缸规则。
       path: MAIN_PANEL.purchaseSettingsPath,
-      name: MAIN_PANEL.purchaseSettingsRouteName,
-      component: PurchaseSettingsView,
+      redirect: () => ({ path: MAIN_PANEL.configPath, query: { panel: 'vat' } }),
     },
     {
       path: MAIN_PANEL.configPath,

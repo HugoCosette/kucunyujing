@@ -64,34 +64,47 @@ const vatContext = computed(() => ({
   spuMonthlyAvg: props.item?.spuMonthlyAvg,
 }))
 const vatBand = computed(() => resolveVatBand(vatRule.value, vatContext.value))
-const kgPerVat = computed(() => {
-  const band = vatBand.value?.band
-  if (!band || band.action === 'skip') return null
-  const value = Number(band.value)
-  return value > 0 ? value : null
-})
 const suggestion = computed(() => planOrderQuantity(planned.value, vatRule.value, vatContext.value))
+// 缸数按规则建议里选中的缸型换算（缸型阶梯会随需安排量挑小缸 / 中缸 / 大缸）。
+const kgPerVat = computed(() => {
+  const per = Number(suggestion.value.kgPerVat)
+  return per > 0 ? per : null
+})
 const vatTotal = computed(() =>
   props.modelValue.reduce((sum, entry) => sum + (Number(entry.vatCount) || 0), 0),
 )
-const nonWholeCount = computed(
-  () =>
-    props.modelValue.filter((entry) => {
-      const quantity = Number(entry.quantity) || 0
-      const perVat = Number(entry.kgPerVat) || kgPerVat.value
-      if (!perVat || quantity <= 0) return false
-      return Math.abs(quantity / perVat - Math.round(quantity / perVat)) > 0.005
-    }).length,
-)
 
-// 缸数显示：优先用分订单里存的快照，老分订单（只有公斤）按当前每缸公斤回算。
-function vatCountOf(entry) {
-  const stored = Number(entry?.vatCount)
-  if (Number.isFinite(stored) && stored > 0) return stored
+// 正好整缸时返回缸数，否则返回 null（公斤允许不是整缸）。
+function nearestWholeVats(quantity, perVat) {
+  if (!(perVat > 0) || !(quantity > 0)) return null
+  const ratio = quantity / perVat
+  const nearest = Math.round(ratio)
+  return nearest > 0 && Math.abs(ratio - nearest) < 0.005 ? nearest : null
+}
+
+// 行内提示：整缸写「＝ 2 缸 × 240 公斤」，非整缸给出相邻两档整缸，让人决定改缸数还是改公斤。
+function quantityHint(entry) {
   const quantity = Number(entry?.quantity) || 0
   const perVat = Number(entry?.kgPerVat) || kgPerVat.value
-  if (!perVat || quantity <= 0) return 0
-  return Math.round((quantity / perVat) * 100) / 100
+  if (!(quantity > 0) || !(perVat > 0)) return null
+  const whole = nearestWholeVats(quantity, perVat)
+  if (whole) return { tone: 'ok', text: `＝ ${formatQuantity(whole)} 缸 × ${formatQuantity(perVat)} 公斤` }
+  const ratio = quantity / perVat
+  const lower = Math.floor(ratio)
+  const upper = lower + 1
+  return {
+    tone: 'warn',
+    text: `非整缸：${formatQuantity(lower)} 缸 = ${formatQuantity(lower * perVat)} ／ ${formatQuantity(upper)} 缸 = ${formatQuantity(upper * perVat)} 公斤`,
+  }
+}
+
+const rowHints = computed(() => props.modelValue.map((entry) => quantityHint(entry)))
+const nonWholeCount = computed(() => rowHints.value.filter((hint) => hint?.tone === 'warn').length)
+
+// 缸数只认人填的整数；公斤不是整缸时留空（不反推小数），由行内提示说明差多少。
+function vatCountOf(entry) {
+  const stored = Number(entry?.vatCount)
+  return Number.isFinite(stored) && stored > 0 ? stored : null
 }
 
 function updateEntries(next) {
@@ -140,12 +153,12 @@ function addSuggestedEntry() {
   ])
 }
 
-// 改缸数：公斤数跟着 ＝ 缸数 × 每缸公斤；改公斤数：缸数按每缸公斤回算（可能不是整缸）。
+// 改缸数：公斤数跟着 ＝ 缸数 × 缸型（硬换算）；改公斤数：只有正好整缸才回填缸数，否则留空只提示。
 function handleVatCountChange(index, value) {
-  const vatCount = Math.max(0, Number(value) || 0)
+  const vatCount = Math.max(0, Math.round(Number(value) || 0))
   const perVat = kgPerVat.value
   patchEntry(index, {
-    vatCount,
+    vatCount: vatCount > 0 ? vatCount : null,
     quantity: perVat ? Math.round(vatCount * perVat * 100) / 100 : Number(props.modelValue[index]?.quantity) || 0,
     kgPerVat: perVat,
   })
@@ -156,7 +169,7 @@ function handleQuantityChange(index, value) {
   const perVat = kgPerVat.value
   patchEntry(index, {
     quantity,
-    vatCount: perVat ? Math.round((quantity / perVat) * 100) / 100 : null,
+    vatCount: nearestWholeVats(quantity, perVat),
     kgPerVat: perVat,
   })
 }
@@ -192,6 +205,11 @@ const ruleShort = computed(() => {
   if (!per) return `「${rule.name}」判定当前不下单`
   if (action === 'fixed') return `${rule.name} · 固定 ${formatQuantity(per)} 公斤/单`
   if (action === 'round') return `${rule.name} · 按 ${formatQuantity(per)} 公斤取整`
+  if (action === 'ladder') {
+    const sizes = vatBand.value?.band?.sizes ?? []
+    if (!sizes.length) return `${rule.name} · 缸型未配置`
+    return `${rule.name} · 缸型 ${sizes.map((size) => formatQuantity(size)).join(' / ')} 公斤，就近取整`
+  }
   return `${rule.name} · 每缸 ${formatQuantity(per)} 公斤`
 })
 
@@ -217,6 +235,7 @@ const ruleTitle = computed(() => {
       <span class="so-bar__item">已下单 <b>{{ formatQuantity(total) }}</b> 公斤</span>
       <span v-if="kgPerVat" class="so-bar__item">合计 <b>{{ formatQuantity(vatTotal) }}</b> 缸</span>
       <span v-if="nonWholeCount > 0" class="so-bar__warn">{{ nonWholeCount }} 张非整缸</span>
+      <span class="so-bar__state" :class="`so-bar__state--${totalTone}`">{{ totalHint }}</span>
       <span class="so-bar__rule" :title="ruleTitle">{{ ruleShort }}</span>
     </div>
 
@@ -304,6 +323,13 @@ const ruleTitle = computed(() => {
                 :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单数量`"
                 @update:model-value="handleQuantityChange(index, $event)"
               />
+              <span
+                v-if="rowHints[index]"
+                class="so-hint"
+                :class="`so-hint--${rowHints[index].tone}`"
+              >
+                {{ rowHints[index].text }}
+              </span>
             </td>
             <td>
               <ElInput
@@ -407,6 +433,26 @@ const ruleTitle = computed(() => {
   font-size: 11px;
 }
 
+.so-bar__state {
+  font-size: 11.5px;
+}
+
+.so-bar__state--match {
+  color: var(--industrial-normal);
+}
+
+.so-bar__state--under {
+  color: var(--industrial-replenish);
+}
+
+.so-bar__state--over {
+  color: var(--industrial-urgent);
+}
+
+.so-bar__state--empty {
+  color: var(--industrial-muted);
+}
+
 .so-bar__rule {
   margin-left: auto;
   font-size: 11.5px;
@@ -483,6 +529,24 @@ const ruleTitle = computed(() => {
 .so-cell--num :deep(.el-input__inner) {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* 数量下方的整缸提示：整缸绿、非整缸黄，不占额外列宽 */
+.so-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  white-space: normal;
+}
+
+.so-hint--ok {
+  color: var(--industrial-normal);
+}
+
+.so-hint--warn {
+  color: var(--industrial-replenish);
 }
 
 .so-table :deep(.el-input__wrapper),

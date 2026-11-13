@@ -4,6 +4,8 @@ import {
   CUSTOMER_FLOW,
   MODE_KEYS,
   SALES_WINDOW_DEFAULTS,
+  SALES_WINDOW_MAX_MONTHS,
+  createDefaultSalesWeights,
 } from './constants.js'
 import {
   BUILTIN_MANUAL_MODES,
@@ -173,13 +175,30 @@ function normalizeStrategy(strategy, fallback, normalizeModes) {
   }
 }
 
+// 销量加权：列表里的每一条 = 「最近 N 个月的月均 × 权重」，权重之和为 1。
+// 旧版写死的 { m1, m3, m12 } 在这里一次性迁移成三条，其他读法一律当空列表处理。
 function normalizeSalesWeights(weights) {
-  const source = isPlainObject(weights) ? weights : {}
-  return {
-    m1: toNumber(source.m1, SALES_WINDOW_DEFAULTS.m1),
-    m3: toNumber(source.m3, SALES_WINDOW_DEFAULTS.m3),
-    m12: toNumber(source.m12, SALES_WINDOW_DEFAULTS.m12),
+  const legacy = !Array.isArray(weights) && isPlainObject(weights) ? weights : null
+  const source = Array.isArray(weights)
+    ? weights
+    : legacy
+      ? [
+          { months: 1, weight: toNumber(legacy.m1, SALES_WINDOW_DEFAULTS[0].weight) },
+          { months: 3, weight: toNumber(legacy.m3, SALES_WINDOW_DEFAULTS[1].weight) },
+          { months: 12, weight: toNumber(legacy.m12, SALES_WINDOW_DEFAULTS[2].weight) },
+        ]
+      : []
+
+  const entries = []
+  for (const entry of source) {
+    const months = toNumber(entry?.months, null)
+    if (months === null || months < 1) continue
+    entries.push({
+      months: Math.min(Math.trunc(months), SALES_WINDOW_MAX_MONTHS),
+      weight: Math.max(toNumber(entry?.weight, 0), 0),
+    })
   }
+  return entries.length > 0 ? entries : createDefaultSalesWeights()
 }
 
 // 归一化：补全结构、丢弃非法字段、固定 5 个模式及其顺序。
@@ -369,10 +388,13 @@ export function validateConfig(config) {
     }
   })
 
-  const total = weights.m1 + weights.m3 + weights.m12
-  for (const [key, value] of Object.entries(weights)) {
-    if (!Number.isFinite(value) || value < 0) {
-      errors.push({ message: `销量权重 ${key} 必须是非负数字` })
+  const total = weights.reduce((sum, entry) => sum + entry.weight, 0)
+  for (const entry of weights) {
+    if (!Number.isInteger(entry.months) || entry.months < 1 || entry.months > SALES_WINDOW_MAX_MONTHS) {
+      errors.push({ message: `销量权重的月数必须是 1–${SALES_WINDOW_MAX_MONTHS} 的整数` })
+    }
+    if (!Number.isFinite(entry.weight) || entry.weight < 0) {
+      errors.push({ message: `销量权重「近 ${entry.months} 个月」必须是非负数字` })
     }
   }
   if (Number.isFinite(total) && Math.abs(total - 1) > 0.001) {

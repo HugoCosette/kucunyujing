@@ -11,6 +11,9 @@ export const PRODUCT_SUMMARY_FIELDS = [
   'inTransitStock',
   'theoreticalStock',
   'projectedStock',
+  'ordered',
+  'received',
+  'pendingOrder',
 ]
 
 const strategyFields = ['redLineStock', 'normalStock', 'peakStock', 'shortage']

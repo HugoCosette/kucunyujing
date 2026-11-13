@@ -51,8 +51,13 @@ function getUrgency(indicator, coefficients) {
 export function calculateInventoryRow(item) {
   const kgFactor =
     Number.isFinite(item.kgFactor) && item.kgFactor > 0 ? item.kgFactor : null
-  // 需安排：人工按公斤填写
+  // 需安排：人工按公斤填写（锁定态才算有效计划，未锁的草稿由页面另行展示）
   const planned = item.planned ?? 0
+  // 采购执行层：已下单 / 已到货来自订单流水（只统计 active）。待收 = 已下单 − 已到货。
+  // 两段加起来才是"已经安排了、还没到齐"的总量，所以只在这里各算一次，别再额外加已到货。
+  const ordered = Number(item.ordered) > 0 ? Number(item.ordered) : 0
+  const received = Number(item.received) > 0 ? Number(item.received) : 0
+  const pendingOrder = Math.max(0, ordered - received)
   const turnoverIn = item.turnoverIn ?? 0
   // 在途库存 = 生产排单的进仓重量（公斤）；未提供该字段的旧数据按“生产中”兜底。
   const inTransitStock = Number.isFinite(item.inTransitStock)
@@ -62,8 +67,9 @@ export function calculateInventoryRow(item) {
   const warehouseKg = kgFactor ? item.warehouseStock * kgFactor : null
   // 理论库存是事实层：只由导入数据派生（公斤）
   const theoreticalStock = warehouseKg === null ? null : warehouseKg + inTransitStock
-  // 预计库存是评估层：事实层叠加“已采纳的需安排”（公斤）
-  const projectedStock = theoreticalStock === null ? null : theoreticalStock + planned
+  // 预计库存 = 事实层 + 采购待收 + 采购已到货 + 锁定需安排（到货动作本身不改变总数）
+  const projectedStock =
+    theoreticalStock === null ? null : theoreticalStock + pendingOrder + received + planned
 
   const metric = item.modeMetric ?? 'none'
   const coefficients = item.stockingCoefficients ?? null
@@ -115,6 +121,9 @@ export function calculateInventoryRow(item) {
     peakStock,
     turnoverIn,
     inTransitStock,
+    ordered,
+    received,
+    pendingOrder,
     theoreticalStock,
     projectedStock,
     daysOfStock: indicator,
@@ -130,10 +139,12 @@ export function calculateInventoryRow(item) {
   }
 }
 
-// 建议需安排（公斤）：补到「正常库存 80% 下限」的差额，基于理论库存。
+// 建议需安排（公斤）：补到「正常库存 80% 下限」的差额，基于理论库存；
+// 已在履约的订单（已下单）算作即将到货，先扣掉，避免同一缺口重复补两次。
 export function getSuggestedPlanned(row) {
   if (!row?.strategyAvailable) return 0
-  return Math.max(0, Math.ceil(row.normalStock * 0.8 - row.theoreticalStock))
+  const incoming = Number(row.ordered) > 0 ? Number(row.ordered) : 0
+  return Math.max(0, Math.ceil(row.normalStock * 0.8 - row.theoreticalStock - incoming))
 }
 
 export function formatQuantity(value) {  if (value === null || value === undefined) return '缺省'

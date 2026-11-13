@@ -261,12 +261,21 @@ let HIDDEN_GROUPS = [
   { product: '40D锦安', whole: false, skus: [{ skuId: '40D-25#MH-0006', color: '25#酒红（固色）' }] },
 ]
 
+// 只存分值，档位由分值推：≥70 低风险 / ≥50 中风险 / 其余高风险（与综合分同一套判定）
+const DIM_TIERS = { low: '低风险', mid: '中风险', high: '高风险' }
+
+function tierOfScore(score) {
+  if (score >= 70) return 'low'
+  if (score >= 50) return 'mid'
+  return 'high'
+}
+
 const DIM_SCORES = [
-  { label: '客户数 CR5', weight: 15, value: '62.0%', score: 60, tier: '中风险', tone: 'mid' },
-  { label: '累计客户数', weight: 10, value: '18 个', score: 60, tier: '中风险', tone: 'mid' },
-  { label: '销售环比率', weight: 20, value: '+14.2%', score: 80, tier: '低风险', tone: 'low' },
-  { label: '本次进销比', weight: 30, value: '26.4%', score: 60, tier: '中风险', tone: 'mid' },
-  { label: '预估月消耗', weight: 25, value: '320 条', score: 80, tier: '低风险', tone: 'low' },
+  { label: '客户数 CR5', weight: 15, value: '62.0%', score: 60 },
+  { label: '累计客户数', weight: 10, value: '18 个', score: 60 },
+  { label: '销售环比率', weight: 20, value: '+14.2%', score: 80 },
+  { label: '本次进销比', weight: 30, value: '26.4%', score: 60 },
+  { label: '预估月消耗', weight: 25, value: '320 条', score: 80 },
 ]
 
 /* ---------------- 状态 ---------------- */
@@ -847,18 +856,19 @@ function openSku(key) {
     DIM_SCORES.reduce((sum, dim) => sum + dim.score * dim.weight, 0) /
       DIM_SCORES.reduce((sum, dim) => sum + dim.weight, 0),
   )
-  const tone = total >= 70 ? 'normal' : total >= 50 ? 'replenish' : 'urgent'
-  const toneText = total >= 70 ? '健康' : total >= 50 ? '中等风险' : '高风险'
-  const toneColor = `var(--industrial-${tone})`
+  // 三档统一成 low / mid / high，卡片、综合条、徽标共用
+  const toneKey = total >= 70 ? 'low' : total >= 50 ? 'mid' : 'high'
+  const toneText = { low: '低风险', mid: '中风险', high: '高风险' }[toneKey]
   const category = /黑白|黑|本白|米白|灰白/.test(child.color) ? '黑白' : '彩色'
 
   $('#skuHead').innerHTML = `
-    <span class="modal__title">${group.product}</span>
-    <span class="meta">${child.color}</span>
-    <span class="meta">${category}</span>
-    <div style="display: flex; gap: 4px; margin-left: auto">
-      <button class="chip is-active" data-sku-strategy="auto">自动</button>
-      <button class="chip" data-sku-strategy="manual">手动</button>
+    <span class="sku-head__name">${group.product}</span>
+    <span class="sku-head__color">${child.color}</span>
+    <span class="sku-head__tone sku-head__tone--${category === '彩色' ? 'color' : 'mono'}">${category}</span>
+
+    <div class="sku-head__switch" role="tablist" aria-label="策略">
+      <button class="sku-head__switch-btn is-active" data-sku-strategy="auto" role="tab" aria-selected="true">自动</button>
+      <button class="sku-head__switch-btn" data-sku-strategy="manual" role="tab" aria-selected="false">手动</button>
     </div>
     <button class="modal__close" id="skuCloseX" aria-label="关闭">×</button>`
 
@@ -867,80 +877,83 @@ function openSku(key) {
     return Math.round(child.weekly * 4.2 * factor)
   })
 
+  const metric = (label, value, unit = '') => `
+    <div class="sku-metric">
+      <span class="sku-metric__label">${label}</span>
+      <span class="sku-metric__value">${value}${unit ? `<em>${unit}</em>` : ''}</span>
+    </div>`
+
+  const weightTotal = DIM_SCORES.reduce((sum, dim) => sum + dim.weight, 0)
+
   $('#skuBody').innerHTML = `
-    <div class="meta-strip">
-      <div class="meta-strip__item">
-        <div class="meta-strip__label">模式</div>
-        <div class="meta-strip__value">${child.mode}</div>
-      </div>
-      <div class="meta-strip__item">
-        <div class="meta-strip__label">加权月销量</div>
-        <div class="meta-strip__value">${fmt(Math.round(child.weekly * 4.3))} 条</div>
-      </div>
-      <div class="meta-strip__item">
-        <div class="meta-strip__label">系数（红 / 正 / 峰）</div>
-        <div class="meta-strip__value">20 / 40 / 60 <span style="font-size: 11px; font-weight: 400">天</span></div>
-      </div>
-      <div class="meta-strip__item">
-        <div class="meta-strip__label">累积条数</div>
-        <div class="meta-strip__value">${fmt(Math.round(child.weekly * 51))}</div>
-      </div>
+    <div class="sku-metrics">
+      ${metric('模式', child.mode)}
+      ${metric('加权月销量', fmt(Math.round(child.weekly * 4.3)), '条')}
+      ${metric('系数 红 / 正 / 峰', '20 / 40 / 60', '天')}
+      ${metric('累积条数', fmt(Math.round(child.weekly * 51)), '条')}
     </div>
 
-    <h4 class="section-label">健康度评分 <span>5 维加权</span></h4>
-    <div class="score-block">
-      <div class="score-total">
-        <div class="score-total__label">综合评分</div>
-        <div class="score-total__value">${total}</div>
-        <div class="score-total__tier risk--${tone === 'normal' ? 'low' : tone === 'replenish' ? 'mid' : 'high'}">${toneText}</div>
-        <div class="score-bar"><i style="width: ${total}%; background: ${toneColor}"></i></div>
-        <div class="score-total__weight">权重合计 100%</div>
+    <section class="sku-section">
+      <div class="sku-section__head">
+        <h4 class="sku-section__title">健康度评分</h4>
+        <span class="sku-section__meta">${DIM_SCORES.length} 维加权 · 参与权重 ${weightTotal}%</span>
       </div>
-      <table class="score-table dim-table">
-        <thead>
-          <tr>
-            <th>维度</th>
-            <th style="width: 92px">数值</th>
-            <th style="width: 52px">权重</th>
-            <th style="width: 46px">得分</th>
-            <th style="width: 62px">档位</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${DIM_SCORES.map(
-            (dim) => `
-            <tr>
-              <td>${dim.label}</td>
-              <td class="is-num">${dim.value}</td>
-              <td class="is-num">${dim.weight}%</td>
-              <td class="is-num">${dim.score}</td>
-              <td class="risk--${dim.tone}">${dim.tier}</td>
-            </tr>`,
-          ).join('')}
-        </tbody>
-      </table>
-    </div>
 
-    <div class="section-row">
-      <h4 class="section-label">月度销量 <span>1–12 月</span></h4>
-    </div>
-    <div class="chart" id="skuChartSales"></div>
+      <div class="score-summary score-summary--${toneKey}">
+        <span class="score-summary__label">综合评分</span>
+        <strong class="score-summary__score">${total}</strong>
+        <span class="score-summary__badge">${toneText}</span>
+        <span class="score-summary__hint">满分 100 · 权重合计 ${weightTotal}%</span>
+      </div>
 
-    <div class="section-row">
-      <h4 class="section-label">月度订单数 <span>1–12 月</span></h4>
-      <button class="chart-toggle" id="skuOrderToggle" aria-expanded="true">
-        <span>收起</span>
-        <svg viewBox="0 0 12 12" fill="none" aria-hidden="true">
-          <path d="M3 7.5 6 4.5l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-      </button>
-    </div>
-    <div class="chart" id="skuChartOrders"></div>
+      <div class="dim-grid">
+        ${DIM_SCORES.map((dim) => {
+          const tier = tierOfScore(dim.score)
+          return `
+          <div class="dim-card dim-card--${tier}">
+            <span class="dim-card__name" title="${dim.label}">${dim.label}</span>
+            <span class="dim-card__score">${dim.score}<em>${DIM_TIERS[tier]}</em></span>
+            <span class="dim-card__value">${dim.value}</span>
+            <span class="dim-card__weight">权重 ${dim.weight}%</span>
+          </div>`
+        }).join('')}
+      </div>
+    </section>
+
+    <section class="sku-section">
+      <div class="sku-chart-card">
+        <div class="sku-chart-card__head">
+          <span class="sku-chart-card__title">月度销量</span>
+          <span class="sku-chart-card__unit">条数 / 重量（公斤）</span>
+          <span class="sku-legend">
+            <span class="sku-legend__item"><i class="sku-legend__dot sku-legend__dot--bar"></i>条数</span>
+            <span class="sku-legend__item"><i class="sku-legend__dot sku-legend__dot--line"></i>重量</span>
+          </span>
+        </div>
+        <div class="sku-chart" id="skuChartSales"></div>
+      </div>
+    </section>
+
+    <section class="sku-section">
+      <div class="sku-chart-card">
+        <div class="sku-chart-card__head">
+          <span class="sku-chart-card__title">月度订单数</span>
+          <span class="sku-chart-card__unit">单</span>
+          <button class="chart-toggle" id="skuOrderToggle" aria-expanded="true">
+            <span>收起</span>
+            <svg viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M3 7.5 6 4.5l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </div>
+        <div class="sku-chart sku-chart--short" id="skuChartOrders"></div>
+      </div>
+    </section>
 
     <div class="manual-box" id="skuManual" hidden>
       <div class="manual-box__row">
         <span>模式</span>
-        <select class="input" style="width: 130px" aria-label="手动模式">
+        <select class="input" style="width: 148px" aria-label="手动模式">
           <option>自定系数模式</option>
           <option>订单货模式</option>
         </select>
@@ -978,8 +991,11 @@ function closeSku() {
 
 /* ---------------- SKU 弹窗：两张 ECharts 图 ---------------- */
 // 与 SkuDetailDialog.vue 对齐：月度销量（柱 + 双轴折线）与月度订单数（柱），配色沿用 industrial 变量。
+// 两张图共用一套坐标轴与提示：柱用竖向渐变、线用细描边 + 极淡面积，轴线只留一条
 const CHART_MONTHS = Array.from({ length: 12 }, (_, index) => `${index + 1}月`)
 const CHART_FONT = 'Arial, "Microsoft YaHei", sans-serif'
+const CHART_INK = '#2f3b43'
+const CHART_MUTED = '#7d8a93'
 let skuCharts = []
 
 function disposeSkuCharts() {
@@ -987,41 +1003,54 @@ function disposeSkuCharts() {
   skuCharts = []
 }
 
-// 两张图共用同一套坐标轴与提示样式，只换 series 与右轴
-function chartBase(extra = {}) {
+function gradient(from, to) {
+  return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+    { offset: 0, color: from },
+    { offset: 1, color: to },
+  ])
+}
+
+function axisY(extra = {}) {
   return {
-    animationDuration: 420,
-    animationEasing: 'cubicOut',
-    textStyle: { color: '#65737c', fontSize: 12, fontFamily: CHART_FONT },
-    tooltip: {
-      trigger: 'axis',
-      backgroundColor: '#f5f7f8',
-      borderColor: '#aab6be',
-      borderWidth: 1,
-      padding: [6, 9],
-      textStyle: { color: '#2f3b43', fontSize: 12, fontFamily: CHART_FONT },
-      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(63, 113, 141, 0.07)' } },
-    },
-    grid: { left: 2, right: 4, top: 38, bottom: 0, containLabel: true },
-    xAxis: {
-      type: 'category',
-      data: CHART_MONTHS,
-      axisTick: { show: false },
-      axisLine: { lineStyle: { color: '#aab6be' } },
-      axisLabel: { color: '#65737c', fontSize: 11, margin: 8 },
+    type: 'value',
+    splitNumber: 4,
+    splitLine: { lineStyle: { color: '#eef2f4', type: [2, 4] } },
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: {
+      color: CHART_MUTED,
+      fontSize: 10.5,
+      margin: 8,
+      formatter: (value) => (value >= 10000 ? `${value / 10000}万` : fmt(value)),
     },
     ...extra,
   }
 }
 
-function axisStyle(color) {
+function chartBase(extra = {}) {
   return {
-    type: 'value',
-    splitLine: { lineStyle: { color: '#e4eaee', type: [3, 3] } },
-    axisLine: { show: false },
-    axisTick: { show: false },
-    axisLabel: { color, fontSize: 11, margin: 6 },
-    nameTextStyle: { color, fontSize: 11, padding: [0, 0, 4, 0] },
+    animationDuration: 480,
+    animationEasing: 'cubicOut',
+    textStyle: { fontFamily: CHART_FONT },
+    grid: { left: 2, right: 2, top: 12, bottom: 0, containLabel: true },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'rgba(255, 255, 255, 0.98)',
+      borderColor: '#e2e9ec',
+      borderWidth: 1,
+      padding: [7, 10],
+      textStyle: { color: CHART_INK, fontSize: 12, fontFamily: CHART_FONT },
+      extraCssText: 'box-shadow: 0 8px 20px rgba(47, 59, 67, 0.13); border-radius: 4px;',
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(63, 113, 141, 0.06)' } },
+    },
+    xAxis: {
+      type: 'category',
+      data: CHART_MONTHS,
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: '#e2e9ec' } },
+      axisLabel: { color: CHART_MUTED, fontSize: 10.5, margin: 9, interval: 0 },
+    },
+    ...extra,
   }
 }
 
@@ -1039,38 +1068,44 @@ function renderSkuCharts(counts) {
   const sales = echarts.init(salesEl)
   sales.setOption(
     chartBase({
-      legend: {
-        top: 0,
-        left: 'center',
-        itemWidth: 10,
-        itemHeight: 8,
-        itemGap: 18,
-        icon: 'roundRect',
-        textStyle: { color: '#65737c', fontSize: 12 },
-      },
       yAxis: [
-        { ...axisStyle('#65737c'), name: '条' },
-        { ...axisStyle('#c49a52'), name: '公斤', splitLine: { show: false } },
+        axisY(),
+        axisY({
+          splitLine: { show: false },
+          axisLabel: { color: CHART_MUTED, fontSize: 10.5, margin: 8, formatter: (value) => fmt(value) },
+        }),
       ],
       series: [
         {
           name: '条数',
           type: 'bar',
-          barMaxWidth: 18,
-          itemStyle: { color: '#3f718d', borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: '#315e77' } },
+          barMaxWidth: 14,
+          barCategoryGap: '44%',
+          itemStyle: { color: gradient('#7ba3b9', '#3f718d'), borderRadius: [3, 3, 1, 1] },
+          emphasis: { itemStyle: { color: gradient('#8fb5c9', '#497e9b') } },
+          tooltip: { valueFormatter: (value) => `${fmt(value)} 条` },
           data: counts,
         },
         {
           name: '重量',
           type: 'line',
           yAxisIndex: 1,
-          smooth: 0.35,
+          smooth: 0.32,
+          showSymbol: false,
           symbol: 'circle',
           symbolSize: 6,
-          showSymbol: false,
-          lineStyle: { width: 2, color: '#c49a52' },
-          itemStyle: { color: '#c49a52', borderColor: '#f8fafb', borderWidth: 1.5 },
+          lineStyle: {
+            width: 2,
+            color: '#c49a52',
+            shadowBlur: 6,
+            shadowColor: 'rgba(196, 154, 82, 0.22)',
+            shadowOffsetY: 2,
+          },
+          itemStyle: { color: '#c49a52', borderColor: '#fff', borderWidth: 2 },
+          areaStyle: {
+            color: gradient('rgba(196, 154, 82, 0.18)', 'rgba(196, 154, 82, 0)'),
+          },
+          tooltip: { valueFormatter: (value) => `${fmt(value)} 公斤` },
           data: weights,
         },
       ],
@@ -1080,15 +1115,17 @@ function renderSkuCharts(counts) {
   const ordersChart = echarts.init(ordersEl)
   ordersChart.setOption(
     chartBase({
-      grid: { left: 2, right: 4, top: 28, bottom: 0, containLabel: true },
-      yAxis: [{ ...axisStyle('#65737c'), name: '单', minInterval: 1 }],
+      grid: { left: 2, right: 2, top: 10, bottom: 0, containLabel: true },
+      yAxis: [axisY({ minInterval: 1, splitNumber: 3 })],
       series: [
         {
           name: '订单数',
           type: 'bar',
-          barMaxWidth: 18,
-          itemStyle: { color: '#829a85', borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: '#6b8570' } },
+          barMaxWidth: 12,
+          barCategoryGap: '48%',
+          itemStyle: { color: gradient('#a9bdad', '#829a85'), borderRadius: [3, 3, 1, 1] },
+          emphasis: { itemStyle: { color: gradient('#bacbbd', '#6f8a74') } },
+          tooltip: { valueFormatter: (value) => `${fmt(value)} 单` },
           data: orders,
         },
       ],
@@ -3281,8 +3318,10 @@ const PURCHASE_SKUS = [
     planned: 3371,
     rule: { name: '标准大货补单', kgPerVat: 100 },
     orders: [
-      { factory: '连江东禾晟', assignee: '阿婷', vats: 20, kg: 2000, note: '' },
-      { factory: '福清长福', assignee: '', vats: 0, kg: 0, note: '' },
+      { factory: '连江东禾晟', assignee: '阿婷', vats: 20, kg: 2000, note: '缸号 A12' },
+      { factory: '福清长福', assignee: '刘玉红', vats: 10, kg: 1000, note: '9/28 交期' },
+      { factory: '汕头兴滨染厂', assignee: '小凤', vats: 3, kg: 300, note: '' },
+      { factory: '清远千百丽', assignee: '', vats: 0, kg: 0, note: '' },
     ],
   },
   {
@@ -3390,32 +3429,32 @@ function poVisibleRows() {
   })
 }
 
-function renderPoStats() {
+// 列表状态：未下单 / 部分 / 完成 / 超出。一颗点 + 两个字，比一列数字更快扫完
+function poStatusOf(row) {
+  const { kg } = poTotals(row)
+  if (!kg) return { key: 'idle', label: '未下单' }
+  if (kg - row.planned > 0.005) return { key: 'over', label: `超 ${fmt(Math.round(kg - row.planned))}` }
+  if (row.planned - kg > 0.005) return { key: 'part', label: fmt(Math.round(kg)) }
+  return { key: 'done', label: '完成' }
+}
+
+// 顶部只留一条全局进度：已下单 / 需安排 + 进度条 + 未下单 SKU 数（可点筛选）
+function renderPoProgress() {
   const planned = PURCHASE_SKUS.reduce((sum, row) => sum + row.planned, 0)
-  const totals = PURCHASE_SKUS.map(poTotals)
-  const ordered = totals.reduce((sum, item) => sum + item.kg, 0)
-  const vats = totals.reduce((sum, item) => sum + item.vats, 0)
+  const ordered = PURCHASE_SKUS.reduce((sum, row) => sum + poTotals(row).kg, 0)
   const pending = PURCHASE_SKUS.filter((row) => poTotals(row).kg === 0).length
+  const pct = planned ? Math.min(100, (ordered / planned) * 100) : 0
 
-  const items = [
-    ['SKU', fmt(PURCHASE_SKUS.length), '', ''],
-    ['需安排', fmt(planned), '', ''],
-    ['已下单', fmt(ordered), 'is-accent', ''],
-    ['缸数', fmt(vats), '', ''],
-    ['未下单', fmt(pending), 'is-warn', 'pending'],
-  ]
+  $('#poProgress').innerHTML = `
+    <span class="po-progress__lead">已下单 <b>${fmt(Math.round(ordered))}</b> / ${fmt(planned)} 公斤</span>
+    <span class="po-progress__track"><i style="width:${pct.toFixed(1)}%"></i></span>
+    <button class="po-progress__filter ${pending ? '' : 'is-done'}" type="button" data-filter="pending" title="${
+      pending ? '只看未下单的 SKU' : '全部 SKU 已下单'
+    }">${pending ? `${pending} 个 SKU 未下单` : '全部已下单'}</button>`
 
-  $('#poStats').innerHTML = items
-    .map(
-      ([label, value, tone, filter]) => `
-      <div class="po-stats__item ${filter ? 'is-clickable' : ''}"${filter ? ` data-filter="${filter}"` : ''}${
-        filter ? ' title="只看未下单"' : ''
-      }>
-        <dt>${label}</dt>
-        <dd class="${tone}">${value}</dd>
-      </div>`,
-    )
-    .join('')
+  const filter = $('#poOnlyUnordered')
+  filter.setAttribute('aria-pressed', String(poState.onlyUnordered))
+  $('#poPendingCount').textContent = pending
 }
 
 function renderPoList() {
@@ -3424,18 +3463,19 @@ function renderPoList() {
 
   if (!list.length) {
     $('#poListBody').innerHTML = `<tr><td colspan="3" class="po-empty">没有匹配的 SKU</td></tr>`
+    syncPoLink()
     return
   }
 
   $('#poListBody').innerHTML = list
     .map((row) => {
-      const { kg } = poTotals(row)
+      const status = poStatusOf(row)
       return `<tr data-sku="${row.id}" class="${row.id === poState.selectedId ? 'is-active' : ''}">
         <td class="po-mini__name" title="${row.product} · ${row.color}"><span class="po-mini__product">${
           row.product
         }</span><span class="po-mini__sep">·</span>${row.color}</td>
         <td class="is-num">${fmt(row.planned)}</td>
-        <td class="is-num po-mini__ordered ${kg > 0 ? 'is-done' : 'is-zero'}">${kg > 0 ? fmt(kg) : '—'}</td>
+        <td><span class="po-mini__state is-${status.key}">${status.label}</span></td>
       </tr>`
     })
     .join('')
@@ -3483,69 +3523,106 @@ function poOrderRow(order, index, kgPerVat) {
   </tr>`
 }
 
-function renderPoDetail() {
-  const row = poSelected()
-  if (!row) {
-    $('#poTitle').textContent = '选择一个 SKU 开始下单'
-    $('#poCategory').hidden = true
-    $('#poSummary').innerHTML = ''
-    $('#poOrderBody').innerHTML = `<tr><td colspan="7" class="po-empty">左侧选择一个 SKU</td></tr>`
-    $('#poOrderFoot').innerHTML = ''
-    $('#poClear').disabled = true
-    return
-  }
-
+// 单 SKU 进度：一条读得懂的线，替代原来并排的五个短语
+function renderPoFigure(row) {
   const totals = poTotals(row)
   const suggestion = poSuggestion(row)
   const diff = totals.kg - row.planned
+  const pct = row.planned ? Math.min(100, (totals.kg / row.planned) * 100) : 0
+  const over = diff > 0.005
+
+  const gap = !row.orders.length
+    ? `<span class="po-figure__gap">还未开始</span>`
+    : Math.abs(diff) < 0.005
+      ? `<span class="po-figure__gap is-ok">与需安排一致</span>`
+      : diff > 0
+        ? `<span class="po-figure__gap is-over">超出 <b>${fmt(Math.round(diff))}</b> 公斤</span>`
+        : `<span class="po-figure__gap is-warn">还差 <b>${fmt(Math.round(-diff))}</b> 公斤</span>`
+
+  $('#poFigure').innerHTML = `
+    <span class="po-figure__lead">已下单 <b>${fmt(Math.round(totals.kg))}</b> / ${fmt(row.planned)} 公斤</span>
+    <span class="po-figure__track"><i class="${over ? 'is-over' : ''}" style="width:${pct.toFixed(1)}%"></i></span>
+    ${gap}
+    <span class="po-figure__note">建议 ${suggestion.vats} 缸 · 每缸 ${row.rule.kgPerVat} 公斤</span>`
+}
+
+// 空态不是一行灰字，而是把「按建议生成」摆在正中间——这才是这一步最常走的路
+function poBlankState(row, suggestion) {
+  return `<tr class="po-blank-row"><td colspan="7">
+    <div class="po-blank">
+      <p class="po-blank__title">还没有分订单</p>
+      <p class="po-blank__hint">需安排 ${fmt(row.planned)} 公斤，按「${row.rule.name}」每缸 ${row.rule.kgPerVat} 公斤，建议 ${
+        suggestion.vats
+      } 缸（${fmt(suggestion.kg)} 公斤）</p>
+      <div class="po-blank__actions">
+        <button class="btn btn--primary" type="button" data-add-suggest>按建议生成 ${suggestion.vats} 缸</button>
+      </div>
+      <button class="po-blank__link" type="button" data-add>或手动添加一行</button>
+    </div>
+  </td></tr>`
+}
+
+function renderPoDetail() {
+  const row = poSelected()
+  const addBtn = $('#poAdd')
+  const moreBtn = $('#poMore')
+  const figure = $('#poFigure')
+  const foot = $('#poFoot')
+
+  const menu = $('#poMoreMenu')
+  if (menu) menu.hidden = true
+  $('#poMore').setAttribute('aria-expanded', 'false')
+
+  if (!row) {
+    $('#poTitle').textContent = '选择一个 SKU 开始下单'
+    $('#poCategory').hidden = true
+    figure.innerHTML = ''
+    figure.style.display = 'none'
+    foot.innerHTML = ''
+    foot.style.display = 'none'
+    $('#poOrderBody').innerHTML = `<tr><td colspan="7" class="po-empty">左侧选择一个 SKU</td></tr>`
+    addBtn.disabled = true
+    moreBtn.disabled = true
+    return
+  }
+
+  const suggestion = poSuggestion(row)
 
   $('#poTitle').textContent = `${row.product} · ${row.color}`
+  $('#poTitle').title = `${row.product} · ${row.color}`
   const category = $('#poCategory')
   category.hidden = false
   category.textContent = row.category
 
-  const diffItem = !row.orders.length
-    ? `<span class="po-summary__item">尚未录入分订单</span>`
-    : Math.abs(diff) < 0.005
-      ? `<span class="po-summary__item is-ok">与需安排一致</span>`
-      : diff > 0
-        ? `<span class="po-summary__item is-over">超出需安排 <b>${fmt(diff)}</b> 公斤</span>`
-        : `<span class="po-summary__item is-warn">还差 <b>${fmt(-diff)}</b> 公斤</span>`
+  // 「按建议生成」只在空态出现（那时它是最短路径）；已有分订单时重排走 ⋯ 菜单
+  addBtn.disabled = false
+  moreBtn.disabled = row.orders.length === 0
 
-  $('#poSummary').innerHTML = `
-    <span class="po-summary__item">需安排 <b>${fmt(row.planned)}</b> 公斤</span>
-    <span class="po-summary__item">已下单 <b>${fmt(totals.kg)}</b> 公斤<em>${fmt(totals.vats)} 缸</em></span>
-    ${diffItem}
-    <span class="po-summary__tip" title="${row.rule.name} · 每缸 ${row.rule.kgPerVat} 公斤 · 建议 ${suggestion.vats} 缸（${fmt(
-      suggestion.kg,
-    )} 公斤），余量过半补一缸">建议 ${suggestion.vats} 缸</span>`
+  figure.style.display = ''
+  foot.style.display = row.orders.length ? '' : 'none'
+  renderPoFigure(row)
 
   $('#poOrderBody').innerHTML = row.orders.length
-    ? row.orders
-        .map((order, index) => poOrderRow(order, index, row.rule.kgPerVat))
-        .join('') +
+    ? row.orders.map((order, index) => poOrderRow(order, index, row.rule.kgPerVat)).join('') +
       `<tr class="po-add-row"><td colspan="7">
-        <button type="button" class="po-add" data-add>＋ 添加分订单</button>
+        <button class="po-add" type="button" data-add>＋ 添加分订单</button>
       </td></tr>`
-    : `<tr><td colspan="7" class="po-empty">暂无分订单</td></tr>
-       <tr class="po-add-row"><td colspan="7">
-        <button type="button" class="po-add" data-add>＋ 添加分订单</button>
-        <button type="button" class="po-add po-add--muted" data-add-suggest title="按缸规则建议生成一张 ${fmt(
-          suggestion.kg,
-        )} 公斤的分订单">按建议添加 ${suggestion.vats} 缸</button>
-      </td></tr>`
+    : poBlankState(row, suggestion)
 
   renderPoFoot()
-  $('#poClear').disabled = row.orders.length === 0
 }
 
-// 合计行单独更新：改缸数 / 公斤时只重绘这里，输入框不失焦
+// 合计条固定在面板底部：不随表格滚动，行再多也不用翻到底找差多少
 function renderPoFoot() {
   const row = poSelected()
+  const foot = $('#poFoot')
+  if (!foot) return
+
   if (!row || !row.orders.length) {
-    $('#poOrderFoot').innerHTML = ''
+    foot.innerHTML = `<span class="po-foot__label">合计</span><span class="po-foot__sum">0 <em>缸</em></span><span class="po-foot__sum">0 <em>公斤</em></span>`
     return
   }
+
   const totals = poTotals(row)
   const diff = totals.kg - row.planned
   const state = Math.abs(diff) < 0.005 ? 'is-ok' : diff > 0 ? 'is-over' : 'is-warn'
@@ -3553,53 +3630,34 @@ function renderPoFoot() {
     Math.abs(diff) < 0.005
       ? '与需安排一致'
       : diff > 0
-        ? `超出 ${fmt(diff)} 公斤`
-        : `还差 ${fmt(-diff)} 公斤`
+        ? `超出 ${fmt(Math.round(diff))} 公斤`
+        : `还差 ${fmt(Math.round(-diff))} 公斤`
 
-  $('#poOrderFoot').innerHTML = `<tr>
-    <td colspan="3" class="po-foot__label">合计</td>
-    <td class="is-num">${fmt(totals.vats)} 缸</td>
-    <td class="is-num">${totals.kg.toFixed(2)}</td>
-    <td colspan="2" class="po-foot__state ${state}">${text}</td>
-  </tr>`
+  foot.innerHTML = `
+    <span class="po-foot__label">合计 ${row.orders.length} 张</span>
+    <span class="po-foot__sum">${fmt(totals.vats)}<em>缸</em></span>
+    <span class="po-foot__sum">${fmt(Number(totals.kg.toFixed(2)))}<em>公斤</em></span>
+    <span class="po-foot__state ${state}">${text}</span>`
 }
 
+// 改缸数 / 公斤时只更新进度条、合计条和左侧状态，不重绘表格，输入框不失焦
 function renderPoSummaryOnly() {
   const row = poSelected()
   if (!row) return
-  const totals = poTotals(row)
-  const diff = totals.kg - row.planned
-  // summary 只重绘这一块：改缸数 / 公斤时不碰表格，输入框不失焦
-  const diffText = !row.orders.length
-    ? '尚未录入分订单'
-    : Math.abs(diff) < 0.005
-      ? '与需安排一致'
-      : diff > 0
-        ? `超出需安排 <b>${fmt(diff)}</b> 公斤`
-        : `还差 <b>${fmt(-diff)}</b> 公斤`
-  const tone = !row.orders.length ? '' : Math.abs(diff) < 0.005 ? 'is-ok' : diff > 0 ? 'is-over' : 'is-warn'
-
-  $('#poSummary').innerHTML = `
-    <span class="po-summary__item">需安排 <b>${fmt(row.planned)}</b> 公斤</span>
-    <span class="po-summary__item">已下单 <b>${fmt(totals.kg)}</b> 公斤<em>${fmt(totals.vats)} 缸</em></span>
-    <span class="po-summary__item ${tone}">${diffText}</span>
-    <span class="po-summary__tip" title="${row.rule.name} · 每缸 ${row.rule.kgPerVat} 公斤">建议 ${poSuggestion(
-      row,
-    ).vats} 缸</span>`
-
+  renderPoFigure(row)
   renderPoFoot()
+  renderPoProgress()
 
-  const cell = $(`#poListBody tr[data-sku="${row.id}"] .po-mini__ordered`)
+  const cell = $(`#poListBody tr[data-sku="${row.id}"] .po-mini__state`)
   if (cell) {
-    cell.textContent = totals.kg > 0 ? `${fmt(totals.kg)}${totals.vats ? ` · ${totals.vats} 缸` : ''}` : '—'
-    cell.classList.toggle('is-done', totals.kg > 0)
-    cell.classList.toggle('is-zero', totals.kg === 0)
+    const status = poStatusOf(row)
+    cell.className = `po-mini__state is-${status.key}`
+    cell.textContent = status.label
   }
-  renderPoStats()
 }
 
 function renderPurchase() {
-  renderPoStats()
+  renderPoProgress()
   renderPoList()
   renderPoDetail()
 }
@@ -3675,13 +3733,16 @@ $('#poListBody').addEventListener('click', (event) => {
   syncPoLink()
 })
 
-// 点顶部「未下单」= 勾上「只看未下单」，两个入口同一状态
-$('#poStats').addEventListener('click', (event) => {
-  if (!event.target.closest('[data-filter="pending"]')) return
+// 顶部「N 个 SKU 未下单」和左栏「未下单」是同一个开关，两处都可切
+function poTogglePending() {
   poState.onlyUnordered = !poState.onlyUnordered
-  $('#poOnlyUnordered').checked = poState.onlyUnordered
+  renderPoProgress()
   renderPoList()
   poEnsureSelection()
+}
+
+$('#poProgress').addEventListener('click', (event) => {
+  if (event.target.closest('[data-filter="pending"]')) poTogglePending()
 })
 
 $('.po-list__scroll').addEventListener('scroll', syncPoLink)
@@ -3693,11 +3754,7 @@ $('#poSearch').addEventListener('input', (event) => {
   poEnsureSelection()
 })
 
-$('#poOnlyUnordered').addEventListener('change', (event) => {
-  poState.onlyUnordered = event.target.checked
-  renderPoList()
-  poEnsureSelection()
-})
+$('#poOnlyUnordered').addEventListener('click', poTogglePending)
 
 // 改缸数 → 公斤 = 缸数 × 每缸；改公斤 → 缸数按每缸回算；只重绘合计，输入框不失焦
 $('#poOrderBody').addEventListener('input', (event) => {
@@ -3740,37 +3797,49 @@ $('#poOrderBody').addEventListener('change', (event) => {
   renderPoSummaryOnly()
 })
 
-$('#poOrderBody').addEventListener('click', (event) => {
+// 增删一张分订单后统一刷新：明细 + 左侧状态 + 顶部进度
+function poRefresh() {
+  renderPoDetail()
+  renderPoList()
+  renderPoProgress()
+}
+
+function poAddRow() {
   const row = poSelected()
   if (!row) return
+  row.orders.push({ factory: '', assignee: '', vats: 0, kg: 0, note: '' })
+  poRefresh()
+  // 新行直接落到染厂上，少一次点击
+  const select = $(`#poOrderBody tr[data-index="${row.orders.length - 1}"] select[data-field="factory"]`)
+  if (select) select.focus()
+}
 
-  const del = event.target.closest('[data-del]')
-  if (del) {
-    row.orders.splice(Number(del.dataset.del), 1)
-    renderPoDetail()
-    renderPoList()
-    renderPoStats()
-    return
-  }
-
-  if (event.target.closest('[data-add]')) {
-    row.orders.push({ factory: '', assignee: '', vats: 0, kg: 0, note: '' })
-    renderPoDetail()
-    renderPoList()
-    renderPoStats()
-    return
-  }
-
-  if (event.target.closest('[data-add-suggest]')) {
-    const suggestion = poSuggestion(row)
+// replace = true 时（⋯ 菜单里的「重新生成」）会覆盖现有分订单，先确认
+function poFillSuggestion(replace = false) {
+  const row = poSelected()
+  if (!row) return
+  const suggestion = poSuggestion(row)
+  const apply = () => {
     row.orders = [{ factory: '', assignee: '', vats: suggestion.vats, kg: suggestion.kg, note: '' }]
-    renderPoDetail()
-    renderPoList()
-    renderPoStats()
+    poRefresh()
+    toast(`已按建议生成 ${suggestion.vats} 缸 · ${fmt(suggestion.kg)} 公斤`)
   }
-})
+  if (!replace || !row.orders.length) {
+    apply()
+    return
+  }
+  openConfirm({
+    title: '按建议重新生成',
+    note: `会用 1 张 ${suggestion.vats} 缸（${fmt(suggestion.kg)} 公斤）的分订单替换现有 ${
+      row.orders.length
+    } 张，确定？`,
+    okText: '替换',
+    onOk: apply,
+  })
+}
 
-$('#poClear').addEventListener('click', () => {
+// 清空是破坏性动作，收进 ⋯ 菜单，且必须二次确认
+function poClearOrders() {
   const row = poSelected()
   if (!row || !row.orders.length) return
   openConfirm({
@@ -3779,12 +3848,57 @@ $('#poClear').addEventListener('click', () => {
     okText: '清空',
     onOk: () => {
       row.orders = []
-      renderPoDetail()
-      renderPoList()
-      renderPoStats()
+      poRefresh()
       toast('已清空该 SKU 的分订单')
     },
   })
+}
+
+$('#poOrderBody').addEventListener('click', (event) => {
+  const row = poSelected()
+  if (!row) return
+
+  const del = event.target.closest('[data-del]')
+  if (del) {
+    row.orders.splice(Number(del.dataset.del), 1)
+    poRefresh()
+    return
+  }
+
+  if (event.target.closest('[data-add]')) {
+    poAddRow()
+    return
+  }
+
+  if (event.target.closest('[data-add-suggest]')) poFillSuggestion(false)
+})
+
+$('#poAdd').addEventListener('click', poAddRow)
+
+const poMore = $('#poMore')
+const poMoreMenu = $('#poMoreMenu')
+
+function poCloseMore() {
+  poMoreMenu.hidden = true
+  poMore.setAttribute('aria-expanded', 'false')
+}
+
+poMore.addEventListener('click', (event) => {
+  event.stopPropagation()
+  poMoreMenu.hidden = !poMoreMenu.hidden
+  poMore.setAttribute('aria-expanded', String(!poMoreMenu.hidden))
+})
+
+poMoreMenu.addEventListener('click', (event) => {
+  const item = event.target.closest('button')
+  if (!item) return
+  poCloseMore()
+  if (item.hasAttribute('data-po-clear')) poClearOrders()
+  if (item.hasAttribute('data-po-suggest')) poFillSuggestion(true)
+})
+
+document.addEventListener('click', (event) => {
+  if (!poMoreMenu.hidden && !event.target.closest('.menu-anchor')) poCloseMore()
 })
 
 /* ---------------- 设置：缸规则 / 人员 交互 ---------------- */
@@ -4281,3 +4395,10 @@ if (initialDialog && DIALOGS[initialDialog]) DIALOGS[initialDialog]()
 
 const initialSku = params.get('sku')
 if (initialSku) openSku(initialSku)
+
+// 采购页可直接指定某个 SKU：?screen=purchase&po=po-2
+const initialPo = params.get('po')
+if (initialPo && PURCHASE_SKUS.some((row) => row.id === initialPo)) {
+  poState.selectedId = initialPo
+  renderPurchase()
+}

@@ -14,6 +14,7 @@ import {
   ElTag,
 } from 'element-plus'
 import {
+  DEFAULT_VAT_SIZES,
   VAT_ACTIONS,
   VAT_BAND_KEYS,
   VAT_REMAINDER_POLICIES,
@@ -22,6 +23,7 @@ import {
   describeVatBands,
   describeVatRemainder,
   normalizeVatRule,
+  normalizeVatSizes,
   planOrderQuantity,
   summarizeVatRule,
   validateVatRule,
@@ -45,7 +47,7 @@ const emit = defineEmits(['update:modelValue'])
 const rules = computed(() => props.modelValue?.vatRules ?? [])
 const defaultRuleId = computed(() => props.modelValue?.defaultVatRuleId ?? '')
 const spuRules = computed(() => props.modelValue?.spuVatRules ?? {})
-
+const boundSpuCount = computed(() => Object.keys(spuRules.value).length)
 const ruleOptions = computed(() => rules.value.map((rule) => ({ id: rule.id, name: rule.name })))
 const defaultRuleName = computed(
   () => rules.value.find((rule) => rule.id === defaultRuleId.value)?.name ?? '未设置',
@@ -143,9 +145,13 @@ function cloneRule(source) {
 
 function openCreate() {
   editingId.value = ''
-  draft.value = cloneRule({ name: '', bands: [{ upTo: null, action: 'vat', value: 240 }] })
+  draft.value = cloneRule({
+    name: '',
+    bands: [{ upTo: null, action: 'ladder', value: 0, sizes: [...DEFAULT_VAT_SIZES] }],
+  })
   trialNeed.value = 100
   trialMetric.value = 100
+  syncSizeTexts()
   dialogVisible.value = true
 }
 
@@ -154,6 +160,7 @@ function openEdit(rule) {
   draft.value = cloneRule(rule)
   trialNeed.value = 100
   trialMetric.value = 100
+  syncSizeTexts()
   dialogVisible.value = true
 }
 
@@ -177,18 +184,29 @@ function bandRangeText(index) {
   return `${formatNumber(from)} 至不足 ${formatNumber(upTo)} ${currentUnit.value}`
 }
 
-// 「新增阈值」插在末档（无上限）之前，新档默认按每缸 240 公斤取整，末档继续兜底。
+// 「新增阈值」插在末档（无上限）之前，新档沿用末档的处理方式（含缸型组合），末档继续兜底。
 function addBand() {
   const bands = draft.value.bands
   const last = bands[bands.length - 1]
   const previousUpTo = bands.length > 1 ? Number(bands[bands.length - 2].upTo) || 0 : 0
-  const nextBand = { upTo: previousUpTo + 100, action: 'vat', value: 240 }
+  const nextBand = {
+    upTo: previousUpTo + 100,
+    action: last?.action ?? 'ladder',
+    value: last?.value ?? 0,
+    sizes: [...(last?.sizes ?? DEFAULT_VAT_SIZES)],
+  }
   if (last && last.upTo === null) {
     bands.splice(bands.length - 1, 0, nextBand)
   } else {
     bands.push(nextBand)
-    bands.push({ upTo: null, action: last?.action ?? 'vat', value: last?.value ?? 240 })
+    bands.push({
+      upTo: null,
+      action: last?.action ?? 'ladder',
+      value: last?.value ?? 0,
+      sizes: [...(last?.sizes ?? DEFAULT_VAT_SIZES)],
+    })
   }
+  syncSizeTexts()
 }
 
 function removeBand(index) {
@@ -196,11 +214,38 @@ function removeBand(index) {
   if (bands.length <= 1) return
   bands.splice(index, 1)
   if (bands[bands.length - 1].upTo !== null) bands[bands.length - 1].upTo = null
+  syncSizeTexts()
 }
 
 function actionValueLabel(action) {
   return VAT_ACTIONS.find((entry) => entry.value === action)?.valueLabel ?? ''
 }
+
+// 缸型用「80，160，240」文本编辑：显示保留用户输入的原文，模型里回写成升序去重的数组。
+const sizeTexts = ref([])
+
+function syncSizeTexts() {
+  sizeTexts.value = draft.value.bands.map((band) => (band.sizes ?? []).join('，'))
+}
+
+function handleSizesInput(index, text) {
+  sizeTexts.value[index] = text
+  const band = draft.value.bands[index]
+  if (band) band.sizes = normalizeVatSizes(String(text ?? '').split(/[^0-9.]+/))
+}
+
+// 切到「缸型就近取整」但还没填缸型时，先给默认的 80 / 160 / 240，避免保存时报错。
+function handleActionChange(index, action) {
+  const band = draft.value.bands[index]
+  if (!band) return
+  band.action = action
+  if (action === 'ladder' && !(band.sizes ?? []).length) {
+    band.sizes = [...DEFAULT_VAT_SIZES]
+    sizeTexts.value[index] = band.sizes.join('，')
+  }
+}
+
+const hasLadderBand = computed(() => draft.value.bands.some((band) => band.action === 'ladder'))
 
 const trialResult = computed(() => {
   const rule = normalizeVatRule(draft.value)
@@ -336,22 +381,19 @@ function clearBulk() {
 </script>
 
 <template>
-  <section class="vat-settings">
-    <div class="vat-settings__head">
-      <div>
-        <h2>缸规则</h2>
-        <p>
-          一缸 = 固定的若干公斤。规则挂在品名（SPU）上，该品名下的 SKU 全部沿用；下单时按规则把需安排换算成整缸，
-          零头按「就近」处理：余量过半缸补一缸，不足半缸舍弃，需求大于 0 至少下一缸。
-        </p>
-      </div>
-      <div class="vat-settings__tools">
-        <ElButton size="small" @click="restoreDefaults">恢复默认两条</ElButton>
-        <ElButton size="small" type="primary" plain @click="openCreate">新增规则</ElButton>
+  <section class="panel">
+    <div class="panel__head">
+      <h2 class="panel__title">缸规则</h2>
+      <div class="panel__head-actions">
+        <button type="button" class="btn btn--text btn--sm" @click="restoreDefaults">
+          恢复默认
+        </button>
+        <button type="button" class="btn btn--sm" @click="openCreate">新增规则</button>
       </div>
     </div>
 
-    <div class="vat-settings__default">
+    <div class="panel__body">
+      <div class="vat-settings__default">
       <span>未单独绑定的品名使用</span>
       <ElSelect
         :model-value="defaultRuleId"
@@ -387,12 +429,12 @@ function clearBulk() {
           </span>
           <span class="vat-rule-bands__remainder">{{ row.remainderText }}</span>
         </div>
-        <span role="cell">{{ row.usage }} 个品名</span>
+        <span class="vat-rule-usage" role="cell">{{ row.usage }} 个品名</span>
         <span class="vat-rule-actions" role="cell">
-          <ElButton size="small" text type="primary" @click="openEdit(rules.find((rule) => rule.id === row.id))">
+          <ElButton size="small" text @click="openEdit(rules.find((rule) => rule.id === row.id))">
             编辑
           </ElButton>
-          <ElButton size="small" text type="primary" @click="setDefaultRule(row.id)">
+          <ElButton size="small" text @click="setDefaultRule(row.id)">
             设为默认
           </ElButton>
           <ElButton size="small" text type="danger" @click="removeRule(row.id)">删除</ElButton>
@@ -404,7 +446,9 @@ function clearBulk() {
     <div class="vat-spu">
       <div class="vat-spu__head">
         <strong>品名绑定</strong>
-        <span class="vat-settings__hint">未绑定的品名使用默认规则；也可以显式设为「不取整」。</span>
+        <span class="vat-settings__hint">
+          {{ boundSpuCount }} 个品名单独绑定 · 其余走默认「{{ defaultRuleName }}」
+        </span>
       </div>
       <div class="vat-spu__tools">
         <ElInput
@@ -441,6 +485,7 @@ function clearBulk() {
             :model-value="spuRuleValue(entry.product)"
             size="small"
             class="vat-spu-row__select"
+            :placeholder="`默认（${defaultRuleName}）`"
             :aria-label="`${entry.product} 缸规则`"
             @update:model-value="setSpuRule(entry.product, $event)"
           >
@@ -457,12 +502,13 @@ function clearBulk() {
         还有 {{ hiddenSpuCount }} 个品名未显示，输入关键词继续筛选
       </p>
     </div>
+    </div>
 
     <ElDialog
       v-model="dialogVisible"
       :title="dialogTitle"
       width="760px"
-      class="vat-rule-dialog"
+      class="ui-dialog vat-rule-dialog"
       destroy-on-close
       align-center
     >
@@ -533,7 +579,7 @@ function clearBulk() {
             :controls="false"
           />
           <span v-else class="vat-dialog-band__unbounded">无上限</span>
-          <ElSelect v-model="band.action" size="small">
+          <ElSelect :model-value="band.action" size="small" @update:model-value="handleActionChange(index, $event)">
             <ElOption
               v-for="entry in VAT_ACTIONS"
               :key="entry.value"
@@ -541,8 +587,16 @@ function clearBulk() {
               :value="entry.value"
             />
           </ElSelect>
+          <ElInput
+            v-if="band.action === 'ladder'"
+            :model-value="sizeTexts[index]"
+            size="small"
+            placeholder="缸型，如 80，160，240"
+            :aria-label="`区间 ${index + 1} 缸型（公斤）`"
+            @update:model-value="handleSizesInput(index, $event)"
+          />
           <ElInputNumber
-            v-if="band.action !== 'skip'"
+            v-else-if="band.action !== 'skip'"
             v-model="band.value"
             size="small"
             :min="0"
@@ -569,6 +623,9 @@ function clearBulk() {
           上限按从小到大自动串联，只填上限即可；最后一档固定无上限。
         </span>
       </div>
+      <p v-if="hasLadderBand" class="vat-settings__hint">
+        缸型就近取整：需求不到最大缸型时只下 1 缸最接近的缸型（正好一半取大缸）；超过最大缸型按它的整数倍取模，余量 ≥ 半个大缸再补 1 缸。一张分订单只用一种缸型。
+      </p>
 
       <div class="vat-dialog-trial">
         <span class="vat-dialog-trial__label">试算</span>
@@ -613,50 +670,14 @@ function clearBulk() {
 </template>
 
 <style scoped>
-.vat-settings {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px 16px;
-  background: var(--industrial-surface);
-  border: 1px solid var(--industrial-grid);
-  border-radius: 6px;
-}
-
-.vat-settings__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.vat-settings__head h2 {
-  margin: 0 0 4px;
-  color: var(--industrial-text);
-  font-size: 15px;
-}
-
-.vat-settings__head p {
-  max-width: 860px;
-  margin: 0;
-  color: var(--industrial-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.vat-settings__tools {
-  display: flex;
-  gap: 8px;
-}
-
 .vat-settings__default {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  margin-bottom: 8px;
   color: var(--industrial-text);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .vat-settings__default-select {
@@ -665,7 +686,7 @@ function clearBulk() {
 
 .vat-settings__hint {
   color: var(--industrial-muted);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .vat-settings__empty {
@@ -679,7 +700,6 @@ function clearBulk() {
 .vat-rule-table,
 .vat-spu-table {
   border: 1px solid var(--industrial-grid);
-  border-radius: 4px;
   overflow-x: auto;
 }
 
@@ -690,12 +710,13 @@ function clearBulk() {
 
 .vat-rule-row {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(280px, 2fr) 100px 190px;
-  align-items: start;
-  gap: 10px;
-  padding: 8px 10px;
-  border-top: 1px solid var(--industrial-grid-light);
-  font-size: 13px;
+  grid-template-columns: 170px minmax(220px, 2fr) 88px 168px;
+  align-items: center;
+  min-height: 36px;
+  gap: 8px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12px;
 }
 
 .vat-rule-row:first-child,
@@ -703,12 +724,26 @@ function clearBulk() {
   border-top: none;
 }
 
+.vat-rule-usage {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.vat-rule-row > :last-child {
+  justify-self: end;
+}
+
 .vat-rule-row--head,
 .vat-spu-row--head {
-  color: var(--industrial-text);
+  min-height: 27px;
+  color: #33424b;
   background: var(--industrial-header);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
+}
+
+.vat-rule-row--head > :nth-child(3) {
+  text-align: right;
 }
 
 .vat-rule-name {
@@ -727,39 +762,49 @@ function clearBulk() {
 
 .vat-rule-bands {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 14px;
 }
 
 .vat-rule-bands__item {
-  display: flex;
-  gap: 8px;
+  display: inline-flex;
+  gap: 5px;
   color: var(--industrial-text);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .vat-rule-bands__item em {
-  min-width: 150px;
   color: var(--industrial-muted);
   font-style: normal;
 }
 
 .vat-rule-bands__remainder {
-  margin-top: 2px;
   color: var(--industrial-muted);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .vat-rule-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0;
+}
+
+:deep(.vat-rule-actions .el-button) {
+  height: 22px;
+  padding: 0 4px;
+  font-size: 11.5px;
 }
 
 .vat-spu {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 14px;
 }
 
 .vat-spu__head {
@@ -790,10 +835,11 @@ function clearBulk() {
   display: grid;
   grid-template-columns: minmax(180px, 1.4fr) 70px 90px minmax(200px, 1.2fr);
   align-items: center;
-  gap: 10px;
-  padding: 4px 10px;
-  border-top: 1px solid var(--industrial-grid-light);
-  font-size: 13px;
+  min-height: 36px;
+  gap: 8px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12px;
 }
 
 .vat-spu-row__product {

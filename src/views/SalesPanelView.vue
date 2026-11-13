@@ -314,18 +314,27 @@ onBeforeUnmount(() => {
   <main class="sales-page">
     <div class="page-sticky-header">
       <PanelNavigation />
-      <div class="sales-toolbar">
-        <h1 class="sales-title">销售表</h1>
+      <div class="page-head">
+        <h1 class="page-title">销售表</h1>
+        <div class="page-head__actions">
+          <span v-if="salesSheet" class="meta" :title="salesSheet.fileName">
+            {{ salesSheet.fileName }}
+          </span>
+          <ElButton class="sales-toggle-groups" size="small" @click="toggleAllProductGroups">
+            {{ collapsedProductIds.size > 0 ? '全部展开' : '全部收起' }}
+          </ElButton>
+        </div>
+      </div>
+      <div class="page-toolbar" role="search">
         <ElInput
           v-model="searchKeyword"
           class="sales-search"
+          size="small"
           placeholder="搜索全部列"
           aria-label="搜索全部列"
           clearable
         />
-        <ElButton class="sales-toggle-groups" size="small" @click="toggleAllProductGroups">
-          {{ collapsedProductIds.size > 0 ? '全部展开' : '全部收起' }}
-        </ElButton>
+        <span class="toolbar__sep"></span>
         <span class="sales-count">
           共 {{ filteredRowCountText }} 行 · {{ filteredProductCountText }} 个品名
         </span>
@@ -455,7 +464,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  padding: 12px;
+  padding: 8px 14px 12px;
   overflow: hidden;
   color: var(--industrial-text);
   background: var(--industrial-page);
@@ -465,28 +474,29 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 20;
   flex: 0 0 auto;
-  margin: -12px -12px 0;
-  padding: 12px 12px 0;
-  background: var(--industrial-page);
-  box-shadow: 0 6px 12px -10px rgba(34, 57, 69, 0.45);
-}
-
-.sales-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 0 0 8px;
-}
-
-.sales-title {
   margin: 0;
-  font-size: 15px;
-  font-weight: 600;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .sales-search {
-  width: 210px;
+  width: 200px;
+}
+
+.page-toolbar :deep(.el-input__wrapper) {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px var(--industrial-grid) inset;
+}
+
+.page-toolbar :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px var(--industrial-primary) inset;
+}
+
+.page-toolbar :deep(.el-input__inner) {
+  font-size: 12px;
 }
 
 .sales-file-input {
@@ -494,19 +504,21 @@ onBeforeUnmount(() => {
 }
 
 .sales-count {
-  color: var(--industrial-primary);
-  font-size: 13px;
-  font-weight: 600;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .sales-total {
   color: var(--industrial-muted);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .sales-hint {
+  flex-basis: 100%;
   color: var(--industrial-muted);
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .sales-vtable {

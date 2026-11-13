@@ -126,16 +126,18 @@
       </div>
     </section>
 
-    <!-- ===================== 采购下单（本次不重画） ===================== -->
+    <!-- ===================== 采购下单 ===================== -->
     <section class="screen" id="screen-purchase" hidden>
       <div class="page page--purchase">
-        <div class="page-head">
+        <!-- 顶部只放全局进度：单 SKU 的进度在右面板里，不重复 -->
+        <div class="page-head po-head">
           <h1 class="page-title">采购下单</h1>
-          <dl class="po-stats" id="poStats"></dl>
+          <div class="po-progress" id="poProgress"></div>
         </div>
 
         <div class="po-layout">
           <div class="po-link" id="poLink" hidden aria-hidden="true"></div>
+
           <!-- 左：待下单 SKU 清单 -->
           <section class="po-panel po-panel--list">
             <div class="po-panel__head">
@@ -143,24 +145,30 @@
               <span class="po-panel__count" id="poListCount">0 / 0</span>
             </div>
             <div class="po-tools">
-              <input class="input po-tools__search" id="poSearch" placeholder="搜索品名 / 颜色" />
-              <label class="po-check">
-                <input type="checkbox" id="poOnlyUnordered" />
-                只看未下单
+              <label class="po-search">
+                <svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                  <circle cx="6.2" cy="6.2" r="4.2" />
+                  <path d="M9.4 9.4 12.2 12.2" stroke-linecap="round" />
+                </svg>
+                <input id="poSearch" placeholder="搜索品名 / 颜色" aria-label="搜索品名或颜色" />
               </label>
+              <button class="po-filter" id="poOnlyUnordered" type="button" aria-pressed="false">
+                未下单
+                <b id="poPendingCount">0</b>
+              </button>
             </div>
             <div class="po-list__scroll">
               <table class="po-mini">
                 <colgroup>
                   <col />
-                  <col style="width: 70px" />
-                  <col style="width: 70px" />
+                  <col style="width: 62px" />
+                  <col style="width: 76px" />
                 </colgroup>
                 <thead>
                   <tr>
                     <th>品名 · 颜色</th>
                     <th class="is-num">需安排</th>
-                    <th class="is-num">已下单</th>
+                    <th>状态</th>
                   </tr>
                 </thead>
                 <tbody id="poListBody"></tbody>
@@ -170,25 +178,38 @@
 
           <!-- 右：该 SKU 的分订单 -->
           <section class="po-panel po-panel--detail">
-            <div class="po-panel__head">
+            <div class="po-panel__head po-panel__head--detail">
               <h2 class="po-detail__title" id="poTitle">—</h2>
               <span class="tag tag--muted" id="poCategory" hidden></span>
               <span class="po-panel__spacer"></span>
-              <button class="link-btn" id="poClear" disabled>清空分订单</button>
+              <button class="btn btn--sm btn--primary" id="poAdd" type="button" disabled>＋ 添加分订单</button>
+              <div class="menu-anchor">
+                <button class="po-more" id="poMore" type="button" aria-label="更多操作" aria-haspopup="true" aria-expanded="false" disabled>
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+                    <circle cx="3.2" cy="8" r="1.2" />
+                    <circle cx="8" cy="8" r="1.2" />
+                    <circle cx="12.8" cy="8" r="1.2" />
+                  </svg>
+                </button>
+                <div class="menu" id="poMoreMenu" hidden>
+                  <button class="menu__item" type="button" data-po-clear>清空分订单</button>
+                  <button class="menu__item" type="button" data-po-suggest>按建议重新生成</button>
+                </div>
+              </div>
             </div>
 
-            <div class="po-summary" id="poSummary"></div>
+            <div class="po-figure" id="poFigure"></div>
 
             <div class="po-order__scroll">
               <table class="po-order">
                 <colgroup>
-                  <col style="width: 30px" />
-                  <col style="width: 200px" />
-                  <col style="width: 148px" />
-                  <col style="width: 68px" />
-                  <col style="width: 104px" />
-                  <col />
                   <col style="width: 34px" />
+                  <col style="width: 186px" />
+                  <col style="width: 132px" />
+                  <col style="width: 78px" />
+                  <col style="width: 116px" />
+                  <col />
+                  <col style="width: 36px" />
                 </colgroup>
                 <thead>
                   <tr>
@@ -196,15 +217,17 @@
                     <th>染厂</th>
                     <th>分单人员</th>
                     <th class="is-num">缸数</th>
-                    <th class="is-num">数量（公斤）</th>
+                    <th class="is-num">公斤</th>
                     <th>备注</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody id="poOrderBody"></tbody>
-                <tfoot id="poOrderFoot"></tfoot>
               </table>
             </div>
+
+            <!-- 合计条固定在面板底部：行多了也不用滚到底找差多少 -->
+            <div class="po-foot" id="poFoot"></div>
           </section>
         </div>
       </div>
@@ -732,7 +755,7 @@
 
     <!-- ===================== SKU 详情 ===================== -->
     <div class="overlay" id="skuOverlay" hidden>
-      <div class="modal" role="dialog" aria-modal="true" aria-label="SKU 配置信息">
+      <div class="modal modal--sku" role="dialog" aria-modal="true" aria-label="SKU 配置信息">
         <div class="modal__head" id="skuHead"></div>
         <div class="modal__body" id="skuBody"></div>
         <div class="modal__foot">

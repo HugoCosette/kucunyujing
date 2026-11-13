@@ -10,11 +10,11 @@
         "version": 4,
         "updatedAt": "2026-11-11T00:00:00.000Z",
         "salesWindow": {
-          "weights": {
-            "m1": 0.5,
-            "m3": 0.3,
-            "m12": 0.2
-          }
+          "weights": [
+            { "months": 1, "weight": 0.5 },
+            { "months": 3, "weight": 0.3 },
+            { "months": 12, "weight": 0.2 }
+          ]
         },
         "scoring": {
           "scores": { "high": 40, "mid": 60, "low": 80 },

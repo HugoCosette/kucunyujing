@@ -34,18 +34,16 @@ export const MODE_METRICS = {
   none: { label: '—', hint: '不参与计算，仅做标记' },
 }
 
-// 销量加权：近 1 个月 / 近 3 个月月均 / 近 12 个月月均，权重之和为 1。
-export const SALES_WINDOW_DEFAULTS = { m1: 0.5, m3: 0.3, m12: 0.2 }
+// 销量加权：每条是「最近 N 个月的月均 × 权重」，权重之和为 1；默认近 1 / 3 / 12 个月。
+export const SALES_WINDOW_DEFAULTS = [
+  { months: 1, weight: 0.5 },
+  { months: 3, weight: 0.3 },
+  { months: 12, weight: 0.2 },
+]
 
-// 把三档窗口权重展开成 12 个月各自的权重，仅用于配置页展示与核对。
-export function expandMonthWeights(weights) {
-  const merged = { ...SALES_WINDOW_DEFAULTS, ...(weights ?? {}) }
-  const share3 = merged.m3 / 3
-  const share12 = merged.m12 / 12
-  return Array.from({ length: 12 }, (_, index) => {
-    let value = share12
-    if (index < 3) value += share3
-    if (index === 0) value += merged.m1
-    return value
-  })
+// 数据只有 12 个月，窗口月数上限固定 12。
+export const SALES_WINDOW_MAX_MONTHS = 12
+
+export function createDefaultSalesWeights() {
+  return SALES_WINDOW_DEFAULTS.map((entry) => ({ ...entry }))
 }

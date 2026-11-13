@@ -1,7 +1,7 @@
 import {
   CUSTOMER_EXCLUSIVE,
   CUSTOMER_FLOW,
-  SALES_WINDOW_DEFAULTS,
+  createDefaultSalesWeights,
 } from './constants.js'
 import { createDefaultScoring, BULK_SCORING_DEFAULTS } from './scoring.js'
 import { createDefaultSpuGrades } from './spuGrades.js'
@@ -162,7 +162,7 @@ export function createDefaultConfig() {
   return {
     version: CONFIG_VERSION,
     updatedAt: DEFAULT_CONFIG_UPDATED_AT,
-    salesWindow: { weights: { ...SALES_WINDOW_DEFAULTS } },
+    salesWindow: { weights: createDefaultSalesWeights() },
     scoring: createDefaultScoring(),
     spuGrades: createDefaultSpuGrades(),
     strategies: [
