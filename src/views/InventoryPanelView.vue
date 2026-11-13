@@ -568,11 +568,8 @@ const filteredInventoryLeafRows = computed(() => {
     (row) =>
       (!product || row.searchProduct.includes(product)) &&
       (!color || row.searchColor.includes(color)) &&
-      // 已采纳（锁定）的行不跟着预警 / 模式筛选一起消失：刚填完需安排的 SKU 会立刻变成绿色，
-      // 在「紧急」筛选下被过滤掉就像凭空消失了；撤销后恢复按筛选显示。
-      (hasPlannedUndo(row.id) ||
-        ((!toneSet || toneSet.has(row.urgencyTone)) &&
-          (!modeSet || modeSet.has(row.modeLabel)))),
+      (!toneSet || toneSet.has(row.urgencyTone)) &&
+      (!modeSet || modeSet.has(row.modeLabel)),
   )
 })
 const inventoryRows = computed(() => {
@@ -1849,7 +1846,6 @@ function downloadImportTemplate() {
                       aria-label="已采纳并锁定"
                       role="img"
                     >
-                      <title>已采纳并锁定：预警 / 模式筛选时仍保留在列表里，点「撤销」后恢复按筛选显示</title>
                       <path
                         d="M4.5 6V4.75a3.5 3.5 0 0 1 7 0V6m-8 0h9a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm4.5 3v2"
                         fill="none"
