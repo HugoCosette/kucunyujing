@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "updatedAt": "2026-11-12T09:30:00.000Z",
+  "updatedAt": "2026-11-17T03:55:33.865Z",
   "dyeFactories": [
     {
       "id": "df-1",
@@ -88,7 +88,9 @@
     {
       "name": "小婷-氨纶类",
       "assignees": [
-        "阿婷"
+        "阿婷",
+        "小凤",
+        "刘玉红"
       ]
     },
     {
@@ -235,7 +237,16 @@
       "remainderThreshold": 0.5,
       "minVats": 1,
       "bands": [
-        { "upTo": null, "action": "ladder", "value": 0, "sizes": [80, 160, 240] }
+        {
+          "upTo": null,
+          "action": "ladder",
+          "value": 0,
+          "sizes": [
+            80,
+            160,
+            240
+          ]
+        }
       ]
     },
     {
@@ -246,9 +257,24 @@
       "remainderThreshold": 0.5,
       "minVats": 1,
       "bands": [
-        { "upTo": 50, "action": "skip", "value": 0 },
-        { "upTo": 100, "action": "fixed", "value": 60 },
-        { "upTo": null, "action": "round", "value": 10 }
+        {
+          "upTo": 50,
+          "action": "skip",
+          "value": 0,
+          "sizes": []
+        },
+        {
+          "upTo": 100,
+          "action": "fixed",
+          "value": 60,
+          "sizes": []
+        },
+        {
+          "upTo": null,
+          "action": "round",
+          "value": 10,
+          "sizes": []
+        }
       ]
     }
   ],

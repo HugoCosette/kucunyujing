@@ -212,7 +212,7 @@ async function restoreAll() {
   const count = hiddenSkuTotal.value
   if (!count) return
   const confirmed = await ElMessageBox.confirm(
-    `解除全部 ${count} 个 SKU 的屏蔽？解除后会立即回到主面板。`,
+    `解除全部 ${count} 个 SKU 的屏蔽？解除后会立即回到需求表。`,
     '全部解除屏蔽',
     { confirmButtonText: '全部解除', cancelButtonText: '取消', type: 'warning' },
   )
@@ -299,7 +299,7 @@ async function restoreAll() {
         <p v-if="groups.length === 0" class="hidden-empty">
           还没有屏蔽任何品名或 SKU
           <span class="hidden-empty__hint">
-            在主面板勾选 SKU 后点右下角「屏蔽选中」即可记进这份清单，重新导入或刷新后仍然隐藏；解除后会立即回到主面板。
+            在需求表勾选 SKU 后点右下角「屏蔽选中」即可记进这份清单，重新导入或刷新后仍然隐藏；解除后会立即回到需求表。
           </span>
         </p>
         <p v-else-if="visibleGroups.length === 0" class="hidden-empty">

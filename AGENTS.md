@@ -1,35 +1,88 @@
 # 协作说明（面向编程 Agent）
 
-## 只在主面板开发
+布料备货决策系统：Vue 3 + Vite + Element Plus + Pinia，纯 JavaScript（无 TS、无测试框架）。
 
-- 需求迭代目标只有 **主面板** `/`、**销售表** `/sales`、**采购下单** `/purchase` 与**设置** `/config`（设置页一个壳两个域：备货配置 4 项 + 下单配置 5 项）。新的功能、数据结构、交互和样式调整都在这几处进行。旧「下单设置」入口 `/purchase/settings` 已并入设置页，只保留跳转（`?panel=vat` 落到缸规则），不要再加回导航。
-- 销售表是主面板动销指标（月均条数 / 订单总数 / 动销月份 / 累计客户 / 累积条数）的来源：主面板与销售表的两个导入入口都支持一次选择总表 + 销售表，销售表自带的 5 个指标与 1-12 月条数会写回主面板并参与备货计算（月均条数决定模式、1-12 月条数决定加权月销量），本页再按“品名 + 颜色”叠加 1-12 月的条数、重量与订单数（每月三列：条数 / 重量 / 订单数）。整表按“品名汇总父行 + 颜色子行”展示并支持全部列关键词搜索。
-- 「客户CR5率」只展示在销售表：清洗引擎按「销量前 5 客户 ÷ 该 SKU 总销量」输出 0~1 的比例，页面按百分比显示；它**不是**动销指标，不写回主面板、不进备货配置。品名父行按「累积条数」加权平均，不做求和（`SALES_RATIO_COLUMNS` + `groupTableRowsByProduct` 的 `ratioColumns`）。
-- 清洗口径里 `月均条数 = 累积条数 ÷ 动销月份`、`周消耗 = 月均条数 ÷ 4`（清洗直接按公斤输出「周销量」，单位公斤/周）；月均条数直接决定模式归属（热销 30~不限 / 常规 10~30 / 按量 3~10 / 尾货 0.01~3 / 滞销 0~0.01），改这个口径要提醒用户核对模式区间与系数。清洗按品名的「出码率」输出 `公斤系数`（码 = 1 ÷ 出码率，公斤 = 1），销量与库存统一换算成公斤；无法换算成公斤的 SKU（缺出码率的码单位、条/件/米）在基准表阶段直接剔除，详见 `docs/功能说明/数据清洗规则.md`。
-- 顶部导航只有一组入口：主面板 / 销售表 / 采购下单 / 设置，入口定义在 `src/data/panels.js`（`MAIN_PANEL` + `mainNavEntries`）。
-- 主面板、销售表、采购下单与设置页共用同一个 inventory store（`src/stores/inventory.js`），不再按面板 key 区分状态；销售表是独立视图 `src/views/SalesPanelView.vue`，改动时以主面板行为为准。设置页由 `src/views/ConfigView.vue` 承载外壳（导航 / 顶部工具条 / 左栏），下单配置的内容在 `src/components/PurchaseSettingsPanel.vue`，通过 `defineExpose` 把 `dirty / meta / discard / confirm` 交给外壳工具条。
-- 导入只有一个流程，且入口只有主面板的「导入分表」：`src/components/ImportSplitTablesDialog.vue` + `src/composables/useSplitImport.js` 选 5 张分表（产品资料 / 出入库明细 / 库存结存表 / 欠货 / 生产排单），`src/utils/cleanMerge.js` 在 Worker（`src/workers/cleanMergeWorker.js`）里调用共享引擎 `src/cleaning/engine.js` 清洗出总表 + 销售表，再由 `src/utils/splitTableImport.js` 复用 `inventoryImport.js` / `salesImport.js` 解析，最后进入 `src/components/ImportSourcesDialog.vue` 预览确认；`src/composables/useSourceImport.js` 只负责确认后写 store（`inventoryApply.js`、`applySourceImport.js`）。总表与销售表必须同时存在、按「唯一标识」关联。主面板不再提供「保存Excel」导出与直接选总表 + 销售表的「导入Excel」入口。
-- 数据持久化只有一层：`src/data/`（`repo.js` 是契约、`indexedDbRepo.js` 是本机实现、`db.js` 是 IndexedDB 封装、`persistence.js` 管快照与计划层、`transfer.js` 管导出/导入全量）。页面与 store 不直连 IndexedDB 里的业务数据。导入确认后由 `applySourceImport()` 落快照（gzip 进 `snapshots`，只留最近 5 份，内容哈希相同只更新时间）；**需安排 / 采购清单 / 撤销快照按 `skuId` 存 `meta.workspace`（不要用行 `id`，导入后行 id 会重排）**，批量补货 / 行内采纳 / 撤销 / 下单页撤销四个写入口统一调 `schedulePlanPersist()`；分订单与草稿整份存 `documents.purchaseOrders`（不再受 localStorage 5 MB 限制）。`main.js` 先 `bootstrapPersistence()` 再挂载路由与页面，没有快照才回退种子数据；`primeInventoryState()` 必须在第一次 `useInventoryStore()` 之前被调用。种子数据（`src/data/inventoryItems.js`）只有基础数量列（周销量、库存、欠货、周转入），缺失的字段由 `src/stores/inventory.js` 的演示派生补齐：唯一标识、5 个动销指标、累积条数 / 累积销量、客户CR5率、树形分类、1-12 月条数与销量（按季节权重只落在最近 N 个动销月份，演示数据只到 11 月、12 月整列留空），并按「导入销售表」的形状生成一份演示 `salesSheet`，所以未导入 Excel 时销售表页的 1-12 月列、SKU 弹窗折线图、健康度评分与采购下单的分类 / 分单人员同样有数据；种子按「周消耗 = 月均条数 ÷ 4」折算，100 个 SKU 分布在 5 个模式上（热销 32 / 常规 24 / 按量 18 / 尾货 16 / 滞销 10），库存按各模式的系数上下浮动以覆盖红 / 黄 / 绿 / 紫四色预警。有快照时一律以快照为准，不要给导入数据补演示值。设置类（下单设置 / 备货方案 / 手动清单 / 屏蔽清单）仍走 localStorage + 开发态写回 JSON，不要挪进 IndexedDB。存储占用、快照回滚、导出/导入全量与清空在「设置 → 数据 → 本机数据存储」。细节见 `docs/功能说明/数据持久化方案.md` 第 10 节。
-- 主面板的「查看状态」在 `src/stores/inventoryView.js`：关键词筛选、预警色 / 模式筛选、品名展开、批量勾选、当前行、表格滚动位置与需安排草稿。`App.vue` 的 `RouterView` 带 `:key="route.path"`，路由一变组件整体重建，这些只跟「人怎么看这张表」有关的状态放组件 `ref` 里就会被切页重置（主面板 ↔ 采购下单 / 销售表 / 设置），所以统一放 store；它有意只留内存（刷新页面回到默认视图），不写 IndexedDB，改筛选相关的初始化要连 `appliedProductFilter` / `appliedColorFilter` 一起从 store 取值。
-- 清洗口径只有一份：`tools/cleaning/engine.mjs`（配置 / 唯一标识 / 汇总 / 关联 / 宽松合并）。网页经 `src/cleaning/engine.js` 一行转发引用它（`export * from '../../tools/cleaning/engine.mjs'`），`src/utils/cleanMerge.js` 是浏览器适配器（fflate 流式读表）；命令行脚本 `tools/cleaning/clean-merge.js` 直接 `import('./engine.mjs')`（SheetJS 读表 → 写 `output/*.xlsx`）。**改清洗逻辑只改 `engine.mjs`**。该目录是网页构建的一部分，不要删除或改名；真要挪位置，同步改 `src/cleaning/engine.js` 那一行。
-- 测试数据缺「客户」列时用 `tools/cleaning/simulate-customers.js` 补（按单号模拟客户、加工出库填加工厂、固定种子可复现，只新增列不改其它单元格）；它是造数工具，不属于清洗口径，也不参与网页构建。
-- 备货模式全部在自包含模块 `src/stocking/`：`config.json` 是唯一配置来源，v4 起为「多方案文件」（`profiles[]` + `activeProfileId`），每个方案内部是 `salesWindow.weights` + `scoring` + `strategies[]`（自动策略 5 个固定模式 / 手动策略）。`constants.js` 放色彩、系数三键与条换算表，`engine.js` 负责判定，`scoring.js` 负责 SKU 健康度评分，`validate.js` 负责归一化与校验（旧版本配置整份抛弃、直接回到默认），`persistence.js` 负责读写（开发态由 `vite.config.js` 的 `stockingConfigFilePlugin` 写回源文件）。模式判定不用评分档：模式由「月均条数」区间直接判定（每个模式一段 `range`，端点留空=不限，按模式顺序取第一条命中的区间），系数按「客户类别 × 色彩」直接给三档。
-- 计算口径：热销 / 常规按「日库销比 = 预计库存条数 ÷ 日销量」比较系数（单位：天）；按量按「库存公斤数」直接比系数（单位：公斤）；热销 / 常规 / 按量里的专属品（累计客户 = 1）与尾货 / 滞销只在模式列标注、不参与计算。预警灯仍是 20% 绿区：低于红线红、高于峰值紫、正常 ±20% 绿、其余黄。
-- 加权月销量 = Σ(各档「近 N 个月月均 × 权重」)（默认近 1 / 3 / 12 三档 = 50/30/20；档位可增删，N 可填 1–12，配置页可改且必须合计 100%），基准月取数据里最后一个有销量的月份；它只影响「天数」，不影响模式判定。
-- 数据来源、清洗口径、主面板每一列的公式与单位速查见 `docs/功能说明/数据清洗规则.md`；改分表字段、单位换算或计算字段时，必须同步更新该文档。
-- 手动策略的 SKU 归属单独存 `src/stocking/manualSkus.json`（唯一标识 → `{ modeId, coefficients }`，`src/stocking/manual.js` 负责读写），**不写进 config.json，也不写进 SKU 行**：它是"人对商品的长期决定"，跨导入与刷新保留。评估器 `createEvaluator(config, { manualOverrides, baselineMonth })` 命中即短路，不跑模式匹配；自定系数按「公斤」比较。手动策略的另一个内置行为是「订单货模式」（`behavior: order`，模式 id `manual-order`）：不计预警、不做健康度评分、不给建议值，但需安排直接填客户电话报的订单量（公斤），采纳后与普通 SKU 一样进「本次采购清单」、在 `/purchase` 按缸规则换算整缸并拆分订单；订单货不随尾货沉到列表底部，仍按销量排序。
-- 主面板的「删除」是**屏蔽**，不是删数据：品名（SPU）与 SKU 的屏蔽清单存 `src/stocking/hiddenSkus.json`（`{ products: 品名数组, skus: { 唯一标识: { product, color } } }`，`src/stocking/hidden.js` 负责读写，开发态由 Vite 插件 `/__stocking-hidden/save` 写回源文件，构建产物写入 localStorage 键 `stocking-hidden:v1`），与 `manualSkus.json` 一样跨导入、跨刷新保留。屏蔽只影响主面板展示（表格行、品名父行合计 / SPU 等级、预警计数、模式筛选项、勾选 / 批量补货 / 紧急补货都按可见行算），源表与销售数据不动；入口是**视窗右下角固定的「屏蔽选中」小按钮**（默认无勾选时隐藏，出现时按钮计数 = 勾选的 SKU 数，比底部批量补货条更低调；先在表格勾选，确认后批量屏蔽：某品名当前可见的 SKU 全部勾中时记为品名级屏蔽，否则逐条记 SKU 级）与顶部导航右侧的「屏蔽列表」（独立页面 `/hidden`，列表内容在 `src/components/HiddenSkusPanel.vue`；导航入口不带数字，数量在页面工具栏按 SKU 计：整组屏蔽的品名按当前数据里该品名的 SKU 数展开；列表是按品名分组的树，可按品名 / 颜色 / 唯一标识搜索，品名可展开看 SKU，品名 / SKU 都能多选后统一解除，也支持逐个或全部解除）。品名级屏蔽会清掉其下已有的 SKU 记录，恢复品名时整组一起回来。
-- SKU 配置信息弹窗为 `src/components/SkuDetailDialog.vue`，主面板与销售表共用：它同时渲染颜色单元格里的详情按钮（`src/components/SkuDetailTrigger.vue`，24px 方形文字卡片图标，别改回 16px 的 ⓘ 小圆点）和弹窗，展示模式 / 加权月销量（公斤）/ 系数、健康度评分（默认 5 张维度小卡 + 1 条综合评分，红 / 黄 / 绿；按量模式改为 2 张判定卡、不显示综合评分），以及用 ECharts 画的 1-12 月条数与重量图。两处只需传 `:item` 与 `:panel-key`，不要再各写一份。
-- 健康度评分（需求 1.5.1）：主面板「信息」分组下紧跟「模式」的「评分」列只显示综合分（红 / 黄 / 绿三档底色，悬停给出分数与风险档；不参与备货的 SKU 显示「不参与」，按量模式显示「—」），逐维度明细仍在 SKU 弹窗。两处的输入因子与评估调用统一走 `src/utils/skuHealth.js`（`buildScoringMetrics` / `evaluateRowHealth`），改口径只改这一处，不要再各拼一份 metrics。5 个维度（客户数 CR5 / 累计客户数 / 销售环比率 / 本次进销比 / 预估月消耗）各配「低 / 中 / 高三条风险区间 + 权重」（展示顺序也是低 → 中 → 高），命中哪条区间就取对应档位的得分（区间两端都含，端点重叠时按 中 → 高 → 低 取第一条），综合分 = Σ(得分 × 权重) ÷ 参与维度权重合计。口径唯一一份在 `src/stocking/scoring.js`（`evaluateScoring`），区间 / 权重 / 三档得分 / 综合分区间都存在方案里的 `scoring` 段，改参数走「配置页 → 评分设置 → 编辑评分规则」（整块设置由 `src/components/ScoringSettings.vue` 一个组件承载：摘要 + 编辑弹窗），SKU 弹窗只读。本次进销比是「越大越危险」：< 20% 低风险、20% ~ 30% 中风险、> 30% 高风险。销售环比率严格按**打开系统时的日期**取月份：≥26 号取「本月 vs 上月」，≤25 号取「上月 vs 前月」，与销售表基准月无关（基准月只用于加权月销量）；1 月跨年时缺去年 12 月 / 11 月数据按无数据，卡片悬停提示写明比的是哪两个月（含两边月份销量）或缺哪个月、哪个月销量为 0。上期为 0、本期有销量记 +100%；本期为 0、上期有销量记 -100%（跌到底，落高风险）；两期都为 0 按无数据。进销比 = 建议补货（公斤）÷ 累积销量（公斤，清洗输出的全历史累积销量），预估月消耗 = 加权月销量（公斤）−（理论库存 + 建议补货数量，均为公斤）；缺失的维度显示「无数据」且不参与加权。
-- 按量模式（`modeKey === 'bulk'`）的弹窗走专属判定 `evaluateBulkScoring`（同在 `src/stocking/scoring.js`）：只判 2 项、不做综合评分 —— 本次进销比（口径同 5 维评分，默认低于 40% 低风险 / 40% ~ 60% 正常 / 高于 60% 高风险）与累计客户数（默认 5 ~ 10 个中风险 / 少于 5 个高风险 / 多于 10 个低风险）。两项阈值存在方案的「按量」模式 `healthScoring` 段（`ratio` / `customers` 各一组 `normalFrom` / `normalTo`），在「配置页 → 按量模式 → 系数表下方 → 健康度判定」里改；改动只影响弹窗展示，不参与备货计算。
-- SPU 分级（S+ / S / A / B / C / Z）只在主面板**品名汇总行的模式列**展示：等级 = 该品名下全部 SKU 的 `monthlyAvgCount` 之和按六档阈值判定（默认 2500 / 300 / 100 / 30 / 1，Z 兜底 < 1），与筛选无关；口径唯一一份在 `src/stocking/spuGrades.js`，阈值存在方案的 `spuGrades.tiers[]`，配置页「SPU 分级 → 编辑分级规则」可改（配置页组件 `src/components/SpuGradeSettings.vue`，只改草稿、页面「确定」才落盘）。它不参与模式 / 系数 / 预警计算，新增该配置段不升版本号（v4 老配置自动补默认）。
-- 批量补货在主面板一屏内完成：表格首列复选框（`selectedSkuIds` 只存 SKU 标识，品名父行按子行全选 / 半选推导，表头全选作用于当前筛选结果；点击整行等同于点该行复选框，父行点整行 = 全选 / 全不选其下 SKU）→ 底部浮动条 → 确认弹窗（默认数量取 `getSuggestedPlanned`，即补到正常库存，也就是绿色带中位，**始终是精准公斤数，不做缸取整**）→ 统一经 `applyRestockPlans` **覆盖**写入「需安排」并进「本次采购清单」（同一 SKU 一条）。紧急补货弹窗也走这条写入路径，它先在调用处把「追加」换算成绝对需安排量。缸数只在采购下单环节建议（见下条）。
-- 主面板表格里**只有「需安排」可编辑**（另有采购清单里的分订单数量与两个补货弹窗的数量）。品名、颜色、生产中、欠货、周消耗、周转入、在途库存、在仓库存都是导入值，一律以纯文本只读展示，不要再改回 `ElInput` / `ElInputNumber`；导入后要改数据请重新导入或去源表修正。
-- 主面板工具栏「添加SKU」是唯一的手动录入入口（`src/components/AddSkuDialog.vue` + `src/utils/skuCreate.js`）：字段与导入的总表 / 销售表一一对应（品名 / 颜色 / 色彩 / 树形分类、7 个数量列、5 个动销指标），唯一标识不用人填、按 `MANUAL-0001` 递增自动生成并**跳过屏蔽清单里用过的标识**（否则新行会命中屏蔽规则直接不显示），库存与销量一律按公斤录入（公斤系数固定 1，不含出码率 / 公斤系数输入），月均条数缺省时按「累积条数 ÷ 动销月份」现算；校验「品名 + 颜色」不重复。写入后复用 `importToast` 提示并带「查看该 SKU」按钮打开 `SkuDetailDialog`；同时清掉挡住新行的筛选、滚到该行并短暂高亮（品名级屏蔽则提示去「屏蔽列表」解除）。手动添加与导入一样只存在当前页面（刷新回到种子 / 源表数据），1-12 月销量仍只来自销售表。
-- 采购下单模块是自包含目录 `src/purchase/`：`settings.json` 存染厂清单、分单人员表、树形分类、SKU 可选染厂、SKU 分类覆盖与缸规则；`orders.json` 存分订单。两者都由 `vite.config.js` 的写盘中间件在开发态回写源文件，构建产物退化为 localStorage（键 `purchase-settings:v1` / `purchase-orders:v1`）。`validate.js` 负责归一化（设置 v3 起含 `vatRules` / `defaultVatRuleId` / `spuVatRules` / `skuVatRules`，v2 老设置自动补默认两条规则），`resolve.js` 是唯一的选项口径（`factoriesForSku` / `categoryForSku` / `assigneesForSku`），页面不要各写一份回退规则。**完整流程（需安排 → 采购清单 → 拆单 → 落盘 → 导出）见 [docs/功能说明/采购下单流程.md](docs/功能说明/采购下单流程.md)。**
-- 分订单以**唯一标识**为键（不是 `purchaseList.id`，导入后会重排），一张分订单 = `{ factoryId, factoryName, assignee, quantity, vatCount, kgPerVat, note }`（`vatCount` / `kgPerVat` 是下单当时的缸快照，导出与对账用），一个 SKU 可挂多张。采购清单的「已下单」由分订单数量合计得出，不再手填「实际计划」；主面板弹窗里的「去下单」与 `/purchase` 页面共用 `src/components/SkuOrderEditor.vue`（弹窗包装是 `SkuOrderDialog.vue`），分订单行的缸数与公斤是**单向硬换算 + 反向提示**：填缸数 → 公斤 = 缸数 × 缸型；填公斤 → 只有正好整缸才回填缸数，否则缸数留空、数量下方提示「非整缸：1 缸 = 240 ／ 2 缸 = 480 公斤」。`vatCount` 只存整数。
-- 缸规则（需求 1.5.2）口径唯一一份在 `src/purchase/vat.js`，页面不要各算一份：一条规则 = 判据（`planned` 需安排公斤 / `skuMonthlyAvg` / `spuMonthlyAvg`）+ 分档，每档命中 `skip`（不补）/ **`ladder`（按缸型就近取整，推荐）** / `fixed`（固定下单量）/ `vat`（按每缸公斤取整）/ `round`（四舍五入到整十整百）；零头策略 `nearest`（默认，余量 ≥ 阈值补一缸）/ `floor` / `ceil`，需求 > 0 时至少 `minVats` 缸。`ladder` 的 `sizes` 是可用缸型（公斤，升序去重），语义是「就近到最近的整缸，正好一半向上」：需求 ≥ 最大缸型时按最大缸型取模（余量 ≥ 半个大缸再补一缸），不到最大缸型时只下 1 缸最接近的缸型；80 / 160 / 240 因此自动得到 120 / 200 / 360 三个临界点，**不要再手写区间**。规则挂在 **SPU（品名）** 上（`spuVatRules`），该品名下 SKU 全部沿用，`skuVatRules` 可单独覆盖、`__none__` 表示显式不取整，未绑定走 `defaultVatRuleId`。默认规则：标准大货补单 = 缸型 `[80, 160, 240]` 就近取整（1 公斤起就下 1 小缸），小批量补单 = <50 不补 / 50~<100 固定 60 / ≥100 四舍五入到整十。换算入口是 `planOrderQuantity(need, rule, context)`，返回 `{ vatCount, kgPerVat, rounded, deltaKg, warnings }`；`resolveVatRule(settings, { skuId, product })` 负责规则继承。配置入口在「设置 → 下单配置 → 缸规则」（`src/components/VatRuleSettings.vue`，只改草稿，页面「确定」才落盘）。
-- 订单弹窗 `src/components/PurchaseOrderRecordsDialog.vue` 是分订单 + 到货记录的唯一入口：本次到货必须点「确定」才落账（`1 ≤ 本次到货 ≤ 该单待收`）；**待收 = 累积下单 − 到货是派生值，界面上只读**。到货记录可逐条「撤回」（写 `receipts[].voidedAt`，列表里灰显划线可追溯，`store.voidReceipt`）或「删除」（物理移除、不留痕，`store.removeReceipt`），两者都会把公斤数退回待收；`receivedQty` 一律由 receipts 求和派生并跳过已撤回的记录（`validate.js`），**不要直接写 `receivedQty`**。改单走 `updateOrder`、整单作废走 `cancelOrder`，都留 `revisions`。视觉照 `docs/prototype` 的订单弹窗（灰蓝标题条 + 一条汇总进度带 + 左右两栏，宽 `min(880px, 100vw - 32px)`），改样式先看原型 `docs/prototype/styles.css` 的 `.order-*` / `.ord-*` / `.rcpt*`。
-- 一张分订单**只用一种缸型，不做拼缸**：400 公斤下 2 × 240 = 480，而不是 160 + 240 = 400。跨染厂拆成多张分订单时，每张单可以各用一种缸型；跨单合计不做整缸校验。
-- 缸只作用于**下单**，不改备货口径：主面板「需安排」、批量 / 紧急补货的默认量与建议值始终是 `getSuggestedPlanned` 的精准公斤数（个位），不取整缸；缸数建议只出现在采购下单页（`SkuOrderEditor` 的「缸数」列、建议缸数提示、`按建议添加一缸单`）与「本次采购清单」导出的缸数 / 每缸公斤列。
-- 一个 SKU 只属于一个树形分类：清洗引擎从产品资料带出 `树形分类` 列（`BASE.columns` 里标记 `optional`，源表缺列时为空），`inventoryImport.js` 解析成 `treeCategory`，`inventoryApply.js` 透传到库存行；设置页的 `skuCategoryOverrides` 可人工覆盖。分单人员先在设置页的「分单人员表」维护，再选进各个树形分类；下单下拉优先列该分类已选的人员，分类没维护人员时回退到分单人员表全部人员。
+本文件只写「必须遵守的硬约束 + 去哪找细节」。动手前按 §4 打开对应文档，不要凭这里的一行话推断实现。
+
+## 0. 命令
+
+| 目的 | 命令 |
+| --- | --- |
+| 开发服务器 | `npm run dev` |
+| 构建（改完至少过这一步） | `npm run build` |
+| 预览构建产物 | `npm run preview` |
+| 备货口径自检（打印配置校验 + 5 档样例评估） | `node tools/check-stocking.mjs` |
+| 离线跑清洗（读 `tools/cleaning/data/`，写 `output/`） | `cd tools/cleaning; npm install; npm run clean` |
+
+仓库没有 lint / 单元测试 / 格式化配置，`npm run build` 是唯一的自动校验；其余按 §4 的「手验」逐条走。
+
+## 1. 硬约束（改了会出事，别改回去）
+
+1. **面板范围**：只有主面板 `/`（导航名「需求表」）、采购下单 `/purchase`、销售表 `/sales`、设置 `/config`（导航名「配置板块」）+ 辅助页屏蔽列表 `/hidden`，顶部导航就按 需求表 → 采购下单 → 销售表 → 配置板块 排；「采购下单」页内分两个子面板——`/purchase` 下单面板、`/purchase/history` 下单历史（只读），共用 `PurchaseOrderView.vue` 靠 `.purchase-tabs` 与 `route.name` 切换。导航入口只认 `src/data/panels.js`（`mainNavEntries` + `utilityNavEntries`，显示名取 `MAIN_PANEL.label` / `configLabel`），代码标识与路由不跟着改名；旧 `/purchase/settings`、旧 `/orders` 只保留跳转。
+2. **一类口径只有一份实现**，改口径只改这一份，别在页面里再算一遍：
+
+   | 口径 | 唯一实现 | 文档 |
+   | --- | --- | --- |
+   | 分表清洗 / 单位换算 / 汇总 | `tools/cleaning/engine.mjs` | [数据清洗规则.md](./docs/功能说明/数据清洗规则.md) |
+   | 模式判定 / 系数 / 加权月销量 | `src/stocking/engine.js` | [模式与系数设置.md](./docs/功能说明/模式与系数设置.md) |
+   | 健康度评分（含按量 2 项判定） | `src/stocking/scoring.js`；输入因子 `src/utils/skuHealth.js` | 同上，第 12 节 |
+   | SPU 分级 | `src/stocking/spuGrades.js` | 同上 |
+   | 缸规则 | `src/purchase/vat.js` | [采购下单流程.md](./docs/功能说明/采购下单流程.md) |
+   | 下单填量颜色（不足八成黄 / 八成~100% 绿 / 超一缸内绿 / 超过一缸红） | `src/purchase/fillTone.js` | 同上，3.7 节 |
+   | 分单选项（染厂 / 分类 / 人员） | `src/purchase/resolve.js` | 同上 |
+   | 品名父行聚合 | `src/utils/productGroups.js` | [前端视图与交互.md](./docs/功能说明/前端视图与交互.md) |
+
+3. **主面板只有「需安排」可编辑**（另有采购清单的分订单数量、两个补货弹窗的数量）。品名 / 颜色 / 库存 / 销量这类导入值一律纯文本只读，不要改回 `ElInput` / `ElInputNumber`；要改数据就重新导入或改源表。
+4. **缸只在采购下单生效**：主面板「需安排」与批量 / 紧急补货的默认量始终是 `getSuggestedPlanned()` 的精准公斤数，不做缸取整；一张分订单只用一种缸型，不拼缸。分订单一律按缸规则**先带值再让人改**：进 SKU 面板（`/purchase` 选中行、主面板「去下单」弹窗）若还没有分订单，自动带出一张按缸规则换算的建议单（同一 SKU 只自动带一次，删掉不再补；只有人点选的行才自动带，筛选导致的自动回落不预填，否则一开「未下单」筛选会把整张清单连锁填满），点「添加分订单」也带默认值。破坏性动作不在弹窗里问：左列表每行的「撤销」与分订单末列的「删除」都是**就地两段确认**（首点变「确认撤销」/「确认删除」，再点才执行，点别处自动取消），`⋯` 菜单里的入口才用 `ElMessageBox`。
+5. **「删除」是屏蔽**：写 `src/stocking/hiddenSkus.json`，源表与销售数据不动，解除在 `/hidden`。
+6. **跨导入一律按 `skuId` 关联**：需安排 / 采购清单 / 撤销快照存 `meta.workspace`，分订单以唯一标识为键；不要用行 `id`（导入后会重排）。
+7. **业务数据只经 `src/data/` 一层**：页面与 store 不直连 IndexedDB；设置类（下单设置 / 备货方案 / 手动清单 / 屏蔽清单）仍走 localStorage + 开发态写回 JSON，不要挪进 IndexedDB。
+8. **不重复造第二份**：列表页不新增第二套表头（下单历史是单表头 + 批次分组带）；采购清单「已下单」由分订单求和得出；SKU 弹窗主面板与销售表共用；新页面导出用 `src/utils/xlsxWrite.js` 的 `saveWorkbook()`。
+9. **改口径必须同步文档**：改清洗字段 / 单位 → 数据清洗规则.md；改模式 / 系数 / 评分 → 模式与系数设置.md；改下单 / 缸 / 到货 → 采购下单流程.md；改导入 / 持久化 / 种子 → 数据持久化方案.md；改面板交互 → 前端视图与交互.md。改清洗或模式口径时**提醒用户核对模式区间、系数与预警**。
+
+## 2. 目录地图
+
+| 路径 | 管什么 |
+| --- | --- |
+| `src/views/` | 页面：`InventoryPanelView` 主面板、`SalesPanelView` 销售表、`PurchaseOrderView` 采购下单（含「下单面板 / 下单历史」两个子面板）、`ConfigView` 设置壳、`HiddenSkusView` 屏蔽列表 |
+| `src/components/` | 弹窗与设置块：导入（`ImportSplitTablesDialog` / `ImportSourcesDialog`）、`SkuDetailDialog` + `SkuDetailTrigger`、补货与订单（`SkuOrderEditor` / `SkuOrderDialog` / `PurchaseOrderRecordsDialog`）、`OrderHistoryPanel`（下单历史子面板）、设置页各块（`PurchaseSettingsPanel` / `ScoringSettings` / `SpuGradeSettings` / `VatRuleSettings` / `HiddenSkusPanel` / `DataStoragePanel`） |
+| `src/stores/` | `inventory`（四页共用的库存与销售表状态）、`inventoryView`（主面板视图状态，只留内存）、`stocking`（方案配置）、`purchase`（设置、草稿与分订单） |
+| `src/data/` | 持久化唯一层：`repo.js` 契约、`indexedDbRepo.js` 实现、`db.js` 封装、`serialize.js` 序列化、`persistence.js` 快照与计划层、`bootstrap.js` 启动编排、`transfer.js` 全量导出导入、`panels.js` 导航、`inventoryItems.js` 种子 |
+| `src/stocking/` | 备货自包含模块，`config.json` 是唯一配置来源（v4 多方案） |
+| `src/purchase/` | 下单自包含模块：`settings.json` / `orders.json` / `validate.js` / `resolve.js` / `vat.js` / `history.js` |
+| `src/cleaning/engine.js` | 一行转发到 `tools/cleaning/engine.mjs`（网页与命令行共用同一份清洗口径） |
+| `src/utils/` | 解析与计算适配：导入（`inventoryImport` / `salesImport` / `splitTableImport` / `inventoryApply` / `applySourceImport`）、`inventory.js`、`productGroups.js`、`skuHealth.js`、`skuCreate.js`、`xlsx*` |
+| `src/composables/` | 导入流程：`useSplitImport`（选表 → 清洗 → 解析）、`useSourceImport`（确认后写 store） |
+| `src/workers/` | `cleanMergeWorker`（清洗）、`persistWorker`（快照 gzip） |
+| `tools/cleaning/` | 清洗引擎 + 命令行 `clean-merge.js` + 造数脚本 `simulate-customers.js`；自包含目录，不参与网页构建但**不要删除或改名** |
+| `tools/check-stocking.mjs` | 备货口径自检脚本 |
+| `docs/` | `功能说明/` 是各域口径（以它为准）；`需求文档/` 是需求原文；`prototype/` 是视觉原型 |
+
+## 3. 最容易被改错的几件事
+
+- 四个面板共用同一个 `inventory` store；销售表是独立视图，行为以主面板为准。
+- 导入只有一个流程、一个入口：主面板「导入分表」→ 5 张分表 → Worker 清洗出总表 + 销售表 → 预览确认。销售表页**没有**自己的导入入口，空态也指向主面板。
+- 客户CR5率只在销售表展示，是比例列（父行按累积条数加权平均，不求和），不写回主面板、不进备货配置。
+- 设置页是一个壳两个域：备货配置（模式与系数 / 销量加权 / 评分 / SPU 分级）与下单配置（缸规则 / 染厂清单 / 分单人员表 / 树形分类与分单 / SKU 可选染厂）。草稿只在点「确定」时落盘，未确定前切页要提示。
+- `SkuDetailDialog` 只传 `:item` + `v-model:visible`；行内入口是 24px 方形按钮 `SkuDetailTrigger`，别改回小圆点。
+- 「添加SKU」是唯一手动录入入口：唯一标识按 `MANUAL-0001` 递增并跳过屏蔽清单用过的标识，库存与销量按公斤录入（公斤系数 = 1）。
+- 计划层的写入口（批量补货 / 行内采纳 / 撤销 / 下单页撤销）统一调 `schedulePlanPersist()`；到货只经订单弹窗「确定」落账，`receivedQty` 由 receipts 求和派生，不要直接写。
+
+## 4. 文档索引与手验清单
+
+| 域 | 文档 | 改完手验 |
+| --- | --- | --- |
+| 面板 / 表格 / 导入 / 弹窗 | [前端视图与交互.md](./docs/功能说明/前端视图与交互.md) | 主面板 ↔ 采购下单 / 销售表来回切，筛选、展开、勾选与「需安排」草稿都在；导入一次 5 张分表能预览并确认 |
+| 分表清洗与单位换算 | [数据清洗规则.md](./docs/功能说明/数据清洗规则.md) | 导出的总表 / 销售表行数与列名对得上；缺出码率的码单位 SKU 被剔除 |
+| 模式 / 系数 / 评分 / 分级 | [模式与系数设置.md](./docs/功能说明/模式与系数设置.md) | 设置页改系数点「确定」后主面板模式、系数、预警随之变化；SKU 弹窗评分与「评分」列一致 |
+| 采购下单 / 缸规则 / 到货 | [采购下单流程.md](./docs/功能说明/采购下单流程.md) | 需安排 → 采购清单 → 拆单 → 确认下单 → 到货；缸数与公斤单向换算；下单历史能看到批次 |
+| 持久化 / 种子 / 快照 | [数据持久化方案.md](./docs/功能说明/数据持久化方案.md) | 刷新页面数据还在；「设置 → 数据 → 本机数据存储」有快照与占用；清空后回到种子 |
+| 主面板大表性能 | [主面板性能优化.md](./docs/功能说明/主面板性能优化.md) | 3 万行级筛选与滚动不卡；虚拟列表滚动位置切页回来不变 |
+| 改了什么 | [开发迭代记录.md](./docs/功能说明/开发迭代记录.md) | 每次功能改动追加一节，写明需求编号与验证方式 |
+
+`需求文档/需求文档1.X.md` 是需求原文，与实现冲突时**以实现和 `功能说明/` 为准**。
+
+## 5. 维护本文件
+
+- 新增约束先判断归属：能落进 §4 某个域的文档就写文档，本文件只留跨域、容易被反复改错的硬约束。
+- 单条约 1–2 行；写长了说明细节该进文档。目标 ≤ 150 行。

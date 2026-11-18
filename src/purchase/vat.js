@@ -41,8 +41,8 @@ const BAND_KEYS = new Set(VAT_BAND_KEYS.map((entry) => entry.value))
 const REMAINDERS = new Set(VAT_REMAINDER_POLICIES.map((entry) => entry.value))
 const EPSILON = 1e-9
 
-// 默认规则：标准大货按 80 / 160 / 240 公斤三种缸就近取整（1 公斤起就下 1 小缸），
-// 小批量补单保留「固定 60 公斤 / 整十」作为另一种处理方式的手工示例。
+// 默认规则：标准大货按 80 / 160 / 240 公斤三种缸就近取整（1 公斤起就下 1 小缸）；
+// 小批量补单是「≤50 不补 / 50 以上每缸 60 公斤」的示例。
 export function createDefaultVatRules() {
   return [
     {
@@ -53,7 +53,19 @@ export function createDefaultVatRules() {
       remainderThreshold: 0.5,
       minVats: 1,
       bands: [
-        { upTo: null, action: 'ladder', value: 0, sizes: [...DEFAULT_VAT_SIZES] },
+        {
+          upTo: 120,
+          action: 'fixed',
+          value: 80,
+          sizes: [],
+        },
+        {
+          upTo: 200,
+          action: 'fixed',
+          value: 160,
+          sizes: [],
+        },
+        { upTo: null, action: 'ladder', value: 240, sizes: [240] },
       ],
     },
     {
@@ -65,8 +77,7 @@ export function createDefaultVatRules() {
       minVats: 1,
       bands: [
         { upTo: 50, action: 'skip', value: 0 },
-        { upTo: 100, action: 'fixed', value: 60 },
-        { upTo: null, action: 'round', value: 10 },
+        { upTo: null, action: 'ladder', value: 60, sizes: [60] },
       ],
     },
   ]
@@ -250,14 +261,15 @@ function metricValueOf(rule, context) {
   return toNumber(source.planned, null)
 }
 
-// 命中的分档：从低到高取第一条「上限为空或指标 < 上限」的档（与「30 至不足 120」一致）。
+// 命中的分档：从低到高取第一条「上限为空或指标 ≤ 上限」的档。
+// 上下限都算在区间里，边界值按顺序优先归前一档（1~120 的 120 落在「不超过 120」那段）。
 export function resolveVatBand(rule, context) {
   if (!rule) return null
   const metric = metricValueOf(rule, context)
   const missing = metric === null
   const value = missing ? 0 : metric
   const bands = Array.isArray(rule.bands) ? rule.bands : []
-  const index = bands.findIndex((band) => band.upTo === null || value < band.upTo - EPSILON)
+  const index = bands.findIndex((band) => band.upTo === null || value <= band.upTo + EPSILON)
   const band = index >= 0 ? bands[index] : null
   return {
     band,
@@ -430,9 +442,9 @@ function rangeText(matched) {
   if (!band) return ''
   const unit = matched.unit
   const from = formatNumber(matched.from)
-  if (band.upTo === null) return `${from} ${unit}及以上`
-  if (!(matched.from > 0)) return `低于 ${formatNumber(band.upTo)} ${unit}`
-  return `${from} 至不足 ${formatNumber(band.upTo)} ${unit}`
+  if (band.upTo === null) return `${from} ${unit}以上`
+  if (!(matched.from > 0)) return `不超过 ${formatNumber(band.upTo)} ${unit}`
+  return `超过 ${from} 至 ${formatNumber(band.upTo)} ${unit}`
 }
 
 // 规则表的「区间与动作」行：配置页列表与详情摘要共用。

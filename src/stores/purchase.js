@@ -231,6 +231,34 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return updated
   }
 
+  // 恢复一条被撤回的到货：撤回操作本身可撤销，清掉 voidedAt 后数量重新计入已到货（待收相应减少）。
+  // 下单量事后被改小、恢复会超过下单量时拒绝，避免出现「已到货 > 下单量」。
+  function restoreReceipt(orderId, receiptId) {
+    const at = nowIso()
+    let updated = null
+    const nextOrders = orders.value.orders.map((order) => {
+      if (order.id !== orderId || order.status !== ORDER_STATUS.ACTIVE) return order
+      const target = order.receipts.find((receipt) => receipt.id === receiptId)
+      if (!target || !target.voidedAt) return order
+      const received = order.receipts.reduce(
+        (sum, receipt) => sum + (receipt.voidedAt ? 0 : Number(receipt.qty) || 0),
+        0,
+      )
+      if (received + target.qty > (Number(order.quantity) || 0) + 1e-9) return order
+      updated = {
+        ...order,
+        receipts: order.receipts.map((receipt) =>
+          receipt.id === receiptId ? { ...receipt, voidedAt: null, restoredAt: at } : receipt,
+        ),
+        updatedAt: at,
+      }
+      return updated
+    })
+    if (!updated) return null
+    commitOrders({ ...orders.value, orders: nextOrders })
+    return updated
+  }
+
   // 删除一条到货：连记录一起抹掉不留痕（录错数据时用），数量同样退回待收。
   function removeReceipt(orderId, receiptId) {
     const at = nowIso()
@@ -300,6 +328,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
     cancelOrder,
     receiveOrder,
     voidReceipt,
+    restoreReceipt,
     removeReceipt,
     updateOrder,
     flushOrders,

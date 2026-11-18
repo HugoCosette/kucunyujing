@@ -1,7 +1,17 @@
 <script setup>
-// 顶部导航：左侧是主面板组（主面板 → 销售表 → 采购下单 → 设置），
+// 顶部导航：左侧是主面板组（需求表 → 采购下单 → 销售表 → 配置板块），顺序与显示名都在 panels.js，
 // 右侧是屏蔽列表这类辅助入口，辅助入口不带角标（数量在屏蔽列表页内按 SKU 统计）。
+// 高亮按路径前缀判定：子面板（如 /purchase/history）也要让「采购下单」保持选中。
+import { useRoute } from 'vue-router'
 import { mainNavEntries, utilityNavEntries } from '@/data/panels'
+
+const route = useRoute()
+
+function isActive(entry) {
+  const path = route.path
+  if (entry.path === '/') return path === '/'
+  return path === entry.path || path.startsWith(`${entry.path}/`)
+}
 </script>
 
 <template>
@@ -12,6 +22,7 @@ import { mainNavEntries, utilityNavEntries } from '@/data/panels'
         :key="entry.key"
         :to="entry.path"
         class="page-navigation-link"
+        :class="{ 'is-active': isActive(entry) }"
       >
         {{ entry.label }}
       </RouterLink>
@@ -23,6 +34,7 @@ import { mainNavEntries, utilityNavEntries } from '@/data/panels'
         :key="entry.key"
         :to="entry.path"
         class="page-navigation-link page-navigation-link--utility"
+        :class="{ 'is-active': isActive(entry) }"
       >
         {{ entry.label }}
       </RouterLink>
@@ -66,11 +78,13 @@ import { mainNavEntries, utilityNavEntries } from '@/data/panels'
 }
 
 .page-navigation-link:hover,
-.page-navigation-link.router-link-active {
+.page-navigation-link.router-link-active,
+.page-navigation-link.is-active {
   color: var(--industrial-primary);
 }
 
-.page-navigation-link.router-link-active {
+.page-navigation-link.router-link-active,
+.page-navigation-link.is-active {
   border-bottom-color: var(--industrial-primary);
   font-weight: 600;
 }

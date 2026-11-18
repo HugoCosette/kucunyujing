@@ -3317,11 +3317,14 @@ const PURCHASE_SKUS = [
     category: '涤纶网布',
     planned: 3371,
     rule: { name: '标准大货补单', kgPerVat: 100 },
+    // 33 缸 / 3,300 公斤，拆成 6 张分订单：演示「一个颜色分给多家染厂、同厂分批」
     orders: [
-      { factory: '连江东禾晟', assignee: '阿婷', vats: 20, kg: 2000, note: '缸号 A12' },
+      { factory: '连江东禾晟', assignee: '阿婷', vats: 8, kg: 800, note: '缸号 A12' },
+      { factory: '连江东禾晟', assignee: '阿婷', vats: 6, kg: 600, note: '同缸号，9/28 交期' },
       { factory: '福清长福', assignee: '刘玉红', vats: 10, kg: 1000, note: '9/28 交期' },
       { factory: '汕头兴滨染厂', assignee: '小凤', vats: 3, kg: 300, note: '' },
-      { factory: '清远千百丽', assignee: '', vats: 0, kg: 0, note: '' },
+      { factory: '清远千百丽', assignee: '阿婷', vats: 4, kg: 400, note: '' },
+      { factory: '永春祥业', assignee: '刘玉红', vats: 2, kg: 200, note: '试单' },
     ],
   },
   {
@@ -3916,7 +3919,7 @@ const ORDER_DATA = {
       note: '',
       at: '2026-11-13T22:19:00',
       qty: 1440,
-      receipts: [{ id: 'rc-1', at: '2026-11-13T22:50:00', qty: 100, voidedAt: null }],
+      receipts: [{ id: 'rc-1', at: '2026-11-16T07:30:00Z', qty: 1000, voidedAt: '2026-11-16T07:42:00Z' }],
     },
     {
       id: 'ord-2',
@@ -3926,7 +3929,7 @@ const ORDER_DATA = {
       note: '第二批',
       at: '2026-11-13T22:19:00',
       qty: 960,
-      receipts: [{ id: 'rc-2', at: '2026-11-13T22:50:00', qty: 100, voidedAt: null }],
+      receipts: [{ id: 'rc-2', at: '2026-11-16T07:30:00Z', qty: 500, voidedAt: null }],
     },
   ],
 }
@@ -3965,48 +3968,62 @@ function renderOrderSum() {
     <div class="order-sum__item ${totals.pending > 0 ? 'is-pending' : ''}"><span>待收</span><b>${fmt(
       totals.pending,
     )}</b></div>
-    <span class="order-sum__track" title="到货进度 ${pct.toFixed(0)}%"><i style="width:${pct.toFixed(
-      1,
-    )}%"></i></span>
-    <span class="order-sum__pct">${pct.toFixed(0)}%</span>`
+    <span class="order-sum__progress">
+      <span class="order-sum__track" title="到货进度 ${pct.toFixed(0)}%"><i style="width:${pct.toFixed(
+        1,
+      )}%"></i></span>
+      <span class="order-sum__pct">${pct.toFixed(0)}%</span>
+    </span>`
 }
 
-function ordCard(order) {
+function ordPair(order) {
   const received = orderReceived(order)
   const pending = orderPending(order)
-  const pct = order.qty ? Math.min(100, (received / order.qty) * 100) : 0
-  const meta = [`${order.vats} 缸`, order.assignee, fmtAt(order.at), order.note].filter(Boolean).join(' · ')
-  const draft = orderDraft[order.id] ?? ''
   const done = pending <= 0
+  // 时间必须留在行内：同一家染厂可能拆成两张单，只靠染厂名分不出谁是谁
+  const meta = [`${order.vats} 缸`, order.assignee, fmtAt(order.at)].filter(Boolean).join(' · ')
+  const title = [`${order.vats} 缸`, order.assignee, fmtAt(order.at), order.note].filter(Boolean).join(' · ')
+  const draft = orderDraft[order.id] ?? ''
 
-  return `<article class="ord-card" data-order="${order.id}">
-    <div class="ord-card__top">
-      <span class="ord-card__factory">${order.factory || '未指定染厂'}</span>
-      <span class="ord-card__meta">${meta}</span>
+  const receipts = (order.receipts ?? [])
+    .slice()
+    .sort((first, second) => String(second.at).localeCompare(String(first.at)))
+    .map((receipt) => rcptRow(receipt, order))
+    .join('')
+
+  return `<div class="ord-pair" data-order="${order.id}">
+    <div class="ord-pair__left">
+      <div class="ord-row__top">
+        <span class="ord-row__factory" title="${title}">${order.factory || '未指定染厂'}</span>
+        <span class="ord-row__meta">${meta}</span>
+      </div>
+      <div class="ord-row__main">
+        <span class="ord-num"><em>下单</em><b>${fmt(order.qty)}</b></span>
+        <span class="ord-num"><em>已到</em><b>${fmt(received)}</b></span>
+        <span class="ord-num ${done ? 'is-done' : 'is-pending'}"><em>待收</em><b>${fmt(pending)}</b></span>
+        <div class="ord-row__acts">
+          <label class="ord-recv">
+            <input type="number" min="0" step="1" data-receive="${order.id}" value="${draft}" placeholder="0"
+              title="${done ? '已收齐' : `最多 ${fmt(pending)} 公斤`}" aria-label="${
+                order.factory || '分订单'
+              } 本次到货公斤数"${done ? ' disabled' : ''} />
+            <span>公斤</span>
+          </label>
+          <button class="btn btn--sm btn--primary po-confirm" type="button" data-confirm="${order.id}"${
+            done ? ' disabled' : ''
+          }>登记到货</button>
+          <button class="ord-more" type="button" data-more="${order.id}" aria-label="更多操作" aria-haspopup="true">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+              <circle cx="3.2" cy="8" r="1.2" /><circle cx="8" cy="8" r="1.2" /><circle cx="12.8" cy="8" r="1.2" />
+            </svg>
+          </button>
+        </div>
+      </div>
     </div>
-    <div class="ord-card__nums">
-      <span class="ord-num"><em>下单</em>${fmt(order.qty)}</span>
-      <span class="ord-num"><em>已到</em>${fmt(received)}</span>
-      <span class="ord-num is-pending"><em>待收</em>${fmt(pending)}</span>
-      <span class="ord-card__track" title="已到 ${pct.toFixed(0)}%"><i style="width:${pct.toFixed(1)}%"></i></span>
+    <div class="ord-pair__right">
+      <div class="ord-pair__list">${receipts || '<span class="rcpt-none">还没有到货</span>'}</div>
     </div>
-    <div class="ord-card__act">
-      <label class="ord-recv">
-        <input type="number" min="0" step="1" data-receive="${order.id}" value="${draft}" placeholder="0"
-          aria-label="${order.factory || '分订单'} 本次到货公斤数"${done ? ' disabled' : ''} />
-        <span>公斤</span>
-      </label>
-      <button class="btn btn--sm btn--primary" type="button" data-confirm="${order.id}"${
-        done ? ' disabled' : ''
-      }>登记到货</button>
-      <span class="ord-card__max">${done ? '已收齐' : `最多 ${fmt(pending)}`}</span>
-      <span class="ord-card__links">
-        <button type="button" data-edit="${order.id}">改单</button>
-        <button type="button" class="is-warn" data-drop="${order.id}"${done ? ' disabled' : ''}>删除待收</button>
-        <button type="button" class="is-danger" data-cancel="${order.id}">撤销整单</button>
-      </span>
-    </div>
-  </article>`
+  </div>`
 }
 
 function orderReceiptRows() {
@@ -4015,26 +4032,19 @@ function orderReceiptRows() {
     .sort((first, second) => String(second.at).localeCompare(String(first.at)))
 }
 
-function rcptRow(receipt) {
+function rcptRow(receipt, order) {
   const voided = Boolean(receipt.voidedAt)
-  const sub = [`${receipt.order.factory} · ${receipt.order.vats} 缸`, voided ? `已撤回 ${fmtAt(receipt.voidedAt)}` : '']
-    .filter(Boolean)
-    .join(' · ')
-
   return `<div class="rcpt${voided ? ' is-voided' : ''}">
-    <div class="rcpt__top">
-      <span class="rcpt__time">${fmtAt(receipt.at)}</span>
-      <span class="rcpt__qty">+${fmt(receipt.qty)} 公斤</span>
-      <span class="rcpt__acts">
-        ${
-          voided
-            ? ''
-            : `<button type="button" data-void="${receipt.order.id}|${receipt.id}">撤回</button>`
-        }
-        <button type="button" class="is-danger" data-remove="${receipt.order.id}|${receipt.id}">删除</button>
-      </span>
-    </div>
-    <div class="rcpt__sub">${sub}</div>
+    <span class="rcpt__time" title="${fmtAt(receipt.at)}">${fmtAt(receipt.at)}</span>
+    <span class="rcpt__qty" title="${voided ? `已撤回 ${fmtAt(receipt.voidedAt)}` : ''}">+${fmt(
+      receipt.qty,
+    )} 公斤</span>
+    <span class="rcpt__acts">
+      ${
+        voided ? '' : `<button type="button" data-void="${order.id}|${receipt.id}">撤回</button>`
+      }
+      <button type="button" class="is-danger" data-remove="${order.id}|${receipt.id}">删除</button>
+    </span>
   </div>`
 }
 
@@ -4042,22 +4052,20 @@ function renderOrderDialog() {
   const totals = orderTotals()
   $('#orderTitle').textContent = ORDER_DATA.product
   $('#orderColor').textContent = ORDER_DATA.color
-  $('#orderCount').textContent = totals.count ? `${totals.count} 张分订单` : '无分订单'
   renderOrderSum()
-
-  $('#orderColHint').textContent = totals.count ? `${totals.count} 张 · 按染厂拆单` : '按染厂拆单'
-  $('#orderList').innerHTML = totals.count
-    ? ORDER_DATA.orders.map(ordCard).join('')
-    : `<div class="ord-empty"><b>这个 SKU 还没有分订单</b><span>分订单被撤销后，需要回主面板重新下单</span></div>`
 
   const rows = orderReceiptRows()
   const active = rows.filter((receipt) => !receipt.voidedAt).length
+
+  // 两处计数只在鼠标停在列头上时才露出来，平时让表头保持干净
+  $('#orderColHint').textContent = totals.count ? `${totals.count} 张 · 按染厂拆单` : ''
   $('#orderReceiptHint').textContent = rows.length
     ? `${active} 条有效${rows.length > active ? ` · ${rows.length - active} 条已撤回` : ''}`
     : ''
-  $('#orderReceipts').innerHTML = rows.length
-    ? rows.map(rcptRow).join('')
-    : `<div class="ord-empty"><b>还没有到货记录</b><span>在左侧填「本次到货」并登记，这里会按时间倒序列出</span></div>`
+
+  $('#orderList').innerHTML = totals.count
+    ? ORDER_DATA.orders.map(ordPair).join('')
+    : `<div class="ord-empty"><b>这个 SKU 还没有分订单</b><span>分订单被撤销后，需要回主面板重新下单</span></div>`
 }
 
 function openOrderDialog() {
@@ -4067,6 +4075,7 @@ function openOrderDialog() {
 }
 
 function closeOrderDialog() {
+  closeOrdMenu()
   $('#orderOverlay').hidden = true
 }
 
@@ -4113,93 +4122,159 @@ $('#orderList').addEventListener('keydown', (event) => {
   if (order) receiveOrder(order)
 })
 
-$('#orderList').addEventListener('click', (event) => {
-  const target = event.target
+// 三个次要操作抽成独立函数：⋯ 菜单和将来的快捷键都调它
+function editOrderQty(order) {
+  const received = orderReceived(order)
+  openForm({
+    title: '修改下单量',
+    note: `当前下单 ${fmt(order.qty)} 公斤，已到货 ${fmt(received)} 公斤。`,
+    values: { qty: order.qty },
+    render: (values) =>
+      formRow(
+        '新的下单量',
+        numField('qty', values.qty, '公斤', { min: Math.max(received, 1), step: 1 }),
+        `不能少于已到货的 ${fmt(received)} 公斤`,
+      ),
+    validate: (values) => {
+      const amount = Number(values.qty)
+      if (!Number.isFinite(amount) || amount <= 0) return '请填写大于 0 的公斤数'
+      if (amount < received) return `不能少于已到货的 ${fmt(received)} 公斤`
+      return null
+    },
+    okText: '保存',
+    mid: true,
+    onSubmit: (values) => {
+      order.qty = Number(values.qty)
+      renderOrderDialog()
+      toast(`下单量已改为 ${fmt(order.qty)} 公斤`)
+    },
+  })
+}
 
-  const confirmBtn = target.closest('[data-confirm]')
+function dropOrderPending(order) {
+  const pending = orderPending(order)
+  const received = orderReceived(order)
+  if (!(pending > 0)) return
+  // 一分货都没到：删除待收等价于整张单作废，走撤销，避免留下 0 公斤的空单
+  if (!(received > 0)) {
+    cancelOrder(order)
+    return
+  }
+  openConfirm({
+    title: '删除待收',
+    note: `这张单还剩 ${fmt(pending)} 公斤没到。删除后已到的 ${fmt(
+      received,
+    )} 公斤保留，下单量改成 ${fmt(received)} 公斤。`,
+    okText: '删除待收',
+    onOk: () => {
+      order.qty = received
+      renderOrderDialog()
+      toast(`已删除待收 ${fmt(pending)} 公斤`)
+    },
+  })
+}
+
+function cancelOrder(order) {
+  const received = orderReceived(order)
+  openConfirm({
+    title: '撤销整单',
+    note: received
+      ? `这张单是 ${order.factory} ${order.vats} 缸，已到货 ${fmt(
+          received,
+        )} 公斤。撤销后到货记录一并作废，公斤数退回需安排。`
+      : `撤销这张 ${order.factory} ${order.vats} 缸的分订单？公斤数会退回需安排。`,
+    okText: '撤销',
+    onOk: () => {
+      ORDER_DATA.orders = ORDER_DATA.orders.filter((item) => item.id !== order.id)
+      renderOrderDialog()
+      toast(`已撤销 ${fmt(order.qty)} 公斤，需安排已退回`)
+    },
+  })
+}
+
+// ⋯ 菜单：fixed 定位，避免被滚动容器裁掉
+let ordMenu = null
+
+function closeOrdMenu() {
+  if (ordMenu) ordMenu.remove()
+  ordMenu = null
+}
+
+function openOrdMenu(anchor, order) {
+  closeOrdMenu()
+  const menu = document.createElement('div')
+  menu.className = 'ord-menu'
+  menu.innerHTML = `
+    <button type="button" data-cmd="edit">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M10.6 2.7a1.55 1.55 0 0 1 2.2 2.2L5.2 12.5l-2.9.6.6-2.9 7.7-7.5z" />
+        <path d="M9.6 3.7l2.2 2.2" />
+      </svg>
+      改单
+    </button>
+    <button type="button" data-cmd="drop"${orderPending(order) > 0 ? '' : ' disabled'}>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="8" cy="8" r="5.5" />
+        <path d="M5.8 8h4.4" />
+      </svg>
+      删除待收
+    </button>
+    <div class="ord-menu__divider"></div>
+    <button type="button" class="is-danger" data-cmd="cancel">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="8" cy="8" r="5.5" />
+        <path d="M6.3 6.3l3.4 3.4M9.7 6.3l-3.4 3.4" />
+      </svg>
+      撤销整单
+    </button>`
+  document.body.appendChild(menu)
+
+  const rect = anchor.getBoundingClientRect()
+  const menuRect = menu.getBoundingClientRect()
+  // 从整行底边往下弹：贴着 ⋯ 本身弹会挡住本行的到货输入框。
+  // 弹窗只有一两张单时下方空间不够，允许菜单溢出到弹窗外（fixed，不会被裁）
+  const row = anchor.closest('.ord-pair')
+  const bottom = row ? row.getBoundingClientRect().bottom : rect.bottom
+  menu.style.top = `${Math.round(bottom + 4)}px`
+  menu.style.left = `${Math.round(Math.max(8, rect.right - menuRect.width))}px`
+
+  menu.addEventListener('click', (event) => {
+    const item = event.target.closest('button[data-cmd]')
+    if (!item || item.disabled) return
+    const command = item.dataset.cmd
+    closeOrdMenu()
+    if (command === 'edit') editOrderQty(order)
+    else if (command === 'drop') dropOrderPending(order)
+    else if (command === 'cancel') cancelOrder(order)
+  })
+
+  ordMenu = menu
+}
+
+$('#orderList').addEventListener('click', (event) => {
+  const confirmBtn = event.target.closest('[data-confirm]')
   if (confirmBtn) {
     const order = findOrder(confirmBtn.dataset.confirm)
     if (order) receiveOrder(order)
     return
   }
 
-  const editBtn = target.closest('[data-edit]')
-  if (editBtn) {
-    const order = findOrder(editBtn.dataset.edit)
-    if (!order) return
-    const received = orderReceived(order)
-    openForm({
-      title: '修改下单量',
-      note: `当前下单 ${fmt(order.qty)} 公斤，已到货 ${fmt(received)} 公斤。`,
-      values: { qty: order.qty },
-      render: (values) =>
-        formRow(
-          '新的下单量',
-          numField('qty', values.qty, '公斤', { min: Math.max(received, 1), step: 1 }),
-          `不能少于已到货的 ${fmt(received)} 公斤`,
-        ),
-      validate: (values) => {
-        const amount = Number(values.qty)
-        if (!Number.isFinite(amount) || amount <= 0) return '请填写大于 0 的公斤数'
-        if (amount < received) return `不能少于已到货的 ${fmt(received)} 公斤`
-        return null
-      },
-      okText: '保存',
-      mid: true,
-      onSubmit: (values) => {
-        order.qty = Number(values.qty)
-        renderOrderDialog()
-        toast(`下单量已改为 ${fmt(order.qty)} 公斤`)
-      },
-    })
-    return
-  }
-
-  const dropBtn = target.closest('[data-drop]')
-  if (dropBtn) {
-    const order = findOrder(dropBtn.dataset.drop)
-    if (!order) return
-    const pending = orderPending(order)
-    const received = orderReceived(order)
-    if (!(pending > 0)) return
-    openConfirm({
-      title: '删除待收',
-      note: `这张单还剩 ${fmt(pending)} 公斤没到。删除后已到的 ${fmt(
-        received,
-      )} 公斤保留，下单量改成 ${fmt(received)} 公斤。`,
-      okText: '删除待收',
-      onOk: () => {
-        order.qty = received
-        renderOrderDialog()
-        toast(`已删除待收 ${fmt(pending)} 公斤`)
-      },
-    })
-    return
-  }
-
-  const cancelBtn = target.closest('[data-cancel]')
-  if (cancelBtn) {
-    const order = findOrder(cancelBtn.dataset.cancel)
-    if (!order) return
-    const received = orderReceived(order)
-    openConfirm({
-      title: '撤销整单',
-      note: received
-        ? `这张单是 ${order.factory} ${order.vats} 缸，已到货 ${fmt(
-            received,
-          )} 公斤。撤销后到货记录一并作废，公斤数退回需安排。`
-        : `撤销这张 ${order.factory} ${order.vats} 缸的分订单？公斤数会退回需安排。`,
-      okText: '撤销',
-      onOk: () => {
-        ORDER_DATA.orders = ORDER_DATA.orders.filter((item) => item.id !== order.id)
-        renderOrderDialog()
-        toast(`已撤销 ${fmt(order.qty)} 公斤，需安排已退回`)
-      },
-    })
+  const moreBtn = event.target.closest('[data-more]')
+  if (moreBtn) {
+    event.stopPropagation()
+    const order = findOrder(moreBtn.dataset.more)
+    if (order) openOrdMenu(moreBtn, order)
   }
 })
 
-$('#orderReceipts').addEventListener('click', (event) => {
+document.addEventListener('click', (event) => {
+  if (ordMenu && !event.target.closest('.ord-menu')) closeOrdMenu()
+})
+
+$('#orderList').addEventListener('scroll', closeOrdMenu)
+
+// 撤回 / 删除的按钮现在和分订单同处一张配对表，统一委托在 #orderList 上
+$('#orderList').addEventListener('click', (event) => {
   const voidBtn = event.target.closest('[data-void]')
   if (voidBtn) {
     const [orderId, receiptId] = voidBtn.dataset.void.split('|')

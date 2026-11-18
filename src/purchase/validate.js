@@ -187,6 +187,8 @@ function normalizeReceipt(receipt, index) {
     by: text(receipt.by),
     // 撤回留痕：有 voidedAt 的记录留在列表里灰显，但不计入已到货（数量退回待收）。
     voidedAt: text(receipt.voidedAt) || null,
+    // 恢复留痕：撤回又被「恢复」的记录清掉 voidedAt，只留恢复时间，便于对账。
+    restoredAt: text(receipt.restoredAt) || null,
   }
 }
 

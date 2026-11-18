@@ -1,7 +1,104 @@
 {
   "version": 2,
-  "updatedAt": "2026-11-13T15:31:37.544Z",
-  "drafts": {},
+  "updatedAt": "2026-11-17T07:40:41.949Z",
+  "drafts": {
+    "40D涤安|50#桃粉": [
+      {
+        "id": "so-mwk3z62d-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "阿婷",
+        "quantity": 300,
+        "vatCount": null,
+        "kgPerVat": 240,
+        "note": ""
+      }
+    ],
+    "40D涤安|885#浅灰杏": [
+      {
+        "id": "so-mwkahfri-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "阿婷",
+        "quantity": 80,
+        "vatCount": 1,
+        "kgPerVat": 80,
+        "note": ""
+      }
+    ],
+    "40D涤安|618#酒红（固色）S": [
+      {
+        "id": "so-mwkahi6d-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "阿婷",
+        "quantity": 160,
+        "vatCount": 1,
+        "kgPerVat": 160,
+        "note": ""
+      }
+    ],
+    "40D涤安|648#藏青（固色）S": [
+      {
+        "id": "so-mwkb531v-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "阿婷",
+        "quantity": 160,
+        "vatCount": 1,
+        "kgPerVat": 160,
+        "note": ""
+      }
+    ],
+    "40D涤安|8331#深咖-6.4M（固色）": [
+      {
+        "id": "so-mwkb54mb-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "阿婷",
+        "quantity": 80,
+        "vatCount": 1,
+        "kgPerVat": 80,
+        "note": ""
+      }
+    ],
+    "DEMO-087": [
+      {
+        "id": "so-mwkd5bb3-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "小良",
+        "quantity": 480,
+        "vatCount": 2,
+        "kgPerVat": 240,
+        "note": ""
+      }
+    ],
+    "DEMO-089": [
+      {
+        "id": "so-mwkdamg4-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "小良",
+        "quantity": 480,
+        "vatCount": 2,
+        "kgPerVat": 240,
+        "note": ""
+      }
+    ],
+    "DEMO-074": [
+      {
+        "id": "so-mwkduthu-1",
+        "factoryId": "df-1",
+        "factoryName": "连江东禾晟",
+        "assignee": "小良",
+        "quantity": 80,
+        "vatCount": 1,
+        "kgPerVat": 80,
+        "note": ""
+      }
+    ]
+  },
   "orders": [
     {
       "id": "so-legacy-1",
@@ -254,16 +351,41 @@
       "factoryId": "df-1",
       "factoryName": "连江东禾晟",
       "assignee": "阿婷",
-      "quantity": 0,
+      "quantity": 600,
       "vatCount": 1,
       "kgPerVat": 240,
       "note": "",
       "status": "active",
       "submittedAt": "2026-11-13T14:19:24.578Z",
-      "updatedAt": "2026-11-13T14:49:53.122Z",
+      "updatedAt": "2026-11-17T06:04:51.764Z",
       "month": "2026-11",
-      "receivedQty": 0,
-      "receipts": [],
+      "receivedQty": 600,
+      "receipts": [
+        {
+          "id": "rc-mwkafih9-1",
+          "at": "2026-11-17T06:04:48.333Z",
+          "qty": 300,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
+        },
+        {
+          "id": "rc-mwkafjvf-2",
+          "at": "2026-11-17T06:04:50.139Z",
+          "qty": 200,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
+        },
+        {
+          "id": "rc-mwkafl4k-3",
+          "at": "2026-11-17T06:04:51.764Z",
+          "qty": 100,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
+        }
+      ],
       "revisions": [
         {
           "at": "2026-11-13T14:49:53.122Z",
@@ -286,6 +408,28 @@
             "assignee": "阿婷",
             "note": ""
           }
+        },
+        {
+          "at": "2026-11-17T06:04:40.605Z",
+          "by": "",
+          "before": {
+            "quantity": 0,
+            "vatCount": 1,
+            "kgPerVat": 240,
+            "factoryId": "df-1",
+            "factoryName": "连江东禾晟",
+            "assignee": "阿婷",
+            "note": ""
+          },
+          "after": {
+            "quantity": 600,
+            "vatCount": 1,
+            "kgPerVat": 240,
+            "factoryId": "df-1",
+            "factoryName": "连江东禾晟",
+            "assignee": "阿婷",
+            "note": ""
+          }
         }
       ],
       "cancelledAt": null
@@ -299,32 +443,81 @@
       "factoryId": "df-5",
       "factoryName": "清远千百丽",
       "assignee": "阿婷",
-      "quantity": 1440,
+      "quantity": 1500,
       "vatCount": 6,
       "kgPerVat": 240,
       "note": "",
       "status": "active",
       "submittedAt": "2026-11-13T14:19:52.439Z",
-      "updatedAt": "2026-11-13T15:31:36.812Z",
+      "updatedAt": "2026-11-17T05:50:32.629Z",
       "month": "2026-11",
-      "receivedQty": 1300,
+      "receivedQty": 1050,
       "receipts": [
         {
-          "id": "rc-mwf3fy4q-1",
-          "at": "2026-11-13T14:50:20.426Z",
-          "qty": 100,
+          "id": "rc-mwizaxqm-1",
+          "at": "2026-11-16T08:05:32.878Z",
+          "qty": 1000,
           "by": "",
-          "voidedAt": null
+          "voidedAt": null,
+          "restoredAt": null
         },
         {
-          "id": "rc-mwf4x0x8-2",
-          "at": "2026-11-13T15:31:36.812Z",
-          "qty": 1200,
+          "id": "rc-mwizb7x3-4",
+          "at": "2026-11-16T08:05:46.071Z",
+          "qty": 10,
           "by": "",
-          "voidedAt": null
+          "voidedAt": null,
+          "restoredAt": null
+        },
+        {
+          "id": "rc-mwizbunq-5",
+          "at": "2026-11-16T08:06:15.542Z",
+          "qty": 11,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
+        },
+        {
+          "id": "rc-mwizbvmn-6",
+          "at": "2026-11-16T08:06:16.799Z",
+          "qty": 12,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
+        },
+        {
+          "id": "rc-mwizc633-11",
+          "at": "2026-11-16T08:06:30.350Z",
+          "qty": 17,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
         }
       ],
-      "revisions": [],
+      "revisions": [
+        {
+          "at": "2026-11-17T02:03:08.946Z",
+          "by": "",
+          "before": {
+            "quantity": 1440,
+            "vatCount": 6,
+            "kgPerVat": 240,
+            "factoryId": "df-5",
+            "factoryName": "清远千百丽",
+            "assignee": "阿婷",
+            "note": ""
+          },
+          "after": {
+            "quantity": 1500,
+            "vatCount": 6,
+            "kgPerVat": 240,
+            "factoryId": "df-5",
+            "factoryName": "清远千百丽",
+            "assignee": "阿婷",
+            "note": ""
+          }
+        }
+      ],
       "cancelledAt": null
     },
     {
@@ -342,7 +535,222 @@
       "note": "",
       "status": "active",
       "submittedAt": "2026-11-13T14:19:52.439Z",
-      "updatedAt": "2026-11-13T15:31:33.958Z",
+      "updatedAt": "2026-11-16T08:06:03.878Z",
+      "month": "2026-11",
+      "receivedQty": 600,
+      "receipts": [
+        {
+          "id": "rc-mwiy1x8z-1",
+          "at": "2026-11-16T07:30:32.723Z",
+          "qty": 500,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
+        },
+        {
+          "id": "rc-mwizblnq-2",
+          "at": "2026-11-16T08:06:03.878Z",
+          "qty": 100,
+          "by": "",
+          "voidedAt": null,
+          "restoredAt": null
+        }
+      ],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwixto02-1",
+      "batchId": "bt-mwixto02",
+      "skuId": "40D涤安|32#本白订-TR",
+      "product": "40D涤安",
+      "color": "32#本白订-TR",
+      "factoryId": "df-3",
+      "factoryName": "长乐华鹤",
+      "assignee": "阿婷",
+      "quantity": 240,
+      "vatCount": 1,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-16T07:24:07.490Z",
+      "updatedAt": "2026-11-16T07:24:07.490Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwixu53n-1",
+      "batchId": "bt-mwixu53n",
+      "skuId": "40D涤安|12#朱红（固色）",
+      "product": "40D涤安",
+      "color": "12#朱红（固色）",
+      "factoryId": "df-2",
+      "factoryName": "福清长福",
+      "assignee": "阿婷",
+      "quantity": 480,
+      "vatCount": 2,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-16T07:24:29.651Z",
+      "updatedAt": "2026-11-16T07:24:29.651Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwixu53n-2",
+      "batchId": "bt-mwixu53n",
+      "skuId": "40D涤安|12#朱红（固色）",
+      "product": "40D涤安",
+      "color": "12#朱红（固色）",
+      "factoryId": "df-5",
+      "factoryName": "清远千百丽",
+      "assignee": "阿婷",
+      "quantity": 240,
+      "vatCount": 1,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-16T07:24:29.651Z",
+      "updatedAt": "2026-11-16T07:24:29.651Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwixu53n-3",
+      "batchId": "bt-mwixu53n",
+      "skuId": "40D涤安|12#朱红（固色）",
+      "product": "40D涤安",
+      "color": "12#朱红（固色）",
+      "factoryId": "df-6",
+      "factoryName": "连江俊诚(华阳)",
+      "assignee": "阿婷",
+      "quantity": 240,
+      "vatCount": 1,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "cancelled",
+      "submittedAt": "2026-11-16T07:24:29.651Z",
+      "updatedAt": "2026-11-17T06:29:35.161Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": "2026-11-17T06:29:35.161Z"
+    },
+    {
+      "id": "so-mwixug44-1",
+      "batchId": "bt-mwixug44",
+      "skuId": "40D涤安|70#天空蓝-无软",
+      "product": "40D涤安",
+      "color": "70#天空蓝-无软",
+      "factoryId": "df-8",
+      "factoryName": "长乐力宏",
+      "assignee": "阿婷",
+      "quantity": 960,
+      "vatCount": 4,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-16T07:24:43.924Z",
+      "updatedAt": "2026-11-16T07:24:43.924Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwkb5069-1",
+      "batchId": "bt-mwkb5069",
+      "skuId": "40D涤安|35#暗红（固色）",
+      "product": "40D涤安",
+      "color": "35#暗红（固色）",
+      "factoryId": "df-1",
+      "factoryName": "连江东禾晟",
+      "assignee": "阿婷",
+      "quantity": 240,
+      "vatCount": 1,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-17T06:24:37.665Z",
+      "updatedAt": "2026-11-17T06:24:37.665Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwkb5069-2",
+      "batchId": "bt-mwkb5069",
+      "skuId": "40D涤安|35#暗红（固色）",
+      "product": "40D涤安",
+      "color": "35#暗红（固色）",
+      "factoryId": "df-4",
+      "factoryName": "汕头兴滨染厂",
+      "assignee": "小凤",
+      "quantity": 160,
+      "vatCount": 1,
+      "kgPerVat": 160,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-17T06:24:37.665Z",
+      "updatedAt": "2026-11-17T06:24:37.665Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwkbd0yy-1",
+      "batchId": "bt-mwkbd0yy",
+      "skuId": "40D涤安|566#黑色-无软（高固色）",
+      "product": "40D涤安",
+      "color": "566#黑色-无软（高固色）",
+      "factoryId": "df-7",
+      "factoryName": "久顺",
+      "assignee": "小凤",
+      "quantity": 480,
+      "vatCount": 2,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-17T06:30:51.946Z",
+      "updatedAt": "2026-11-17T06:30:51.946Z",
+      "month": "2026-11",
+      "receivedQty": 0,
+      "receipts": [],
+      "revisions": [],
+      "cancelledAt": null
+    },
+    {
+      "id": "so-mwkbd0yy-2",
+      "batchId": "bt-mwkbd0yy",
+      "skuId": "40D涤安|566#黑色-无软（高固色）",
+      "product": "40D涤安",
+      "color": "566#黑色-无软（高固色）",
+      "factoryId": "df-8",
+      "factoryName": "长乐力宏",
+      "assignee": "刘玉红",
+      "quantity": 480,
+      "vatCount": 2,
+      "kgPerVat": 240,
+      "note": "",
+      "status": "active",
+      "submittedAt": "2026-11-17T06:30:51.946Z",
+      "updatedAt": "2026-11-17T06:30:51.946Z",
       "month": "2026-11",
       "receivedQty": 0,
       "receipts": [],

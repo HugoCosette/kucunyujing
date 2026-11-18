@@ -1,6 +1,14 @@
 <script setup>
 import { computed, reactive, watch } from 'vue'
-import { ElButton, ElDialog, ElMessage, ElMessageBox } from 'element-plus'
+import {
+  ElButton,
+  ElDialog,
+  ElDropdown,
+  ElDropdownItem,
+  ElDropdownMenu,
+  ElMessage,
+  ElMessageBox,
+} from 'element-plus'
 import { usePurchaseStore } from '@/stores/purchase'
 
 // 订单弹窗：左列是分订单（本次到货填完点「登记到货」），右列是到货记录（每条都能撤回 / 删除）。
@@ -26,27 +34,17 @@ const productText = computed(() => String(props.item?.product ?? '').trim() || '
 const subtitleText = computed(() => String(props.item?.color ?? '').trim())
 const summary = computed(() => purchaseStore.orderSummary(skuId.value))
 const orders = computed(() => summary.value.orders)
-// 到货记录跨分订单汇总，按时间倒序；已撤回的留在列表里灰显可追溯。
-const receipts = computed(() =>
-  orders.value
-    .flatMap((order) => (order.receipts ?? []).map((receipt) => ({ ...receipt, order })))
-    .sort((first, second) => String(second.at).localeCompare(String(first.at))),
-)
-const activeReceiptCount = computed(
-  () => receipts.value.filter((receipt) => !receipt.voidedAt).length,
-)
-const voidedReceiptCount = computed(() => receipts.value.length - activeReceiptCount.value)
-// 到货进度：已到货 ÷ 累积下单，一眼看出这批货走到哪一步。
+// 到货进度：已到货 ÷ 累积下单，列头那根进度条就吃这个值。
 const receivedPercent = computed(() => percentOf(summary.value.received, summary.value.total))
-const columnHint = computed(() =>
-  summary.value.count ? `${summary.value.count} 张 · 按染厂拆单` : '按染厂拆单',
+// 还有待收的排在前面（那些才是要动手的），同组里按下单时间倒序
+const sortedOrders = computed(() =>
+  [...orders.value].sort((first, second) => {
+    const firstDone = pendingOf(first) > 0 ? 0 : 1
+    const secondDone = pendingOf(second) > 0 ? 0 : 1
+    if (firstDone !== secondDone) return firstDone - secondDone
+    return String(second.submittedAt ?? '').localeCompare(String(first.submittedAt ?? ''))
+  }),
 )
-const receiptHint = computed(() => {
-  if (!receipts.value.length) return ''
-  return voidedReceiptCount.value
-    ? `${activeReceiptCount.value} 条有效 · ${voidedReceiptCount.value} 条已撤回`
-    : `${activeReceiptCount.value} 条有效`
-})
 
 // 每次打开清一次草稿：上一次没点确认的数量不带到这一次。
 watch(
@@ -96,15 +94,35 @@ function formatNumber(value) {
   return amount.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 }
 
+// 缸只在下单环节换算，订单记录里不再显示，只留分单人员
 function orderMetaText(order) {
-  return [order.vatCount ? `${order.vatCount} 缸` : '', order.assignee, formatMoment(order.submittedAt), order.note]
+  return String(order.assignee ?? '').trim()
+}
+
+// 下单时间与备注不占行内位置，鼠标停在染厂那一行能看到
+function orderMetaTitle(order) {
+  return [orderMetaText(order), formatMoment(order.submittedAt), order.note]
     .map((part) => String(part ?? '').trim())
     .filter(Boolean)
     .join(' · ')
 }
 
+// 每张单的三个次要操作都收进 ⋯：行内只留「登记到货」这一个主动作
+function onCardCommand(order, command) {
+  if (command === 'edit') handleEditQuantity(order)
+  else if (command === 'drop') handleRemovePending(order)
+  else if (command === 'cancel') handleCancel(order)
+}
+
 function receivedOf(order) {
   return Number(order.receivedQty) || 0
+}
+
+// 每张单自己的到货记录（时间倒序），挂在它右侧那一格
+function receiptsOf(order) {
+  return (order.receipts ?? [])
+    .map((receipt) => ({ ...receipt, order }))
+    .sort((first, second) => String(second.at).localeCompare(String(first.at)))
 }
 
 // 待收 = 下单 − 已到货，纯派生值：界面上只读，改单 / 到货 / 撤回会自己带着变。
@@ -112,8 +130,26 @@ function pendingOf(order) {
   return Math.max(0, (Number(order.quantity) || 0) - receivedOf(order))
 }
 
-function orderPercent(order) {
-  return percentOf(receivedOf(order), order.quantity)
+// 待收归零 = 这单已经收齐：登记区整块不出现，只留结论
+function isSettled(order) {
+  return pendingOf(order) <= 0
+}
+
+// 右下角的到货小计：有效几条、撤回几条（一条都没有时留空，别和下面的空态重复）
+function receiptCountText(order) {
+  const list = order.receipts ?? []
+  const active = list.filter((receipt) => !receipt.voidedAt).length
+  const voided = list.length - active
+  const parts = []
+  if (active) parts.push(`${active} 次到货`)
+  if (voided) parts.push(`${voided} 条已撤回`)
+  return parts.join(' · ')
+}
+
+// 点「待收」= 整单到齐：把剩余量填进本次到货，省一次手输
+function fillPending(order) {
+  const pending = pendingOf(order)
+  if (pending > 0) receiveDrafts[order.id] = pending
 }
 
 function draftAmount(order) {
@@ -157,6 +193,21 @@ async function handleVoidReceipt(receipt) {
   ElMessage.success(`已撤回 ${formatNumber(receipt.qty)} 公斤，数量回到待收`)
 }
 
+// 恢复：撤回也能撤回（撤错了再放回），数量重新计入已到货、待收相应减少。
+function handleRestoreReceipt(receipt) {
+  const amount = Number(receipt.qty) || 0
+  const received = receivedOf(receipt.order)
+  const quantity = Number(receipt.order.quantity) || 0
+  if (received + amount > quantity + 1e-9) {
+    ElMessage.warning(
+      `这张单下单量已改为 ${formatNumber(quantity)} 公斤、已到货 ${formatNumber(received)} 公斤，恢复这条 ${formatNumber(amount)} 公斤会超过下单量`,
+    )
+    return
+  }
+  if (!purchaseStore.restoreReceipt(receipt.order.id, receipt.id)) return
+  ElMessage.success(`已恢复到货 ${formatNumber(amount)} 公斤，待收已相应减少`)
+}
+
 async function handleDeleteReceipt(receipt) {
   try {
     await ElMessageBox.confirm(
@@ -176,6 +227,11 @@ async function handleRemovePending(order) {
   const pending = pendingOf(order)
   const received = receivedOf(order)
   if (!(pending > 0)) return
+  // 一分货都没到：删除待收等价于整张单作废，直接走撤销（否则会留下一条 0 公斤的空单）
+  if (!(received > 0)) {
+    await handleCancel(order)
+    return
+  }
   try {
     await ElMessageBox.confirm(
       `删除这张分订单剩余的待收 ${formatNumber(pending)} 公斤？已到货的 ${formatNumber(received)} 公斤保留，下单量会改成 ${formatNumber(received)} 公斤。`,
@@ -246,7 +302,7 @@ async function handleCancel(order) {
   <ElDialog
     v-model="visible"
     class="order-panel-dialog"
-    width="min(880px, calc(100vw - 32px))"
+    width="min(920px, calc(100vw - 32px))"
     append-to-body
     align-center
     :show-close="false"
@@ -256,9 +312,6 @@ async function handleCancel(order) {
         <h2 class="order-head__title" :title="productText">{{ productText }}</h2>
         <span v-if="subtitleText" class="order-head__color">{{ subtitleText }}</span>
         <span class="order-head__spacer" />
-        <span class="order-head__count">
-          {{ summary.count ? `${summary.count} 张分订单` : '无分订单' }}
-        </span>
         <button type="button" class="order-head__close" aria-label="关闭" @click="visible = false">
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
@@ -268,146 +321,196 @@ async function handleCancel(order) {
     </template>
 
     <div v-if="props.item" class="order-panel">
-      <!-- 一条进度带替代四张卡：订了多少、到了多少、还差多少，一眼读完 -->
-      <div class="order-sum">
-        <div class="order-sum__item">
-          <span>累积下单</span>
-          <b>{{ formatNumber(summary.total) }}</b>
+      <!-- 列头兼汇总：左边只讲下单 / 待收，右边只讲已到 + 进度 -->
+      <div class="order-thead">
+        <div class="order-thead__cell" title="按染厂拆单，每张单的到货记录就排在它右边">
+          <span class="order-thead__name">分订单</span>
+          <span class="order-thead__hint">
+            {{ orders.length }} 张 · 下单合计
+            <b>{{ formatNumber(summary.total) }}</b>
+            · 待收
+            <b class="is-pending">{{ formatNumber(summary.pending) }}</b>
+          </span>
         </div>
-        <div class="order-sum__item">
-          <span>已到货</span>
-          <b>{{ formatNumber(summary.received) }}</b>
+        <div
+          class="order-thead__cell order-thead__cell--right"
+          title="撤回的记录会留一行，数量退回待收"
+        >
+          <span class="order-thead__name">到货记录</span>
+          <span class="order-thead__hint">
+            已到 <b class="is-received">{{ formatNumber(summary.received) }}</b> 公斤
+          </span>
+          <span class="order-thead__track" :title="`到货进度 ${receivedPercent}%`">
+            <i :style="{ width: `${receivedPercent}%` }" />
+          </span>
+          <span class="order-thead__pct">{{ receivedPercent }}%</span>
         </div>
-        <div class="order-sum__item" :class="{ 'is-pending': summary.pending > 0 }">
-          <span>待收</span>
-          <b>{{ formatNumber(summary.pending) }}</b>
-        </div>
-        <span class="order-sum__track" :title="`到货进度 ${receivedPercent}%`">
-          <i :style="{ width: `${receivedPercent}%` }" />
-        </span>
-        <span class="order-sum__pct">{{ receivedPercent }}%</span>
       </div>
 
-      <div class="order-body">
-        <section class="order-col">
-          <div class="order-col__head">
-            <span class="order-col__title">分订单</span>
-            <span class="order-col__hint">{{ columnHint }}</span>
+      <div class="order-pairs">
+          <div v-if="!orders.length" class="ord-empty">
+            <b>这个 SKU 还没有分订单</b>
+            <span>分订单被撤销后，需要回需求表重新下单</span>
           </div>
-          <div class="order-list">
-            <div v-if="!orders.length" class="ord-empty">
-              <b>这个 SKU 还没有分订单</b>
-              <span>分订单被撤销后，需要回主面板重新下单</span>
-            </div>
-            <article v-for="order in orders" :key="order.id" class="ord-card">
-              <div class="ord-card__top">
-                <span class="ord-card__factory">{{ order.factoryName || '未指定染厂' }}</span>
-                <span class="ord-card__meta">{{ orderMetaText(order) }}</span>
+
+          <div
+            v-for="(order, index) in sortedOrders"
+            :key="order.id"
+            class="ord-pair"
+            :class="{ 'is-settled': isSettled(order) }"
+          >
+            <div class="ord-pair__left">
+              <div class="ord-row__top">
+                <span class="ord-row__idx">{{ index + 1 }}</span>
+                <span class="ord-row__factory" :title="orderMetaTitle(order)">
+                  {{ order.factoryName || '未指定染厂' }}
+                </span>
+                <span v-if="order.assignee" class="ord-row__person">{{ order.assignee }}</span>
+                <span
+                  class="ord-row__time"
+                  :title="`${formatFullMoment(order.submittedAt)} 下单`"
+                >{{ formatMoment(order.submittedAt) }}</span>
               </div>
 
-              <div class="ord-card__nums">
-                <span class="ord-num"><em>下单</em>{{ formatNumber(order.quantity) }}</span>
-                <span class="ord-num"><em>已到货</em>{{ formatNumber(receivedOf(order)) }}</span>
-                <span class="ord-num" :class="{ 'is-pending': pendingOf(order) > 0 }">
-                  <em>待收</em>{{ formatNumber(pendingOf(order)) }}
-                </span>
-                <span class="ord-card__track" :title="`已到 ${orderPercent(order)}%`">
-                  <i :style="{ width: `${orderPercent(order)}%` }" />
-                </span>
-              </div>
+              <div class="ord-row__bottom">
+                <div class="ord-row__nums">
+                  <span class="ord-num"><em>下单</em><b>{{ formatNumber(order.quantity) }}</b></span>
+                  <span v-if="isSettled(order)" class="ord-chip">已收齐</span>
+                  <button
+                    v-else
+                    type="button"
+                    class="ord-num ord-num--pending"
+                    :title="`点一下 → 本次到货自动填 ${formatNumber(pendingOf(order))}（剩余全部到齐）`"
+                    @click="fillPending(order)"
+                  >
+                    <em>待收</em><b>{{ formatNumber(pendingOf(order)) }}</b>
+                  </button>
+                </div>
 
-              <div class="ord-card__act">
-                <label class="ord-recv">
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    :value="receiveDrafts[order.id] ?? ''"
-                    placeholder="0"
+                <div class="ord-row__acts">
+                  <label v-if="!isSettled(order)" class="ord-recv">
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      :value="receiveDrafts[order.id] ?? ''"
+                      placeholder="0"
+                      :disabled="pendingOf(order) <= 0"
+                      :aria-label="`${order.factoryName || '分订单'} 本次到货公斤数`"
+                      :title="pendingOf(order) > 0 ? `最多 ${formatNumber(pendingOf(order))} 公斤` : '已收齐'"
+                      @input="onDraftInput(order, $event)"
+                      @keydown.enter.prevent="confirmReceive(order)"
+                    />
+                    <span>公斤</span>
+                  </label>
+                  <ElButton
+                    v-if="!isSettled(order)"
+                    class="order-card__confirm"
+                    size="small"
+                    type="primary"
                     :disabled="pendingOf(order) <= 0"
-                    :aria-label="`${order.factoryName || '分订单'} 本次到货公斤数`"
-                    @input="onDraftInput(order, $event)"
-                    @keydown.enter.prevent="confirmReceive(order)"
-                  />
-                  <span>公斤</span>
-                </label>
-                <ElButton
-                  class="order-card__confirm"
-                  size="small"
-                  type="primary"
-                  :disabled="pendingOf(order) <= 0"
-                  @click="confirmReceive(order)"
+                    @click="confirmReceive(order)"
+                  >
+                    登记到货
+                  </ElButton>
+                  <ElDropdown
+                    class="ord-row__more"
+                    trigger="click"
+                    placement="bottom-end"
+                    popper-class="ord-dropdown"
+                    @command="(command) => onCardCommand(order, command)"
+                  >
+                    <button type="button" class="ord-more" aria-label="更多操作">
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+                        <circle cx="3.2" cy="8" r="1.2" />
+                        <circle cx="8" cy="8" r="1.2" />
+                        <circle cx="12.8" cy="8" r="1.2" />
+                      </svg>
+                    </button>
+                    <template #dropdown>
+                      <ElDropdownMenu>
+                        <ElDropdownItem command="edit">
+                          <span class="ord-dropdown__icon">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                              <path d="M10.6 2.7a1.55 1.55 0 0 1 2.2 2.2L5.2 12.5l-2.9.6.6-2.9 7.7-7.5z" />
+                              <path d="M9.6 3.7l2.2 2.2" />
+                            </svg>
+                          </span>
+                          改单
+                        </ElDropdownItem>
+                        <ElDropdownItem command="drop" :disabled="pendingOf(order) <= 0">
+                          <span class="ord-dropdown__icon">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                              <circle cx="8" cy="8" r="5.5" />
+                              <path d="M5.8 8h4.4" />
+                            </svg>
+                          </span>
+                          删除待收
+                        </ElDropdownItem>
+                        <ElDropdownItem command="cancel" divided class="is-danger">
+                          <span class="ord-dropdown__icon">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                              <circle cx="8" cy="8" r="5.5" />
+                              <path d="M6.3 6.3l3.4 3.4M9.7 6.3l-3.4 3.4" />
+                            </svg>
+                          </span>
+                          撤销整单
+                        </ElDropdownItem>
+                      </ElDropdownMenu>
+                    </template>
+                  </ElDropdown>
+                </div>
+              </div>
+            </div>
+
+            <div class="ord-pair__right">
+              <div class="ord-pair__list">
+                <!-- 这一单的到货小计：和它下面的明细同列，跟列头是「小计 → 合计」的关系 -->
+                <div class="rcpt-head">
+                  <em>{{ receiptCountText(order) }}</em>
+                  <span>已到</span>
+                  <b>{{ formatNumber(receivedOf(order)) }} 公斤</b>
+                </div>
+                <div
+                  v-for="receipt in receiptsOf(order)"
+                  :key="receipt.id"
+                  class="rcpt"
+                  :class="{ 'is-voided': receipt.voidedAt }"
                 >
-                  登记到货
-                </ElButton>
-                <span class="ord-card__max">
-                  {{ pendingOf(order) > 0 ? `最多 ${formatNumber(pendingOf(order))}` : '已收齐' }}
-                </span>
-                <span class="ord-card__links">
-                  <button type="button" @click="handleEditQuantity(order)">改单</button>
-                  <button
-                    type="button"
-                    class="is-warn"
-                    :disabled="pendingOf(order) <= 0"
-                    @click="handleRemovePending(order)"
+                  <span class="rcpt__time" :title="formatFullMoment(receipt.at)">
+                    {{ formatMoment(receipt.at) }}
+                  </span>
+                  <span
+                    class="rcpt__qty"
+                    :title="receipt.voidedAt ? `已撤回 ${formatFullMoment(receipt.voidedAt)}` : ''"
                   >
-                    删除待收
-                  </button>
-                  <button type="button" class="is-danger" @click="handleCancel(order)">
-                    撤销整单
-                  </button>
-                </span>
-              </div>
-            </article>
-          </div>
-        </section>
-
-        <section class="order-col order-col--receipts">
-          <div class="order-col__head">
-            <span class="order-col__title">到货记录</span>
-            <span class="order-col__hint">{{ receiptHint }}</span>
-          </div>
-          <div class="order-list order-list--receipts">
-            <div v-if="!receipts.length" class="ord-empty">
-              <b>还没有到货记录</b>
-              <span>在左侧填「本次到货」并登记，这里会按时间倒序列出</span>
-            </div>
-            <div
-              v-for="receipt in receipts"
-              :key="receipt.id"
-              class="rcpt"
-              :class="{ 'is-voided': receipt.voidedAt }"
-            >
-              <div class="rcpt__top">
-                <span class="rcpt__time" :title="formatFullMoment(receipt.at)">
-                  {{ formatMoment(receipt.at) }}
-                </span>
-                <span class="rcpt__qty">+{{ formatNumber(receipt.qty) }} 公斤</span>
-                <span class="rcpt__acts">
-                  <button
-                    v-if="!receipt.voidedAt"
-                    type="button"
-                    @click="handleVoidReceipt(receipt)"
-                  >
-                    撤回
-                  </button>
-                  <button
-                    type="button"
-                    class="is-danger"
-                    @click="handleDeleteReceipt(receipt)"
-                  >
-                    删除
-                  </button>
-                </span>
-              </div>
-              <div class="rcpt__sub">
-                {{ receipt.order.factoryName || '未指定染厂' }}
-                <template v-if="receipt.order.vatCount"> · {{ receipt.order.vatCount }} 缸</template>
-                <template v-if="receipt.voidedAt"> · 已撤回 {{ formatMoment(receipt.voidedAt) }}</template>
+                    +{{ formatNumber(receipt.qty) }} 公斤
+                  </span>
+                  <span class="rcpt__acts">
+                    <button
+                      v-if="!receipt.voidedAt"
+                      type="button"
+                      @click="handleVoidReceipt(receipt)"
+                    >
+                      撤回
+                    </button>
+                    <button
+                      v-else
+                      type="button"
+                      class="is-restore"
+                      @click="handleRestoreReceipt(receipt)"
+                    >
+                      恢复
+                    </button>
+                    <button type="button" class="is-danger" @click="handleDeleteReceipt(receipt)">
+                      删除
+                    </button>
+                  </span>
+                </div>
+                <span v-if="!receiptsOf(order).length" class="rcpt-none">还没有到货</span>
               </div>
             </div>
           </div>
-        </section>
       </div>
     </div>
   </ElDialog>
@@ -425,9 +528,11 @@ async function handleCancel(order) {
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
   --el-fill-color-blank: #fff;
-  width: min(880px, calc(100vw - 32px));
-  min-height: 300px;
-  max-height: min(560px, calc(100vh - 40px));
+  width: min(920px, calc(100vw - 32px));
+  /* 高度跟着内容走：分订单少时不留空白，内容多到 3/4 视窗高才在中间区域出滚动条 */
+  height: auto;
+  max-height: 75vh;
+  min-height: 0;
   padding: 0;
   border: 1px solid var(--industrial-grid);
   border-radius: 3px;
@@ -465,7 +570,10 @@ async function handleCancel(order) {
 
 /* ---------- 标题条 ---------- */
 .order-head {
+  /* 头部是 flex 容器，标题条必须撑满，否则 margin-left: auto 的占位撑不开，关闭按钮会贴在标签后面 */
   display: flex;
+  flex: 1 1 auto;
+  width: 100%;
   align-items: center;
   gap: 8px;
   min-height: 42px;
@@ -496,12 +604,6 @@ async function handleCancel(order) {
   margin-left: auto;
 }
 
-.order-head__count {
-  color: var(--industrial-muted);
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-
 .order-head__close {
   display: inline-flex;
   flex: 0 0 auto;
@@ -529,52 +631,73 @@ async function handleCancel(order) {
   color: var(--industrial-text);
 }
 
-/* ---------- 汇总：一条进度带 ---------- */
-.order-sum {
-  display: flex;
+/* ---------- 列头兼汇总：左列只讲下单 / 待收，右列只讲已到 + 进度 ---------- */
+.order-thead {
+  display: grid;
   flex: 0 0 auto;
-  align-items: center;
-  gap: 30px;
-  padding: 10px 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border-bottom: 1px solid var(--industrial-grid);
   background: #fff;
 }
 
-.order-sum__item {
+.order-thead__cell {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.order-thead__cell--right {
+  border-left: 1px solid var(--industrial-grid);
+}
+
+.order-thead__name {
+  flex: 0 0 auto;
   white-space: nowrap;
 }
 
-.order-sum__item span {
+.order-thead__hint {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
   color: var(--industrial-muted);
-  font-size: 11px;
+  font-size: 10.5px;
+  font-weight: 400;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.order-sum__item b {
+.order-thead__hint b {
   color: var(--industrial-text);
-  font-size: 15px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  line-height: 1.25;
 }
 
-.order-sum__item.is-pending b {
+.order-thead__hint b.is-pending {
   color: var(--industrial-danger);
 }
 
-/* 进度条和三个数字同处一行：通栏贴在底边会看成一条分隔线 */
-.order-sum__track {
+.order-thead__hint b.is-received {
+  color: var(--industrial-normal);
+}
+
+/* 进度条吃掉列头剩下的宽度，右端紧跟百分比 */
+.order-thead__track {
   flex: 1 1 auto;
-  min-width: 80px;
-  height: 6px;
+  min-width: 40px;
+  height: 5px;
   overflow: hidden;
   border-radius: 999px;
   background: #dde5e9;
 }
 
-.order-sum__track i {
+.order-thead__track i {
   display: block;
   min-width: 2px;
   height: 100%;
@@ -583,159 +706,200 @@ async function handleCancel(order) {
   transition: width 0.18s ease;
 }
 
-.order-sum__pct {
+.order-thead__pct {
   flex: 0 0 auto;
-  margin-left: -20px;
   color: var(--industrial-muted);
-  font-size: 11.5px;
+  font-size: 11px;
+  font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- 两栏 ---------- */
-.order-body {
+.order-pairs {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.ord-pair {
   display: grid;
-  flex: 1 1 auto;
-  overflow: hidden;
-  grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr);
-  min-height: 0;
-}
-
-.order-col {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.order-col--receipts {
-  border-left: 1px solid var(--industrial-grid);
-}
-
-.order-col__head {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-  height: 30px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--industrial-grid-light);
-  background: #eef2f4;
-}
-
-.order-col__title {
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.order-col__hint {
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
-.order-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: min(420px, calc(100vh - 236px));
-  padding: 10px 12px 14px;
-  overflow: auto;
-}
-
-/* ---------- 分订单卡：三行读完 ---------- */
-.ord-card {
-  padding: 9px 11px 8px;
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 3px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  border-bottom: 1px solid var(--line-soft);
   background: #fff;
 }
 
-.ord-card + .ord-card {
-  margin-top: 8px;
+.ord-pair:last-child {
+  border-bottom: 0;
 }
 
-.ord-card:hover {
-  border-color: var(--industrial-grid);
+/* 已收齐的整行淡下去：这一单没有待办了 */
+.ord-pair.is-settled {
+  background: #fbfcfc;
 }
 
-.ord-card__top {
+.ord-pair:hover .ord-pair__left {
+  background: #f8fafb;
+}
+
+.ord-pair__left {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px 9px;
+}
+
+/* 右格跟着整行走，记录再多也不在格内滚动（外层统一滚） */
+.ord-pair__right {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 8px 10px 9px;
+  border-left: 1px solid var(--industrial-grid);
+}
+
+.ord-pair__list {
+  margin: auto 0;
+}
+
+/* ---------- 分订单行：上面是谁的单，下面是要办的事 ---------- */
+.ord-row__top {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
 }
 
-.ord-card__factory {
+/* 小序号，和列头的「N 张」对得上 */
+.ord-row__idx {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 2px;
+  background: var(--industrial-page);
+  color: var(--industrial-muted);
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ord-row__factory {
   overflow: hidden;
   color: var(--industrial-text);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.ord-card__meta {
-  margin-left: auto;
+.ord-row__person {
+  flex: 0 0 auto;
   color: var(--industrial-muted);
-  font-size: 11px;
+  font-size: 10.5px;
   white-space: nowrap;
 }
 
-.ord-card__nums {
+/* 缸数不显示，这里直接给下单时间 */
+.ord-row__time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ord-row__bottom {
   display: flex;
-  align-items: center;
-  gap: 18px;
-  margin-top: 7px;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 下单 / 待收 靠右，和下面的登记到货共用一条右边界 */
+.ord-row__nums {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 12px;
+  min-height: 17px;
 }
 
 .ord-num {
   display: inline-flex;
   align-items: baseline;
-  gap: 5px;
+  gap: 4px;
   color: var(--industrial-text);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .ord-num em {
   color: var(--industrial-muted);
-  font-size: 11px;
+  font-size: 10.5px;
   font-style: normal;
   font-weight: 400;
 }
 
-.ord-num.is-pending {
+.ord-num b {
+  font-weight: 600;
+}
+
+/* 收齐的单没有登记区了，把「下单 + 已收齐」放大占住这块位置 */
+.ord-pair.is-settled .ord-num em {
+  font-size: 11px;
+}
+
+.ord-pair.is-settled .ord-num b {
+  font-size: 15px;
+}
+
+/* 点一下「待收」= 剩余全部到齐，少一次手输 */
+.ord-num--pending {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.ord-num--pending b {
   color: var(--industrial-danger);
 }
 
-.ord-card__track {
-  flex: 1 1 auto;
-  min-width: 48px;
-  height: 5px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: #dfe7ea;
+.ord-num--pending:hover b {
+  text-decoration: underline dotted;
 }
 
-.ord-card__track i {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--industrial-normal);
+.ord-chip {
+  padding: 2px 8px;
+  border: 1px solid rgba(63, 127, 79, 0.35);
+  border-radius: 3px;
+  background: rgba(63, 127, 79, 0.08);
+  color: var(--industrial-normal);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-/* 操作行：输入 + 主按钮靠左，次要操作靠右，用虚线和大字号差把两拨分开 */
-.ord-card__act {
+.ord-row__acts {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--industrial-grid-light);
+}
+
+/* ⋯（改单 / 删除待收 / 撤销整单）固定在卡片左下角，登记到货靠右 */
+.ord-row__more {
+  order: -1;
+  margin-right: auto;
 }
 
 .ord-recv {
   display: inline-flex;
   align-items: center;
-  height: 28px;
+  height: 25px;
   overflow: hidden;
   border: 1px solid var(--industrial-grid);
   border-radius: 3px;
@@ -747,9 +911,9 @@ async function handleCancel(order) {
 }
 
 .ord-recv input {
-  width: 62px;
+  width: 50px;
   height: 100%;
-  padding: 0 6px;
+  padding: 0 4px;
   border: 0;
   background: none;
   color: var(--industrial-text);
@@ -765,9 +929,9 @@ async function handleCancel(order) {
 }
 
 .ord-recv span {
-  padding: 0 6px 0 3px;
+  padding: 0 5px 0 2px;
   color: var(--industrial-muted);
-  font-size: 11px;
+  font-size: 10.5px;
 }
 
 .order-card__confirm {
@@ -775,88 +939,149 @@ async function handleCancel(order) {
   --el-button-border-color: var(--industrial-primary);
   --el-button-hover-bg-color: var(--industrial-primary-hover);
   --el-button-hover-border-color: var(--industrial-primary-hover);
-  height: 24px;
-  padding: 0 8px;
+  height: 25px;
+  padding: 0 9px;
   font-size: 12px;
 }
 
-.ord-card__max {
-  color: var(--industrial-muted);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
-
-.ord-card__links {
-  display: flex;
-  gap: 10px;
-  margin-left: auto;
-}
-
-.ord-card__links button,
-.rcpt__acts button {
+/* 三个次要操作收进 ⋯：行内只留一个主动作 */
+.ord-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 0;
+  border-radius: 3px;
   background: none;
   color: var(--industrial-muted);
-  font: inherit;
-  font-size: 11.5px;
-  white-space: nowrap;
   cursor: pointer;
 }
 
-.ord-card__links button:hover,
-.rcpt__acts button:hover {
+.ord-more:hover {
+  background: #e7edf0;
+  color: var(--industrial-text);
+}
+
+/* 下拉浮层被 teleport 到 body，只能写全局选择器 */
+:global(.el-popper.ord-dropdown.el-dropdown__popper) {
+  min-width: 142px;
+  padding: 4px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 4px;
+  background: #fff;
+  box-shadow:
+    0 1px 3px rgba(47, 59, 67, 0.08),
+    0 8px 22px rgba(47, 59, 67, 0.16);
+}
+
+:global(.ord-dropdown .el-dropdown-menu) {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  list-style: none;
+}
+
+:global(.ord-dropdown .el-dropdown-menu__item) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 29px;
+  padding: 0 8px;
+  border-radius: 3px;
+  color: var(--industrial-text);
+  font-size: 12px;
+  line-height: 29px;
+}
+
+:global(.ord-dropdown .el-dropdown-menu__item:not(.is-disabled):hover) {
+  background: #eaf1f4;
   color: var(--industrial-primary);
 }
 
-.ord-card__links button.is-warn:hover {
-  color: var(--industrial-replenish);
+:global(.ord-dropdown .el-dropdown-menu__item:not(.is-disabled):hover .ord-dropdown__icon) {
+  color: var(--industrial-primary);
 }
 
-.ord-card__links button.is-danger {
-  color: rgba(184, 79, 72, 0.72);
+:global(.ord-dropdown .el-dropdown-menu__item.is-disabled) {
+  color: #b3bdc3;
 }
 
-.ord-card__links button.is-danger:hover,
-.rcpt__acts button.is-danger:hover {
+:global(.ord-dropdown .el-dropdown-menu__item.is-danger) {
   color: var(--industrial-danger);
 }
 
-.ord-card__links button:disabled {
-  color: #c2cbd0;
-  cursor: default;
+:global(.ord-dropdown .el-dropdown-menu__item.is-danger .ord-dropdown__icon) {
+  color: var(--industrial-danger);
 }
 
-/* ---------- 到货记录 ---------- */
-.order-list--receipts {
-  padding: 4px 12px 14px;
+:global(.ord-dropdown .el-dropdown-menu__item.is-danger:not(.is-disabled):hover) {
+  background: #fbeeed;
+  color: var(--industrial-danger);
+}
+
+:global(.ord-dropdown .el-dropdown-menu__item--divided) {
+  margin-top: 4px;
+  border-top: 1px solid var(--industrial-grid-light);
+}
+
+:global(.ord-dropdown .el-dropdown-menu__item--divided::before) {
+  display: none;
+}
+
+:global(.ord-dropdown__icon) {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--industrial-muted);
+}
+
+:global(.ord-dropdown__icon svg) {
+  width: 13px;
+  height: 13px;
+}
+
+/* ---------- 到货记录（挂在对应分订单右侧） ---------- */
+/* 这一单的到货小计：和明细同列，跟列头是「小计 → 合计」的关系 */
+.rcpt-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 5px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--industrial-grid-light);
+}
+
+.rcpt-head span {
+  margin-left: auto;
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+}
+
+.rcpt-head b {
+  color: var(--industrial-normal);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rcpt-head em {
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+  font-style: normal;
+  white-space: nowrap;
 }
 
 .rcpt {
-  position: relative;
-  padding: 8px 0 8px 15px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.order-list--receipts .rcpt:last-child {
-  border-bottom: 0;
-}
-
-.rcpt::before {
-  content: '';
-  position: absolute;
-  top: 14px;
-  left: 2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--industrial-normal);
-}
-
-.rcpt__top {
-  display: flex;
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 12px;
+  gap: 8px;
+  padding: 2.5px 0;
 }
 
 .rcpt__time {
@@ -868,31 +1093,73 @@ async function handleCancel(order) {
 
 .rcpt__qty {
   color: #3f7d5a;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  text-align: right;
 }
 
+/* 平时只留「时间 + 数量」，鼠标停到这一对、或键盘聚焦时才浮现撤回 / 删除 */
 .rcpt__acts {
   display: flex;
-  gap: 8px;
-  margin-left: auto;
+  flex: 0 0 auto;
+  gap: 7px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
 
-.rcpt__sub {
-  margin-top: 3px;
+.ord-pair:hover .rcpt__acts,
+.rcpt:focus-within .rcpt__acts {
+  opacity: 1;
+}
+
+/* 触屏没有 hover，直接常显 */
+@media (hover: none) {
+  .rcpt__acts {
+    opacity: 1;
+  }
+}
+
+.rcpt__acts button {
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--industrial-muted);
+  font: inherit;
   font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.rcpt.is-voided::before {
-  background: #c9d2d7;
+.rcpt__acts button:hover {
+  color: var(--industrial-primary);
+}
+
+.rcpt__acts button.is-danger:hover {
+  color: var(--industrial-danger);
+}
+
+/* 恢复 = 撤回的反向操作，用绿色区分，避免和「删除」一起被误点 */
+.rcpt__acts button.is-restore {
+  color: #3f7d5a;
+}
+
+.rcpt__acts button.is-restore:hover {
+  color: #2f6248;
 }
 
 .rcpt.is-voided .rcpt__qty {
   color: #a9b4bb;
   text-decoration: line-through;
+}
+
+/* 这张单还没到过货 */
+.rcpt-none {
+  display: block;
+  padding: 5px 0;
+  color: #b3bcc2;
+  font-size: 11px;
 }
 
 /* ---------- 空态 ---------- */
@@ -903,7 +1170,7 @@ async function handleCancel(order) {
   justify-content: center;
   gap: 3px;
   height: 100%;
-  min-height: 180px;
+  min-height: 150px;
   padding: 24px 12px;
   color: var(--industrial-muted);
   font-size: 12px;

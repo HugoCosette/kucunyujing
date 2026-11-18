@@ -62,14 +62,6 @@ function formatCell(row, column) {
   return formatValue(row.cells?.[column.index], column)
 }
 
-// 搜索索引按展示文本生成，比例列也能用「82.8%」这类写法搜到。
-function buildSearchText(cells) {
-  return cells
-    .map((value, index) => formatValue(value, tableColumns[index]))
-    .join('\u0000')
-    .toLocaleLowerCase('zh-CN')
-}
-
 function buildSalesCells(item, sales) {
   const cells = [
     item.product,
@@ -124,8 +116,8 @@ function rebuildRows() {
         // 保留原始 SKU 行，颜色单元格的详情弹窗按它现算模式与系数。
         item,
         cells,
-        // 预存小写索引，搜索时只做 includes。
-        searchText: buildSearchText(cells),
+        searchProduct: toCellValue(item.product).toLocaleLowerCase('zh-CN'),
+        searchColor: toCellValue(item.color).toLocaleLowerCase('zh-CN'),
       }
     })
 }
@@ -146,9 +138,11 @@ const matchedSkuCount = computed(() => {
   return matched
 })
 
-// 搜索框输入防抖，避免逐键全量过滤。
-const searchKeyword = ref('')
-const appliedKeyword = ref('')
+// 品名 / 颜色两个筛选框各自防抖，避免逐键全量过滤。
+const productFilter = ref('')
+const colorFilter = ref('')
+const appliedProductFilter = ref('')
+const appliedColorFilter = ref('')
 // 品名父行默认全部展开，只记录被收起（折叠）的品名。
 const collapsedProductIds = ref(new Set())
 // SKU 详情弹窗挂在页面层级，行内只放触发按钮：弹窗放在虚拟行里会随行卸载，
@@ -160,27 +154,33 @@ function openSkuDetail(item) {
   skuDetailItem.value = item
   skuDetailVisible.value = true
 }
-let searchDebounceTimer = 0
+let filterDebounceTimer = 0
 
-function applySearch() {
-  searchDebounceTimer = 0
-  appliedKeyword.value = searchKeyword.value.trim().toLocaleLowerCase('zh-CN')
+function applyFilters() {
+  filterDebounceTimer = 0
+  appliedProductFilter.value = productFilter.value.trim().toLocaleLowerCase('zh-CN')
+  appliedColorFilter.value = colorFilter.value.trim().toLocaleLowerCase('zh-CN')
 }
 
-watch(searchKeyword, () => {
-  if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
-  if (!searchKeyword.value.trim()) {
-    applySearch()
+watch([productFilter, colorFilter], () => {
+  if (filterDebounceTimer) clearTimeout(filterDebounceTimer)
+  if (!productFilter.value.trim() && !colorFilter.value.trim()) {
+    applyFilters()
     return
   }
-  searchDebounceTimer = window.setTimeout(applySearch, 250)
+  filterDebounceTimer = window.setTimeout(applyFilters, 250)
 })
 
 const filteredLeafRows = computed(() => {
-  const keyword = appliedKeyword.value
+  const product = appliedProductFilter.value
+  const color = appliedColorFilter.value
   const rows = tableRows.value
-  if (!keyword) return rows
-  return rows.filter((row) => row.searchText.includes(keyword))
+  if (!product && !color) return rows
+  return rows.filter(
+    (row) =>
+      (!product || row.searchProduct.includes(product)) &&
+      (!color || row.searchColor.includes(color)),
+  )
 })
 
 // —— 虚拟滚动：只渲染视口内的行，DOM 节点数与数据量解耦 ——
@@ -250,7 +250,7 @@ function handleTableScroll() {
 }
 
 // 筛选后回到顶部，避免停留在旧滚动位置看到空白。
-watch(appliedKeyword, () => {
+watch([appliedProductFilter, appliedColorFilter], () => {
   tableScrollTop.value = 0
   if (tableScrollRef.value) tableScrollRef.value.scrollTop = 0
 })
@@ -305,7 +305,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (tableScrollFrame) cancelAnimationFrame(tableScrollFrame)
-  if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+  if (filterDebounceTimer) clearTimeout(filterDebounceTimer)
   tableResizeObserver?.disconnect()
 })
 </script>
@@ -327,11 +327,19 @@ onBeforeUnmount(() => {
       </div>
       <div class="page-toolbar" role="search">
         <ElInput
-          v-model="searchKeyword"
-          class="sales-search"
+          v-model="productFilter"
+          class="sales-filter"
           size="small"
-          placeholder="搜索全部列"
-          aria-label="搜索全部列"
+          placeholder="品名"
+          aria-label="按品名筛选"
+          clearable
+        />
+        <ElInput
+          v-model="colorFilter"
+          class="sales-filter"
+          size="small"
+          placeholder="颜色"
+          aria-label="按颜色筛选"
           clearable
         />
         <span class="toolbar__sep"></span>
@@ -347,7 +355,7 @@ onBeforeUnmount(() => {
           }} · 当前匹配 {{ matchedSkuCount.toLocaleString('zh-CN') }} 个SKU；{{ metricSourceText }}
         </span>
         <span v-else class="sales-hint">
-          未导入销售表：请在主面板用「导入分表」清洗后导入，动销指标与 1-12 月数据都来自销售表
+          未导入销售表：请在需求表用「导入分表」清洗后导入，动销指标与 1-12 月数据都来自销售表
         </span>
       </div>
     </div>
@@ -447,7 +455,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="tableVirtualRows.total === 0" class="sales-vtable__empty">
-          {{ appliedKeyword ? '没有匹配的数据' : '暂无数据，请先在主面板用「导入分表」导入' }}
+          {{ productFilter || colorFilter ? '没有匹配的数据' : '暂无数据，请先在需求表用「导入分表」导入' }}
         </div>
       </div>
     </div>
@@ -480,8 +488,8 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-.sales-search {
-  width: 200px;
+.sales-filter {
+  width: 150px;
 }
 
 .page-toolbar :deep(.el-input__wrapper) {

@@ -327,7 +327,7 @@ function metricBadge(mode) {
 }
 
 function metricTitle(mode) {
-  if (!mode?.participates) return '该模式不参与计算，只在主面板「模式」列标注'
+  if (!mode?.participates) return '该模式不参与计算，只在需求表「模式」列标注'
   const metric = MODE_METRICS[mode.metric] ?? MODE_METRICS.none
   return `${metric.hint}（单位：${metric.label}）`
 }
@@ -1026,7 +1026,7 @@ function handleProfileMenu(command) {
     <PanelNavigation />
 
     <div v-if="isStockingPanel" class="config-bar">
-      <h1 class="config-bar__title">设置</h1>
+      <h1 class="config-bar__title">{{ configLabel }}</h1>
       <span class="config-bar__domain">备货配置</span>
 
       <ElDropdown trigger="click" placement="bottom-start" @command="handleProfileMenu">
@@ -1126,7 +1126,7 @@ function handleProfileMenu(command) {
 
     <!-- 下单配置：工具条跟着分区切换，保存 / 放弃走 PurchaseSettingsPanel 暴露的方法 -->
     <div v-else-if="!isDataPanel" class="config-bar">
-      <h1 class="config-bar__title">设置</h1>
+      <h1 class="config-bar__title">{{ configLabel }}</h1>
       <span class="config-bar__domain">下单配置</span>
       <span class="state" :class="{ 'state--dirty': purchaseDirty }">
         {{ purchaseDirty ? '未保存' : '已保存' }}
@@ -1160,7 +1160,7 @@ function handleProfileMenu(command) {
 
     <!-- 数据存储：只读展示 + 备份 / 恢复，没有草稿可保存 -->
     <div v-else class="config-bar">
-      <h1 class="config-bar__title">设置</h1>
+      <h1 class="config-bar__title">{{ configLabel }}</h1>
       <span class="config-bar__domain">数据存储</span>
       <span class="state">本机 IndexedDB</span>
       <div class="config-bar__end"></div>
@@ -1380,7 +1380,7 @@ function handleProfileMenu(command) {
                   </template>
                   <div class="tbl-foot">
                     <span class="tbl-foot__hint">
-                      {{ activeMode.participates ? thresholdHint(activeMode) : '该模式只在主面板标注，不参与计算' }}
+                      {{ activeMode.participates ? thresholdHint(activeMode) : '该模式只在需求表标注，不参与计算' }}
                     </span>
                     <button type="button" class="btn btn--sm" @click="openModeDialog">编辑</button>
                   </div>
@@ -1589,7 +1589,7 @@ function handleProfileMenu(command) {
                   </tbody>
                 </table>
                 <p v-else class="manual-block__empty">
-                  还没有手动 SKU。到主面板点击颜色单元格旁的详情按钮打开 SKU 弹窗，把策略切成「手动策略」即可。
+                  还没有手动 SKU。到需求表点击颜色单元格旁的详情按钮打开 SKU 弹窗，把策略切成「手动策略」即可。
                 </p>
 
                 <div class="tbl-foot">

@@ -3959,8 +3959,8 @@ select.po-cell {
 .modal--order {
   display: flex;
   flex-direction: column;
-  width: min(880px, calc(100vw - 32px));
-  min-height: 300px;
+  width: min(680px, calc(100vw - 32px));
+  min-height: 0;
   max-height: min(560px, calc(100vh - 40px));
   overflow: hidden;
 }
@@ -3994,8 +3994,8 @@ select.po-cell {
 .order-sum {
   display: flex;
   align-items: center;
-  gap: 30px;
-  padding: 10px 14px;
+  gap: 20px;
+  padding: 9px 14px;
   border-bottom: 1px solid var(--industrial-grid);
   background: #fff;
 }
@@ -4003,7 +4003,7 @@ select.po-cell {
 .order-sum__item {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 5px;
   white-space: nowrap;
 }
 
@@ -4014,21 +4014,28 @@ select.po-cell {
 
 .order-sum__item b {
   color: var(--industrial-text);
-  font-size: 15px;
+  font-size: 14.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  line-height: 1.25;
+  line-height: 1.2;
 }
 
 .order-sum__item.is-pending b {
   color: var(--industrial-danger);
 }
 
-/* 进度条和三个数字同处一行：通栏贴在底边会看成一条分隔线 */
+/* 进度条 + 百分比包成一组，一起吃掉行里剩下的宽度 */
+.order-sum__progress {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 96px;
+}
+
 .order-sum__track {
   flex: 1 1 auto;
-  min-width: 80px;
-  height: 6px;
+  height: 5px;
   overflow: hidden;
   border-radius: 999px;
   background: #dde5e9;
@@ -4045,156 +4052,182 @@ select.po-cell {
 
 .order-sum__pct {
   flex: 0 0 auto;
-  margin-left: -20px;
   color: var(--industrial-muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- 两栏 ---------- */
+/* ---------- 配对表：左列分订单，右列它自己的到货记录 ---------- */
 .order-body {
-  display: grid;
-  flex: 1 1 auto;
-  overflow: hidden;
-  grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr);
-  min-height: 0;
-}
-
-.order-col {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
-.order-col--receipts {
-  border-left: 1px solid var(--industrial-grid);
-}
-
-.order-col__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 30px;
-  padding: 0 12px;
+/* 右列定宽 244px：到货记录一行就是「时间 + 公斤 + 两个操作」，不需要再宽 */
+.order-thead {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr) 244px;
   border-bottom: 1px solid var(--industrial-grid-light);
   background: #eef2f4;
 }
 
-.order-col__title {
-  font-size: 12px;
+.order-thead__cell {
+  display: flex;
+  align-items: center;
+  height: 27px;
+  padding: 0 10px;
+  font-size: 11.5px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
-.order-col__hint {
+.order-thead__cell--right {
+  border-left: 1px solid var(--industrial-grid);
+}
+
+/* 计数只在鼠标停到这一列头上时才出现，平时表头只留两个字 */
+.order-thead__cell em {
+  margin-left: 8px;
+  overflow: hidden;
   color: var(--industrial-muted);
   font-size: 11px;
+  font-style: normal;
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
 
-.order-list {
+.order-thead__cell:hover em {
+  opacity: 1;
+}
+
+.order-pairs {
   flex: 1 1 auto;
   min-height: 0;
-  max-height: min(420px, calc(100vh - 236px));
-  padding: 10px 12px 14px;
   overflow: auto;
 }
 
-/* ---------- 分订单卡：三行读完 ---------- */
-.ord-card {
-  padding: 9px 11px 8px;
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 3px;
-  background: #fff;
+.ord-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 244px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
-.ord-card + .ord-card {
-  margin-top: 8px;
+.ord-pair:last-child {
+  border-bottom: 0;
 }
 
-.ord-card:hover {
-  border-color: var(--industrial-grid);
+.ord-pair:hover .ord-pair__left {
+  background: #f8fafb;
 }
 
-.ord-card__top {
+.ord-pair__left {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  padding: 7px 10px 8px;
+}
+
+/* 右格高度跟着整行走；记录少时在格内垂直居中，多到放不下就在格内滚动 */
+.ord-pair__right {
+  display: flex;
+  min-width: 0;
+  max-height: 168px;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 4px 10px;
+  border-left: 1px solid var(--industrial-grid);
+}
+
+/* 上下 auto 自动留白：内容比格子矮时垂直居中，超出时退化为 0，不影响滚动 */
+.ord-pair__list {
+  margin: auto 0;
+}
+
+/* ---------- 分订单行：两行读完 ---------- */
+/* 第一行只放身份：染厂 + 缸数 / 分单人 / 下单时间，不再往右甩一个数字 */
+.ord-row__top {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
 }
 
-.ord-card__factory {
+.ord-row__factory {
   overflow: hidden;
   color: var(--industrial-text);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.ord-card__meta {
-  margin-left: auto;
+.ord-row__meta {
+  flex: 0 0 auto;
   color: var(--industrial-muted);
-  font-size: 11px;
+  font-size: 10.5px;
   white-space: nowrap;
 }
 
-.ord-card__nums {
+/* 第二行：下单 → 已到 → 待收 顺着读下来，操作组贴在行尾 */
+.ord-row__main {
   display: flex;
   align-items: center;
-  gap: 18px;
-  margin-top: 7px;
+  gap: 10px;
+  margin-top: 3px;
 }
 
 .ord-num {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: baseline;
-  gap: 5px;
+  gap: 4px;
+  min-width: 56px;
   color: var(--industrial-text);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+/* 三个标签等宽，数值起点就自然对齐成一列 */
 .ord-num em {
+  flex: 0 0 21px;
   color: var(--industrial-muted);
-  font-size: 11px;
+  font-size: 10.5px;
   font-style: normal;
   font-weight: 400;
 }
 
-.ord-num.is-pending {
+.ord-num b {
+  font-weight: 600;
+}
+
+.ord-num.is-pending b {
   color: var(--industrial-danger);
 }
 
-.ord-card__track {
-  flex: 1 1 auto;
-  min-width: 48px;
-  height: 5px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: #dfe7ea;
+.ord-num.is-done b {
+  color: var(--industrial-normal);
 }
 
-.ord-card__track i {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--industrial-normal);
-}
-
-/* 操作行：输入 + 主按钮靠左，次要操作靠右，用虚线和大字号差把两拨分开 */
-.ord-card__act {
+.ord-row__acts {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--industrial-grid-light);
+  margin-left: auto;
 }
 
 .ord-recv {
   display: inline-flex;
   align-items: center;
-  height: 28px;
+  height: 25px;
   overflow: hidden;
   border: 1px solid var(--industrial-grid);
   border-radius: 3px;
@@ -4206,9 +4239,9 @@ select.po-cell {
 }
 
 .ord-recv input {
-  width: 62px;
+  width: 50px;
   height: 100%;
-  padding: 0 6px;
+  padding: 0 4px;
   border: 0;
   background: none;
   color: var(--industrial-text);
@@ -4224,88 +4257,124 @@ select.po-cell {
 }
 
 .ord-recv span {
-  padding: 0 6px 0 3px;
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
-.ord-card__max {
+  padding: 0 5px 0 2px;
   color: var(--industrial-muted);
   font-size: 10.5px;
-  white-space: nowrap;
 }
 
-.ord-card__links {
-  display: flex;
-  gap: 10px;
-  margin-left: auto;
+.po-confirm {
+  height: 25px;
+  padding: 0 9px;
 }
 
-.ord-card__links button,
-.rcpt__acts button {
+/* 三个次要操作收进 ⋯：行内只留一个主动作 */
+.ord-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 0;
+  border-radius: 3px;
   background: none;
   color: var(--industrial-muted);
+  cursor: pointer;
+}
+
+.ord-more:hover,
+.ord-more[aria-expanded='true'] {
+  background: #e7edf0;
+  color: var(--industrial-text);
+}
+
+/* ⋯ 菜单用 fixed 定位：行容器有 overflow，绝对定位会被裁掉 */
+.ord-menu {
+  position: fixed;
+  z-index: 120; /* 要压过 .overlay 的 100 */
+  min-width: 142px;
+  padding: 4px;
+  border: 1px solid var(--industrial-grid);
+  border-radius: 4px;
+  background: #fff;
+  box-shadow:
+    0 1px 3px rgba(47, 59, 67, 0.08),
+    0 8px 22px rgba(47, 59, 67, 0.16);
+}
+
+.ord-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 29px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--industrial-text);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
+  text-align: left;
   white-space: nowrap;
   cursor: pointer;
 }
 
-.ord-card__links button:hover,
-.rcpt__acts button:hover {
+.ord-menu button svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--industrial-muted);
+}
+
+.ord-menu button:hover {
+  background: #eaf1f4;
   color: var(--industrial-primary);
 }
 
-.ord-card__links button.is-warn:hover {
-  color: var(--industrial-replenish);
+.ord-menu button:hover svg {
+  color: var(--industrial-primary);
 }
 
-.ord-card__links button.is-danger {
-  color: rgba(184, 79, 72, 0.72);
-}
-
-.ord-card__links button.is-danger:hover,
-.rcpt__acts button.is-danger:hover {
-  color: var(--industrial-danger);
-}
-
-.ord-card__links button:disabled {
-  color: #c2cbd0;
+.ord-menu button:disabled {
+  color: #b3bdc3;
   cursor: default;
 }
 
-/* ---------- 到货记录 ---------- */
-.order-list--receipts {
-  padding: 4px 12px 14px;
+.ord-menu button:disabled svg {
+  color: #c6ced3;
 }
 
+.ord-menu button:disabled:hover {
+  background: none;
+  color: #b3bdc3;
+}
+
+.ord-menu button.is-danger {
+  color: var(--industrial-danger);
+}
+
+.ord-menu button.is-danger svg {
+  color: var(--industrial-danger);
+}
+
+.ord-menu button.is-danger:hover {
+  background: #fbeeed;
+  color: var(--industrial-danger);
+}
+
+.ord-menu__divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--industrial-grid-light);
+}
+
+/* ---------- 到货记录（挂在对应分订单右侧） ---------- */
 .rcpt {
-  position: relative;
-  padding: 8px 0 8px 15px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.order-list--receipts .rcpt:last-child {
-  border-bottom: 0;
-}
-
-.rcpt::before {
-  content: '';
-  position: absolute;
-  top: 14px;
-  left: 2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--industrial-normal);
-}
-
-.rcpt__top {
   display: flex;
   align-items: baseline;
-  gap: 12px;
+  gap: 8px;
+  padding: 2.5px 0;
 }
 
 .rcpt__time {
@@ -4317,7 +4386,7 @@ select.po-cell {
 
 .rcpt__qty {
   color: #3f7d5a;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -4325,18 +4394,28 @@ select.po-cell {
 
 .rcpt__acts {
   display: flex;
-  gap: 8px;
+  flex: 0 0 auto;
+  gap: 7px;
   margin-left: auto;
 }
 
-.rcpt__sub {
-  margin-top: 3px;
+.rcpt__acts button {
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--industrial-muted);
+  font: inherit;
   font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.rcpt.is-voided::before {
-  background: #c9d2d7;
+.rcpt__acts button:hover {
+  color: var(--industrial-primary);
+}
+
+.rcpt__acts button.is-danger:hover {
+  color: var(--industrial-danger);
 }
 
 .rcpt.is-voided .rcpt__qty {
@@ -4344,11 +4423,12 @@ select.po-cell {
   text-decoration: line-through;
 }
 
-.rcpt__void {
-  margin-left: auto;
-  color: #a9b4bb;
+/* 这张单还没到过货 */
+.rcpt-none {
+  display: block;
+  padding: 5px 0;
+  color: #b3bcc2;
   font-size: 11px;
-  white-space: nowrap;
 }
 
 /* ---------- 空态 ---------- */
@@ -4359,7 +4439,7 @@ select.po-cell {
   justify-content: center;
   gap: 3px;
   height: 100%;
-  min-height: 180px;
+  min-height: 150px;
   padding: 24px 12px;
   color: var(--industrial-muted);
   font-size: 12px;

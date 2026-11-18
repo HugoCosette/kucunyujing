@@ -25,6 +25,17 @@ const router = createRouter({
       component: PurchaseOrderView,
     },
     {
+      // 采购下单的子面板：下单历史（只读流水），与下单面板共用同一个视图，靠标签页切换。
+      path: MAIN_PANEL.purchaseHistoryPath,
+      name: MAIN_PANEL.purchaseHistoryRouteName,
+      component: PurchaseOrderView,
+    },
+    {
+      // 旧 `/orders` 深链：已并入「采购下单 → 下单历史」。
+      path: MAIN_PANEL.ordersLegacyPath,
+      redirect: () => ({ path: MAIN_PANEL.purchaseHistoryPath }),
+    },
+    {
       // 旧「下单设置」入口：并入 /config 的「下单配置」分组，保留深链兼容并自动落到缸规则。
       path: MAIN_PANEL.purchaseSettingsPath,
       redirect: () => ({ path: MAIN_PANEL.configPath, query: { panel: 'vat' } }),

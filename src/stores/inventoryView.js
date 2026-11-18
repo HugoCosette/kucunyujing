@@ -11,6 +11,8 @@ function createInventoryViewState() {
     colorFilter: ref(''),
     selectedWarningTones: ref([]),
     selectedModeLabels: ref([]),
+    // 只看有备货订单的 SKU：口径是「该 SKU 有未作废的分订单」（累积下单 > 0），与预警色无关。
+    onlyOrdered: ref(false),
     // null = 还没进过主面板（默认全部展开）；[] = 用户主动把品名都收起了。
     expandedProductKeys: ref(null),
     // 批量补货勾选：只记 SKU 标识集合。行会随虚拟滚动装卸，选择状态不能挂在行上。

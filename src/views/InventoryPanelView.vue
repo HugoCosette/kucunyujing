@@ -167,6 +167,7 @@ const {
   colorFilter,
   selectedWarningTones,
   selectedModeLabels,
+  onlyOrdered,
   expandedProductKeys,
   selectedSkuIds,
   selectedRowId,
@@ -590,9 +591,20 @@ const hasActiveFilters = computed(
   () =>
     productFilter.value.trim() !== '' ||
     colorFilter.value.trim() !== '' ||
+    onlyOrdered.value ||
     selectedWarningTones.value.length > 0 ||
     selectedModeLabels.value.length > 0,
 )
+
+// 「已下单」筛的是采购执行层：该 SKU 有未作废的分订单（累积下单 > 0）。
+// 与预警色是两个维度，所以单独计数、单独存开关，不混进 selectedWarningTones。
+const orderedCount = computed(
+  () => inventoryLeafRows.value.filter((row) => (row.ordered ?? 0) > 0).length,
+)
+
+function toggleOrderFilter() {
+  onlyOrdered.value = !onlyOrdered.value
+}
 
 // 关键词筛选输入防抖，避免大表逐键全量过滤。
 // 初值直接取 store 里还原出来的输入：回到主面板时不能再等一次输入才生效。
@@ -622,7 +634,8 @@ const filteredInventoryLeafRows = computed(() => {
   const color = appliedColorFilter.value
   const tones = selectedWarningTones.value
   const modes = selectedModeLabels.value
-  if (!product && !color && tones.length === 0 && modes.length === 0) {
+  const orderedOnly = onlyOrdered.value
+  if (!product && !color && tones.length === 0 && modes.length === 0 && !orderedOnly) {
     return inventoryLeafRows.value
   }
 
@@ -633,7 +646,8 @@ const filteredInventoryLeafRows = computed(() => {
       (!product || row.searchProduct.includes(product)) &&
       (!color || row.searchColor.includes(color)) &&
       (!toneSet || toneSet.has(row.urgencyTone)) &&
-      (!modeSet || modeSet.has(row.modeLabel)),
+      (!modeSet || modeSet.has(row.modeLabel)) &&
+      (!orderedOnly || (row.ordered ?? 0) > 0),
   )
 })
 const inventoryRows = computed(() => {
@@ -650,6 +664,7 @@ const inventoryRows = computed(() => {
 function resetFilters() {
   productFilter.value = ''
   colorFilter.value = ''
+  onlyOrdered.value = false
   selectedWarningTones.value = []
   selectedModeLabels.value = []
 }
@@ -745,8 +760,7 @@ const TABLE_COLUMNS = [
   // 「备货」= 采购执行层：只来自订单流水，与导入数据无关。三列互为校验：累积下单 = 待收 + 到货。
   { key: 'ordered', label: '累积下单', width: 84, group: '备货' },
   { key: 'pending', label: '待收', width: 76, group: '备货' },
-  { key: 'received', label: '到货', width: 76, group: '备货' },
-  { key: 'orderAction', label: '订单', width: 64, group: '备货' },
+  { key: 'received', label: '到货', width: 78, group: '备货' },
   { key: 'backorder', label: '欠货', width: 68, group: '出口' },
   { key: 'weeklySales', label: '周销量', width: 76, group: '出口' },
   { key: 'turnoverIn', label: '周转入', width: 74, group: '库存(公斤)' },
@@ -788,7 +802,7 @@ function handleTableScroll() {
 
 // 筛选条件变化后回到顶部：列表缩短时停留在原位置只会看到末尾几行或一片空白。
 watch(
-  [appliedProductFilter, appliedColorFilter, selectedWarningTones, selectedModeLabels],
+  [appliedProductFilter, appliedColorFilter, selectedWarningTones, selectedModeLabels, onlyOrdered],
   () => {
     tableScrollTop.value = 0
     if (tableScrollRef.value) tableScrollRef.value.scrollTop = 0
@@ -1673,7 +1687,7 @@ function downloadImportTemplate() {
     <div class="page-sticky-header">
       <PanelNavigation />
       <div class="page-head">
-        <h1 class="page-title">主面板</h1>
+        <h1 class="page-title">需求表</h1>
         <div class="page-head__actions">
           <ElButton
             class="import-split-button"
@@ -1770,6 +1784,18 @@ function downloadImportTemplate() {
             <span class="warning-filter-count">{{ warningCounts[filter.key] }}</span>
           </button>
         </div>
+        <!-- 已下单：只看有备货订单（未作废分订单）的 SKU，与预警色是两个维度 -->
+        <button
+          type="button"
+          class="warning-filter warning-filter--order"
+          :class="{ 'warning-filter--active': onlyOrdered }"
+          :aria-pressed="onlyOrdered"
+          :title="`只看已下单（有备货订单）的 SKU，共 ${orderedCount} 个`"
+          @click="toggleOrderFilter"
+        >
+          已下单
+          <span class="warning-filter-count">{{ orderedCount }}</span>
+        </button>
         <span class="meta inventory-filters__count">{{ filteredSkuCount }} 个 SKU</span>
         <div class="toolbar__end">
           <ElButton class="toggle-groups-button" size="small" @click="toggleAllProductGroups">
@@ -2003,7 +2029,33 @@ function downloadImportTemplate() {
                 class="inventory-vtable__cell inventory-vtable__cell--ordered"
                 :title="orderCellTitle(row)"
               >
-                {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
+                <span class="ordered-value">
+                  {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
+                </span>
+                <!-- 订单详情入口贴在累积下单右侧：只对有订单的 SKU 出现，父行不显示 -->
+                <button
+                  v-if="!row.isProductGroup && row.ordered > 0"
+                  type="button"
+                  class="ordered-detail-button"
+                  :aria-label="`查看 ${row.product} ${row.color} 的采购订单`"
+                  title="查看采购订单详情"
+                  @click.stop="openOrderDialog(row)"
+                >
+                  <svg
+                    viewBox="0 0 16 16"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 1.9h4.9L12.1 5.1V13a.6.6 0 0 1-.6.6H4a.6.6 0 0 1-.6-.6V2.5A.6.6 0 0 1 4 1.9Z" />
+                    <path d="M8.7 2.1v3.1h3.2M5.7 8h4.4M5.7 10.4h3.2" />
+                  </svg>
+                </button>
               </div>
               <div class="inventory-vtable__cell" :title="orderCellTitle(row)">
                 {{
@@ -2017,19 +2069,6 @@ function downloadImportTemplate() {
                 :title="orderCellTitle(row)"
               >
                 {{ row.isProductGroup && !row.received ? '—' : formatQuantity(row.received) }}
-              </div>
-              <div class="inventory-vtable__cell inventory-vtable__cell--order-action" @click.stop>
-                <ElButton
-                  v-if="!row.isProductGroup && row.ordered > 0"
-                  size="small"
-                  text
-                  type="primary"
-                  class="order-records-trigger"
-                  :aria-label="`查看 ${row.product} ${row.color} 的采购订单`"
-                  @click="openOrderDialog(row)"
-                >
-                  订单
-                </ElButton>
               </div>
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.backorder) }}
@@ -2661,6 +2700,11 @@ function downloadImportTemplate() {
 .warning-filter:focus-visible {
   outline: 2px solid var(--industrial-primary);
   outline-offset: 2px;
+}
+
+/* 「已下单」不是预警色，是另一个维度：和前面那组隔开一点，避免被读成第五个预警态 */
+.warning-filter--order {
+  margin-left: 4px;
 }
 
 .warning-filter-indicator {
@@ -3306,6 +3350,44 @@ function downloadImportTemplate() {
 
 .inventory-vtable__cell--deep-right {
   border-right: 2px solid var(--industrial-grid);
+}
+
+/* 累积下单：数字后面紧跟「订单详情」入口，常态低调，悬停 / 聚焦才变清晰 */
+.inventory-vtable__cell--ordered {
+  gap: 3px;
+}
+
+.ordered-detail-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--industrial-primary);
+  opacity: 0.5;
+  cursor: pointer;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.ordered-detail-button:hover,
+.ordered-detail-button:focus-visible {
+  background: #e5edf1;
+  opacity: 1;
+}
+
+/* 整行悬停时把入口提亮一档：图标本身低调，但鼠标在这行上就能看见它 */
+.inventory-vtable__row--body:hover .ordered-detail-button {
+  opacity: 0.9;
+}
+
+.ordered-detail-button:focus-visible {
+  outline: 2px solid var(--industrial-primary);
+  outline-offset: 1px;
 }
 
 .inventory-vtable__head-cell--deep-right {
