@@ -1,10 +1,10 @@
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 
-// 整表替换主面板库存行：库存数据以总表为准，需安排、撤销记录与采购清单按唯一标识保留，
+// 整表替换主面板库存行：库存数据以总表为准，需安排与撤销记录按唯一标识保留，
 // 因此改品名或颜色不会丢失已采纳的补货计划。动销指标只来自销售表，缺列或缺值记为空（评分记 Z）。
 // 模式与系数不写回行数据，由视图按当前配置现算。
 export function applyImportedInventory(store, importedItems, { salesBySku = null } = {}) {
-  const { inventoryItems, purchaseList, plannedUndoHistory } = store
+  const { inventoryItems, plannedUndoHistory } = store
 
   const previousBySkuId = new Map()
   for (const item of inventoryItems) previousBySkuId.set(item.skuId, item)
@@ -69,25 +69,7 @@ export function applyImportedInventory(store, importedItems, { salesBySku = null
   for (const key of Object.keys(plannedUndoHistory)) delete plannedUndoHistory[key]
   for (const [id, undo] of nextUndoHistory) plannedUndoHistory[id] = undo
 
-  const nextItemById = new Map(nextItems.map((item) => [item.id, item]))
-  const nextPurchaseList = []
-  for (const purchaseItem of purchaseList) {
-    const nextId = idByPreviousId.get(purchaseItem.id)
-    const item = nextId === undefined ? null : nextItemById.get(nextId)
-    if (!item) continue
-
-    nextPurchaseList.push({
-      ...purchaseItem,
-      id: nextId,
-      skuId: item.skuId,
-      product: item.product,
-      color: item.color,
-      planned: item.planned ?? 0,
-    })
-  }
-
   inventoryItems.splice(0, inventoryItems.length, ...nextItems)
-  purchaseList.splice(0, purchaseList.length, ...nextPurchaseList)
 
   return nextItems
 }

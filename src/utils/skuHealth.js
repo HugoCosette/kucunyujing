@@ -8,6 +8,8 @@ export function buildScoringMetrics(row, salesEntry = null) {
   return {
     cr5: salesEntry?.cr5 ?? null,
     activeCustomers: row?.activeCustomers,
+    // 动销月份来自销售表：弹窗与主面板行都在 metrics 里透传，销售表入口直接读 metrics。
+    activeMonths: salesEntry?.metrics?.activeMonths ?? row?.activeMonths ?? null,
     sales: salesEntry?.sales ?? row?.monthSales,
     cumulativeSales: salesEntry?.cumulativeSales ?? row?.cumulativeSales,
     suggestedQuantity: getSuggestedPlanned(row),

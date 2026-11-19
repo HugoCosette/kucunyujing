@@ -45,7 +45,6 @@ const skuCount = computed(() => {
 const plannedCount = computed(
   () => inventoryStore.inventoryItems.filter((item) => Number(item.planned) > 0).length,
 )
-const purchaseCount = computed(() => inventoryStore.purchaseList.length)
 const orderCount = computed(() => purchaseStore.orders.orders.length)
 const draftSkuCount = computed(() => Object.keys(purchaseStore.orders.drafts ?? {}).length)
 
@@ -111,7 +110,7 @@ async function handleImportFile(event) {
 
   try {
     await ElMessageBox.confirm(
-      '导入会覆盖本机的导入数据、需安排、采购清单与订单，确定继续？',
+      '导入会覆盖本机的导入数据、需安排与订单，确定继续？',
       '导入全部数据',
       { type: 'warning', confirmButtonText: '导入', cancelButtonText: '取消' },
     )
@@ -131,7 +130,7 @@ async function handleImportFile(event) {
 async function handleSwitch(entry) {
   try {
     await ElMessageBox.confirm(
-      `切回到 ${formatTime(entry.createdAt)} 导入的数据？需安排、采购清单与订单不受影响。`,
+      `切回到 ${formatTime(entry.createdAt)} 导入的数据？需安排与订单不受影响。`,
       '切回历史快照',
       { type: 'warning', confirmButtonText: '切回', cancelButtonText: '取消' },
     )
@@ -171,7 +170,7 @@ async function handleDelete(entry) {
 async function handleClear() {
   try {
     await ElMessageBox.confirm(
-      '清空本机保存的导入数据、需安排、采购清单与订单，配置方案保持不变。清空后无法恢复，确定继续？',
+      '清空本机保存的导入数据、需安排与订单，配置方案保持不变。清空后无法恢复，确定继续？',
       '清空本机数据',
       { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消' },
     )
@@ -209,8 +208,8 @@ async function handleClear() {
           <strong class="storage-card__value">{{ itemCount }} 行 · {{ skuCount }} 个 SKU</strong>
         </div>
         <div class="storage-card">
-          <span class="storage-card__label">需安排 / 采购清单</span>
-          <strong class="storage-card__value">{{ plannedCount }} / {{ purchaseCount }} 条</strong>
+          <span class="storage-card__label">需安排（待下单）</span>
+          <strong class="storage-card__value">{{ plannedCount }} 个 SKU</strong>
         </div>
         <div class="storage-card">
           <span class="storage-card__label">分订单</span>
@@ -243,7 +242,7 @@ async function handleClear() {
       <div class="storage-block">
         <div class="storage-block__head">
           <span class="storage-block__title">导入快照（最近 {{ MAX_SNAPSHOTS }} 份）</span>
-          <span class="storage-block__hint">切回只回滚导入的库存与销售表，需安排、采购清单和订单不动</span>
+          <span class="storage-block__hint">切回只回滚导入的库存与销售表，需安排和订单不动</span>
         </div>
         <p v-if="!summary.snapshots.length" class="form__note">
           还没有导入过数据（当前显示的是演示种子数据）。

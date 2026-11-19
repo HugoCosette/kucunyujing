@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { ElButton, ElInput } from 'element-plus'
+import { ElButton, ElInput, ElMessage } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
+import { schedulePlanPersist } from '@/data/persistence'
 import { SALES_MONTH_FIELDS, SALES_RATIO_COLUMNS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
 import { useInventoryStore } from '@/stores/inventory'
 import { groupTableRowsByProduct } from '@/utils/productGroups'
@@ -49,12 +50,14 @@ function toCellValue(value) {
   return value === null || value === undefined ? '' : value
 }
 
+// 与主面板一致：数值列一律取整到整数展示，比例列四舍五入成整数百分比。
 function formatValue(value, column) {
   if (value === null || value === undefined || value === '') return ''
+  const numeric = Number(value)
   if (column?.kind === 'percent') {
-    const ratio = Number(value)
-    return Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : String(value)
+    return Number.isFinite(numeric) ? `${Math.round(numeric * 100)}%` : String(value)
   }
+  if (Number.isFinite(numeric) && column?.index > 1) return String(Math.round(numeric))
   return String(value)
 }
 
@@ -153,6 +156,43 @@ const skuDetailItem = ref(null)
 function openSkuDetail(item) {
   skuDetailItem.value = item
   skuDetailVisible.value = true
+}
+
+// —— 弹窗里的「需安排 / 采纳」——
+// 销售表页不展示需安排列，写入只落到 inventory store（与主面板同一份数据、同一条撤销记录），
+// 切回主面板时表里的需安排与行内按钮状态就直接是新的。
+function storeItemById(id) {
+  return inventoryItems.find((row) => row.id === id) ?? null
+}
+
+function hasPlannedUndo(id) {
+  return Object.prototype.hasOwnProperty.call(inventoryStore.plannedUndoHistory, id)
+}
+
+function handleDialogAdoptPlanned({ item, planned } = {}) {
+  const target = item ? storeItemById(item.id) : null
+  const value = Math.round(Number(planned))
+  if (!target || !(value > 0)) return
+  if (!hasPlannedUndo(target.id)) {
+    inventoryStore.plannedUndoHistory[target.id] = { previousPlanned: target.planned }
+  }
+  target.planned = value
+  // 换成新对象：弹窗的 item 是对象引用，直接改 store 里的行不会让父组件的 props 重新求值，
+  // 「已采纳」锁定态就刷不出来（主面板靠重建表格行触发，这里没有那一层）。
+  skuDetailItem.value = { ...target }
+  schedulePlanPersist(inventoryStore)
+  ElMessage.success(`已采纳 ${value} 公斤，已写入需安排（去「采购下单」拆单）`)
+}
+
+function handleDialogUndoPlanned({ item } = {}) {
+  const target = item ? storeItemById(item.id) : null
+  const record = target ? inventoryStore.plannedUndoHistory[target.id] : null
+  if (!target || !record) return
+  target.planned = record.previousPlanned
+  delete inventoryStore.plannedUndoHistory[target.id]
+  skuDetailItem.value = { ...target }
+  schedulePlanPersist(inventoryStore)
+  ElMessage.success('已撤销这次采纳，需安排已恢复原值')
 }
 let filterDebounceTimer = 0
 
@@ -463,6 +503,10 @@ onBeforeUnmount(() => {
     <SkuDetailDialog
       v-model:visible="skuDetailVisible"
       :item="skuDetailItem"
+      planned-editable
+      :planned-locked="Boolean(skuDetailItem && hasPlannedUndo(skuDetailItem.id))"
+      @adopt-planned="handleDialogAdoptPlanned"
+      @undo-planned="handleDialogUndoPlanned"
     />
   </main>
 </template>

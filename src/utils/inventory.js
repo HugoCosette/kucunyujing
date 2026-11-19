@@ -1,11 +1,11 @@
 // 备货计算：库存与销量统一用「公斤」比较。
-// 库存里只有「在仓库存」是 SKU 自己的单位（码或公斤），乘以公斤系数换成公斤；
-// 在途库存取生产排单的「进仓重量」，本来就是公斤；需安排由人工按公斤填写。
+// 库存里「在仓库存」是 SKU 自己的单位（码或公斤），乘以公斤系数换成公斤；
+// 生产中取生产排单的「进仓重量」，本来就是公斤；需安排由人工按公斤填写。
 // 热销 / 常规按「够卖多少天」比较（日库销比），按量按库存公斤数直接比较。
 
 function resolveIssue(item, kgFactor) {
   if (item.excluded) {
-    // 订单货只是「不做预测」，数量和预警都不算，但照常进采购清单下单。
+    // 订单货只是「不做预测」，数量和预警都不算，但照常进采购下单面板。
     if (item.manualBehavior === 'order') {
       return {
         long: '订单货：按客户订单填量，不参与预警与评分',
@@ -58,7 +58,7 @@ export function calculateInventoryRow(item) {
   const received = Number(item.received) > 0 ? Number(item.received) : 0
   const pendingOrder = Math.max(0, ordered - received)
   const turnoverIn = item.turnoverIn ?? 0
-  // 在途库存 = 生产排单的进仓重量（公斤）；未提供该字段的旧数据按“生产中”兜底。
+  // 生产中 = 生产排单的进仓重量（公斤）：新导入写在 producing，旧数据写在 inTransitStock 时优先取它。
   const inTransitStock = Number.isFinite(item.inTransitStock)
     ? item.inTransitStock
     : item.producing
@@ -66,7 +66,7 @@ export function calculateInventoryRow(item) {
   const warehouseKg = kgFactor ? item.warehouseStock * kgFactor : null
   // 理论库存是事实层：只由导入数据派生（公斤）
   const theoreticalStock = warehouseKg === null ? null : warehouseKg + inTransitStock
-  // 预计库存 = 在仓kg + 在途 + 累计下单 + 锁定需安排。
+  // 预计库存 = 在仓kg + 生产中 + 累计下单 + 锁定需安排。
   // 写成「待收 + 到货」与「累计下单」等价（待收 = 累计下单 − 到货）：到货时一减一增，合计不变，
   // 所以登记 / 撤销到货不会让预计库存跳动；超收（到货 > 累计下单）时也能把已到的货如实算进来。
   const projectedStock =
@@ -148,20 +148,22 @@ export function getSuggestedPlanned(row) {
   return Math.max(0, Math.ceil(row.normalStock * 0.8 - row.theoreticalStock - incoming))
 }
 
-export function formatQuantity(value) {  if (value === null || value === undefined) return '缺省'
+// 表格展示口径：数量一律取整到整数（不出现小数），缺省与无穷大保留文字。
+export function formatQuantity(value) {
+  if (value === null || value === undefined) return '缺省'
   if (!Number.isFinite(value)) return '∞'
-  return Number.isInteger(value) ? String(value) : value.toFixed(2)
+  return String(Math.round(value))
 }
 
 export function formatRate(value, strategyAvailable) {
   if (!strategyAvailable) return '缺省'
-  return value === null ? '--' : `${value.toFixed(2)}%`
+  return value === null ? '--' : `${Math.round(value)}%`
 }
 
 export function formatRatio(value) {
   if (value === null || value === undefined) return '--'
   if (!Number.isFinite(value)) return '∞'
-  return value.toFixed(2)
+  return String(Math.round(value))
 }
 
 export function formatProductEditorValue(product) {

@@ -32,12 +32,12 @@
    | 分单选项（染厂 / 分类 / 人员） | `src/purchase/resolve.js` | 同上 |
    | 品名父行聚合 | `src/utils/productGroups.js` | [前端视图与交互.md](./docs/功能说明/前端视图与交互.md) |
 
-3. **主面板只有「需安排」可编辑**（另有采购清单的分订单数量、两个补货弹窗的数量）。品名 / 颜色 / 库存 / 销量这类导入值一律纯文本只读，不要改回 `ElInput` / `ElInputNumber`；要改数据就重新导入或改源表。
-4. **缸只在采购下单生效**：主面板「需安排」与批量 / 紧急补货的默认量始终是 `getSuggestedPlanned()` 的精准公斤数，不做缸取整；一张分订单只用一种缸型，不拼缸。分订单一律按缸规则**先带值再让人改**：进 SKU 面板（`/purchase` 选中行、主面板「去下单」弹窗）若还没有分订单，自动带出一张按缸规则换算的建议单（同一 SKU 只自动带一次，删掉不再补；只有人点选的行才自动带，筛选导致的自动回落不预填，否则一开「未下单」筛选会把整张清单连锁填满），点「添加分订单」也带默认值。破坏性动作不在弹窗里问：左列表每行的「撤销」与分订单末列的「删除」都是**就地两段确认**（首点变「确认撤销」/「确认删除」，再点才执行，点别处自动取消），`⋯` 菜单里的入口才用 `ElMessageBox`。
+3. **主面板只有「需安排」可编辑**（另有采购下单页的分订单数量、紧急补货弹窗的数量）。品名 / 颜色 / 库存 / 销量这类导入值一律纯文本只读，不要改回 `ElInput` / `ElInputNumber`；要改数据就重新导入或改源表。
+4. **缸只在采购下单生效**：主面板「需安排」与批量 / 紧急补货的默认量始终是 `getSuggestedPlanned()` 的精准公斤数，不做缸取整；一张分订单只用一种缸型，不拼缸。分订单一律按缸规则**先带值再让人改**：进 SKU 面板（`/purchase` 选中行，含主面板采纳 / 确认补货跳转后自动选中的那条）若还没有分订单，自动带出一张按缸规则换算的建议单（同一 SKU 只自动带一次，删掉不再补；只有人点选的行才自动带，筛选导致的自动回落不预填，否则一开「未下单」筛选会把整张清单连锁填满），点「添加分订单」也带默认值。破坏性动作不在弹窗里问：左列表每行的「撤销」与分订单末列的「删除」都是**就地两段确认**（首点变「确认撤销」/「确认删除」，再点才执行，点别处自动取消），`⋯` 菜单里的入口才用 `ElMessageBox`。
 5. **「删除」是屏蔽**：写 `src/stocking/hiddenSkus.json`，源表与销售数据不动，解除在 `/hidden`。
-6. **跨导入一律按 `skuId` 关联**：需安排 / 采购清单 / 撤销快照存 `meta.workspace`，分订单以唯一标识为键；不要用行 `id`（导入后会重排）。
+6. **跨导入一律按 `skuId` 关联**：需安排 / 撤销快照存 `meta.workspace`，分订单以唯一标识为键；不要用行 `id`（导入后会重排）。
 7. **业务数据只经 `src/data/` 一层**：页面与 store 不直连 IndexedDB；设置类（下单设置 / 备货方案 / 手动清单 / 屏蔽清单）仍走 localStorage + 开发态写回 JSON，不要挪进 IndexedDB。
-8. **不重复造第二份**：列表页不新增第二套表头（下单历史是单表头 + 批次分组带）；采购清单「已下单」由分订单求和得出；SKU 弹窗主面板与销售表共用；新页面导出用 `src/utils/xlsxWrite.js` 的 `saveWorkbook()`。
+8. **不重复造第二份**：列表页不新增第二套表头（下单历史是单表头 + 批次分组带）；待下单列表直接由需安排（`planned > 0`）派生、「已下单」由分订单求和得出；SKU 弹窗主面板与销售表共用；新页面导出用 `src/utils/xlsxWrite.js` 的 `saveWorkbook()`。
 9. **改口径必须同步文档**：改清洗字段 / 单位 → 数据清洗规则.md；改模式 / 系数 / 评分 → 模式与系数设置.md；改下单 / 缸 / 到货 → 采购下单流程.md；改导入 / 持久化 / 种子 → 数据持久化方案.md；改面板交互 → 前端视图与交互.md。改清洗或模式口径时**提醒用户核对模式区间、系数与预警**。
 
 ## 2. 目录地图
@@ -45,7 +45,7 @@
 | 路径 | 管什么 |
 | --- | --- |
 | `src/views/` | 页面：`InventoryPanelView` 主面板、`SalesPanelView` 销售表、`PurchaseOrderView` 采购下单（含「下单面板 / 下单历史」两个子面板）、`ConfigView` 设置壳、`HiddenSkusView` 屏蔽列表 |
-| `src/components/` | 弹窗与设置块：导入（`ImportSplitTablesDialog` / `ImportSourcesDialog`）、`SkuDetailDialog` + `SkuDetailTrigger`、补货与订单（`SkuOrderEditor` / `SkuOrderDialog` / `PurchaseOrderRecordsDialog`）、`OrderHistoryPanel`（下单历史子面板）、设置页各块（`PurchaseSettingsPanel` / `ScoringSettings` / `SpuGradeSettings` / `VatRuleSettings` / `HiddenSkusPanel` / `DataStoragePanel`） |
+| `src/components/` | 弹窗与设置块：导入（`ImportSplitTablesDialog` / `ImportSourcesDialog`）、`SkuDetailDialog` + `SkuDetailTrigger`、补货与订单（`SkuOrderEditor` / `PurchaseOrderRecordsDialog`）、`OrderHistoryPanel`（下单历史子面板）、设置页各块（`PurchaseSettingsPanel` / `ScoringSettings` / `SpuGradeSettings` / `VatRuleSettings` / `HiddenSkusPanel` / `DataStoragePanel`） |
 | `src/stores/` | `inventory`（四页共用的库存与销售表状态）、`inventoryView`（主面板视图状态，只留内存）、`stocking`（方案配置）、`purchase`（设置、草稿与分订单） |
 | `src/data/` | 持久化唯一层：`repo.js` 契约、`indexedDbRepo.js` 实现、`db.js` 封装、`serialize.js` 序列化、`persistence.js` 快照与计划层、`bootstrap.js` 启动编排、`transfer.js` 全量导出导入、`panels.js` 导航、`inventoryItems.js` 种子 |
 | `src/stocking/` | 备货自包含模块，`config.json` 是唯一配置来源（v4 多方案） |
@@ -75,7 +75,7 @@
 | 面板 / 表格 / 导入 / 弹窗 | [前端视图与交互.md](./docs/功能说明/前端视图与交互.md) | 主面板 ↔ 采购下单 / 销售表来回切，筛选、展开、勾选与「需安排」草稿都在；导入一次 5 张分表能预览并确认 |
 | 分表清洗与单位换算 | [数据清洗规则.md](./docs/功能说明/数据清洗规则.md) | 导出的总表 / 销售表行数与列名对得上；缺出码率的码单位 SKU 被剔除 |
 | 模式 / 系数 / 评分 / 分级 | [模式与系数设置.md](./docs/功能说明/模式与系数设置.md) | 设置页改系数点「确定」后主面板模式、系数、预警随之变化；SKU 弹窗评分与「评分」列一致 |
-| 采购下单 / 缸规则 / 到货 | [采购下单流程.md](./docs/功能说明/采购下单流程.md) | 需安排 → 采购清单 → 拆单 → 确认下单 → 到货；缸数与公斤单向换算；下单历史能看到批次 |
+| 采购下单 / 缸规则 / 到货 | [采购下单流程.md](./docs/功能说明/采购下单流程.md) | 需安排（= 待下单列表）→ 拆单 → 确认下单 → 到货；缸数与公斤单向换算；下单历史能看到批次 |
 | 持久化 / 种子 / 快照 | [数据持久化方案.md](./docs/功能说明/数据持久化方案.md) | 刷新页面数据还在；「设置 → 数据 → 本机数据存储」有快照与占用；清空后回到种子 |
 | 主面板大表性能 | [主面板性能优化.md](./docs/功能说明/主面板性能优化.md) | 3 万行级筛选与滚动不卡；虚拟列表滚动位置切页回来不变 |
 | 改了什么 | [开发迭代记录.md](./docs/功能说明/开发迭代记录.md) | 每次功能改动追加一节，写明需求编号与验证方式 |

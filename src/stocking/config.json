@@ -52,8 +52,16 @@
                 "high": { "from": 30, "to": null }
               }
             },
+            "activeMonths": {
+              "weight": 10,
+              "ranges": {
+                "low": { "from": 6, "to": null },
+                "mid": { "from": 3, "to": 5 },
+                "high": { "from": 0, "to": 2 }
+              }
+            },
             "consumption": {
-              "weight": 25,
+              "weight": 15,
               "ranges": {
                 "low": { "from": null, "to": 0 },
                 "mid": { "from": 0, "to": 0 },

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-// 轻量虚拟滚动容器：弹窗里的长列表（紧急补货、采购清单）可能有上万行，
+// 轻量虚拟滚动容器：弹窗里的长列表（如紧急补货）可能有上万行，
 // 一次性渲染会长时间阻塞主线程，这里只渲染视口内的行。
 const props = defineProps({
   items: {

@@ -5,13 +5,14 @@ export const SKU_ID_FIELD = 'skuId'
 export const SKU_ID_LABEL = '唯一标识'
 
 // 导入的数值字段定义：主面板数量列，导入解析与导出共用。
+// 「生产中」= 生产排单的进仓重量（公斤）；「在途库存」不再来自导入，
+// 由订单流水的累积下单派生，只在旧文件里作为兼容别名（inTransitStock）。
 export const QUANTITY_FIELDS = [
-  { field: 'producing', label: '生产中' },
   { field: 'backorder', label: '欠货' },
   { field: 'weeklySales', label: '周销量' },
-  { field: 'warehouseStock', label: '在仓库存' },
-  { field: 'inTransitStock', label: '在途库存' },
   { field: 'turnoverIn', label: '周转入' },
+  { field: 'producing', label: '生产中' },
+  { field: 'warehouseStock', label: '在仓库存' },
   { field: 'totalOutbound', label: '总出库数量' },
 ]
 

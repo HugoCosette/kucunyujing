@@ -1,6 +1,6 @@
 import { gunzipSync, strFromU8 } from 'fflate'
 
-// 事实层（导入的库存 + 销售表）与计划层（需安排 / 采购清单 / 撤销快照）之间的序列化口径。
+// 事实层（导入的库存 + 销售表）与计划层（需安排 / 撤销快照）之间的序列化口径。
 // 三层数据绝不互相覆盖：快照只留事实，需安排一律按 skuId 单独存、加载时重新挂回行上。
 
 export const PAYLOAD_VERSION = 1
@@ -94,31 +94,16 @@ export function collectPlanLayer(store, previousPlans = {}) {
     else delete plans[skuId]
   }
 
-  const purchaseList = []
-  for (const entry of store.purchaseList) {
-    const skuId = String(entry.skuId ?? '').trim() || skuIdById.get(entry.id) || ''
-    if (!skuId) continue
-    purchaseList.push({
-      skuId,
-      product: entry.product ?? '',
-      color: entry.color ?? '',
-      planned: Number(entry.planned) || 0,
-    })
-  }
-
   const undoHistory = {}
   for (const [id, undo] of Object.entries(store.plannedUndoHistory ?? {})) {
     const skuId = skuIdById.get(Number(id))
     if (!skuId || !undo) continue
     undoHistory[skuId] = {
       previousPlanned: Number.isFinite(undo.previousPlanned) ? undo.previousPlanned : null,
-      previousPurchasePlanned: undo.previousPurchaseItem
-        ? Number(undo.previousPurchaseItem.planned) || 0
-        : null,
     }
   }
 
-  return { plans, purchaseList, undoHistory }
+  return { plans, undoHistory }
 }
 
 // 把计划层按 skuId 挂回事实层；挂不上的（快照里已没有这个 SKU）跳过，plans 里仍然保留。
@@ -140,37 +125,14 @@ export function applyPlanLayer(items, layer = {}) {
     item.planned = planned
   }
 
-  const purchaseList = []
-  for (const entry of layer.purchaseList ?? []) {
-    const item = itemBySkuId.get(String(entry.skuId ?? '').trim())
-    if (!item) continue
-    purchaseList.push({
-      id: item.id,
-      skuId: item.skuId,
-      product: item.product,
-      color: item.color,
-      planned: Number(entry.planned) || 0,
-    })
-  }
-
   const plannedUndoHistory = {}
   for (const [skuId, undo] of Object.entries(layer.undoHistory ?? {})) {
     const item = itemBySkuId.get(skuId)
     if (!item || !undo) continue
     plannedUndoHistory[item.id] = {
       previousPlanned: Number.isFinite(undo.previousPlanned) ? undo.previousPlanned : null,
-      previousPurchaseItem:
-        undo.previousPurchasePlanned === null || undo.previousPurchasePlanned === undefined
-          ? null
-          : {
-              id: item.id,
-              skuId: item.skuId,
-              product: item.product,
-              color: item.color,
-              planned: Number(undo.previousPurchasePlanned) || 0,
-            },
     }
   }
 
-  return { purchaseList, plannedUndoHistory, unmatched }
+  return { plannedUndoHistory, unmatched }
 }

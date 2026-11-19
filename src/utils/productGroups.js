@@ -7,6 +7,8 @@ export const PRODUCT_SUMMARY_FIELDS = [
   'backorder',
   'weeklySales',
   'warehouseStock',
+  // 主面板「在仓库存」列展示的是换算成公斤的 warehouseKg，父行必须一并汇总。
+  'warehouseKg',
   'turnoverIn',
   'inTransitStock',
   'theoreticalStock',

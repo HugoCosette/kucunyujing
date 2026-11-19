@@ -21,7 +21,7 @@ import {
 } from './serialize.js'
 import { primeInventoryState } from '@/stores/inventory'
 
-// 持久化的业务口径：事实层（导入数据）生成快照，计划层（需安排 / 采购清单）按 skuId 单独存，
+// 持久化的业务口径：事实层（导入数据）生成快照，计划层（需安排）按 skuId 单独存，
 // 两者加载时重新挂接，互不覆盖。写入一律先落 IndexedDB，不做任何 localStorage 兜底。
 export const MAX_SNAPSHOTS = 5
 
@@ -29,7 +29,6 @@ export const MAX_SNAPSHOTS = 5
 const workspace = {
   activeSnapshotId: null,
   plans: {},
-  purchaseList: [],
   undoHistory: {},
   updatedAt: null,
 }
@@ -49,16 +48,6 @@ function normalizeWorkspaceRecord(record) {
   return {
     activeSnapshotId: source.activeSnapshotId ?? null,
     plans,
-    purchaseList: Array.isArray(source.purchaseList)
-      ? source.purchaseList
-          .map((entry) => ({
-            skuId: String(entry?.skuId ?? '').trim(),
-            product: String(entry?.product ?? ''),
-            color: String(entry?.color ?? ''),
-            planned: Number(entry?.planned) || 0,
-          }))
-          .filter((entry) => entry.skuId)
-      : [],
     undoHistory:
       source.undoHistory && typeof source.undoHistory === 'object' ? { ...source.undoHistory } : {},
     updatedAt: source.updatedAt ?? null,
@@ -69,7 +58,6 @@ export function getWorkspace() {
   return {
     activeSnapshotId: workspace.activeSnapshotId,
     plans: workspace.plans,
-    purchaseList: workspace.purchaseList,
     undoHistory: workspace.undoHistory,
     updatedAt: workspace.updatedAt,
   }
@@ -83,7 +71,6 @@ export function setWorkspaceRecord(record) {
   const next = normalizeWorkspaceRecord(record)
   workspace.activeSnapshotId = next.activeSnapshotId
   workspace.plans = next.plans
-  workspace.purchaseList = next.purchaseList
   workspace.undoHistory = next.undoHistory
   workspace.updatedAt = next.updatedAt
   ready = true
@@ -100,26 +87,24 @@ export async function flushWorkspace() {
     await writeMeta(META_KEY_WORKSPACE, {
       activeSnapshotId: workspace.activeSnapshotId,
       plans: workspace.plans,
-      purchaseList: workspace.purchaseList,
       undoHistory: workspace.undoHistory,
       updatedAt: new Date().toISOString(),
     })
     return true
   } catch (error) {
     lastError = error
-    console.warn('保存需安排与采购清单失败', error)
+    console.warn('保存需安排失败', error)
     return false
   }
 }
 
 // 需安排的四个写入口（批量补货 / 行内采纳 / 撤销 / 下单页撤销）统一调这里：
-// 只序列化「需安排 + 采购清单 + 撤销快照」，几千条以内，不需要进 Worker。
+// 只序列化「需安排 + 撤销快照」，几千条以内，不需要进 Worker。
 export function schedulePlanPersist(store) {
   if (store) planStore = store
   if (!planStore || !isIndexedDbAvailable()) return
   const layer = collectPlanLayer(planStore, workspace.plans)
   workspace.plans = layer.plans
-  workspace.purchaseList = layer.purchaseList
   workspace.undoHistory = layer.undoHistory
   if (workspaceTimer) clearTimeout(workspaceTimer)
   workspaceTimer = window.setTimeout(() => {
@@ -286,7 +271,6 @@ export async function hydrateFromStorage() {
   const record = normalizeWorkspaceRecord(await readMeta(META_KEY_WORKSPACE))
   workspace.activeSnapshotId = record.activeSnapshotId
   workspace.plans = record.plans
-  workspace.purchaseList = record.purchaseList
   workspace.undoHistory = record.undoHistory
   workspace.updatedAt = record.updatedAt
 
@@ -314,7 +298,7 @@ export async function hydrateFromStorage() {
   }
 
   // 在挂载前把状态放好，store 创建时直接用它，不会先渲染一遍种子数据。
-  // 需安排 / 采购清单交给 store 按 skuId 挂回行上（行 id 会随快照变化，不能存 id）。
+  // 需安排交给 store 按 skuId 挂回行上（行 id 会随快照变化，不能存 id）。
   primeInventoryState({
     inventoryItems: payload.items,
     salesSheet: payload.salesSheet,

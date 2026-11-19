@@ -19,7 +19,7 @@ export function applySourceImport(inventoryStore, { inventory, sales }) {
   }
 
   // 导入的终点从「只写内存」改成「内存 + 快照」：刷新或重开浏览器后不用再导入一次。
-  // 快照落库在后台进行，不阻塞确认按钮；需安排与采购清单按 skuId 单独存，不随快照回滚。
+  // 快照落库在后台进行，不阻塞确认按钮；需安排按 skuId 单独存，不随快照回滚。
   // 返回 Promise<snapshotId|null>，null 表示没存住，调用方要提示用户刷新会丢数据。
   return persistFactLayer(inventoryStore, {
     createSnapshot: true,

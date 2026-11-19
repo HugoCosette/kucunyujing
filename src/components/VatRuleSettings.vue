@@ -348,18 +348,35 @@ const bandErrors = computed(() =>
 
 const bandErrorCount = computed(() => bandErrors.value.filter(Boolean).length)
 
-// 加一行插在最后一行之前：接在上一行后面，补到量先跟着上一行，再让人改。
-function addBand() {
+// 在某一段后面插一段：中间段从中间一分为二（原段留前半，新段接后半并沿用原段的补到量），
+// 开口的末段则先切出一个步长给原段、新段继续敞开。插在哪都只动这一段，后面的段不用重调。
+function insertBandAfter(index) {
   const bands = draft.value.bands
-  const lastFrom = bandFrom(bands.length - 1)
-  const step = Math.max(1, lastFrom - bandFrom(bands.length - 2)) || 100
-  bands.splice(bands.length - 1, 0, {
-    upTo: lastFrom + step,
-    action: 'fixed',
-    value: bandTarget(bands[bands.length - 1]) || bandTarget(bands[bands.length - 2]) || 60,
+  const band = bands[index]
+  if (!band) return
+  const from = bandFrom(index)
+  const target = bandTarget(band)
+  let nextUpTo = null
+  if (index === bands.length - 1) {
+    const previousFrom = index > 0 ? bandFrom(index - 1) : 0
+    const span = from - previousFrom
+    const step = span > 0 ? span : from > 0 ? from : 100
+    band.upTo = from + step - 1
+  } else {
+    nextUpTo = Number(band.upTo) || 0
+    band.upTo = Math.max(from, Math.floor((from + nextUpTo) / 2))
+  }
+  bands.splice(index + 1, 0, {
+    upTo: nextUpTo,
+    action: target > 0 ? 'fixed' : 'skip',
+    value: target,
     sizes: [],
   })
   applyBandChain()
+}
+
+function addBand() {
+  insertBandAfter(draft.value.bands.length - 1)
 }
 
 function removeBand(index) {
@@ -408,9 +425,9 @@ const lastBandHint = computed(() => {
   const bands = draft.value.bands
   const target = bandTarget(bands[bands.length - 1])
   if (target > 0) {
-    return `最后一行没有上限：超过 ${formatNumber(target)} 公斤时按 ${formatNumber(target)} 公斤一缸一缸往上补。`
+    return `最后一段没有上限：超过 ${formatNumber(target)} 公斤时按 ${formatNumber(target)} 公斤一缸一缸往上补。`
   }
-  return '每行的「从」会自动接上上一行的「到」，不用重复填。'
+  return '每段的「从」会自动接上上一段的「到」，不用重复填。'
 })
 
 // 编辑弹窗打开时把老配置摊成「一行一段」：
@@ -485,7 +502,7 @@ function saveRule() {
   }
   if (bandErrorCount.value > 0) {
     const index = bandErrors.value.findIndex(Boolean)
-    ElMessage.error(`第 ${index + 1} 行：${bandErrors.value[index]}`)
+    ElMessage.error(`范围 ${index + 1}：${bandErrors.value[index]}`)
     return
   }
   if (errors.length) {
@@ -701,10 +718,7 @@ function saveRule() {
           <span>规则名称 *</span>
           <ElInput v-model="draft.name" size="small" placeholder="例如：标准大货补单" />
         </label>
-        <p class="vat-dialog-head__tip">
-          一行一段：需安排落在这一行的「从」到「到」之间（两端都算），就补到这一行的公斤数；
-          下一行的「从」自动接上上一行的「到」+ 1，最后一行没有上限。
-        </p>
+    
       </div>
 
       <div class="vat-bands">
@@ -715,7 +729,7 @@ function saveRule() {
           :class="{ 'vat-band--invalid': Boolean(bandErrors[index]) }"
         >
           <div class="vat-band__row">
-            <span class="vat-band__index">第 {{ index + 1 }} 行</span>
+            <span class="vat-band__index">范围{{ index + 1 }}</span>
 
             <span class="vat-band__word">从</span>
             <span class="vat-band__cell">
@@ -727,7 +741,7 @@ function saveRule() {
                 :step="10"
                 :controls="false"
                 class="vat-band__num"
-                :aria-label="`第 ${index + 1} 行下限（${currentUnit}）`"
+                :aria-label="`范围${index + 1}下限（${currentUnit}）`"
                 @update:model-value="setBandFrom(index, $event)"
               />
               <b v-else class="vat-band__static">0</b>
@@ -743,7 +757,7 @@ function saveRule() {
                 :step="10"
                 :controls="false"
                 class="vat-band__num"
-                :aria-label="`第 ${index + 1} 行上限（${currentUnit}）`"
+                :aria-label="`范围${index + 1}上限（${currentUnit}）`"
                 @update:model-value="setBandUpper(index, $event)"
               />
               <b v-else class="vat-band__static">不限</b>
@@ -761,29 +775,46 @@ function saveRule() {
                 :step="10"
                 :controls="false"
                 class="vat-band__num"
-                :aria-label="`第 ${index + 1} 行补到多少公斤`"
+                :aria-label="`范围${index + 1}补到多少公斤`"
                 @update:model-value="setBandTarget(index, $event)"
               />
             </span>
             <span class="vat-band__unit">公斤</span>
 
-            <button
-              type="button"
-              class="vat-band__remove"
-              :disabled="draft.bands.length <= 1"
-              @click="removeBand(index)"
-            >
-              删除
-            </button>
+            <span class="vat-band__actions">
+              <button
+                type="button"
+                class="vat-band__insert"
+                :title="
+                  index < draft.bands.length - 1
+                    ? `把范围${index + 1}一分为二：前半留给本段，后半给新段`
+                    : '在末段后面再加一段'
+                "
+                @click="insertBandAfter(index)"
+              >
+                插入
+              </button>
+              <button
+                type="button"
+                class="vat-band__remove"
+                :disabled="draft.bands.length <= 1"
+                @click="removeBand(index)"
+              >
+                删除
+              </button>
+            </span>
           </div>
           <p v-if="bandErrors[index]" class="vat-band__error">{{ bandErrors[index] }}</p>
         </article>
       </div>
 
       <div class="vat-dialog-actions">
-        <ElButton size="small" @click="addBand">＋ 再加一行</ElButton>
+        <ElButton size="small" @click="addBand">＋ 添加范围</ElButton>
         <span class="vat-settings__hint">{{ lastBandHint }}</span>
       </div>
+      <p class="vat-bands__hint">
+        行内「插入」会把这一段从中间一分为二，只有这一段变化，后面的范围不用重调；插入后两张卡的「补到」一致，改左边那张即可。
+      </p>
 
       <div class="vat-dialog-trial">
         <span class="vat-dialog-trial__label">试算</span>
@@ -1235,7 +1266,7 @@ function saveRule() {
 /* 每行一条规则：从 → 到 → 补到多少。列宽写死，行与行绝对对齐（含 0 / 不限 那个灰格子）。 */
 .vat-band__row {
   display: grid;
-  grid-template-columns: 52px 16px 78px 16px 78px 24px 18px 28px 78px 24px 1fr;
+  grid-template-columns: 58px 16px 78px 16px 78px 24px 18px 28px 78px 24px 1fr;
   align-items: center;
   column-gap: 8px;
 }
@@ -1277,8 +1308,28 @@ function saveRule() {
   font-variant-numeric: tabular-nums;
 }
 
-.vat-band__remove {
+.vat-band__actions {
+  display: flex;
+  align-items: center;
   justify-self: end;
+  gap: 2px;
+}
+
+.vat-band__insert {
+  padding: 2px 6px;
+  color: var(--industrial-primary);
+  background: none;
+  border: none;
+  border-radius: 2px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.vat-band__insert:hover {
+  background: rgba(63, 113, 141, 0.1);
+}
+
+.vat-band__remove {
   padding: 2px 6px;
   color: var(--industrial-muted);
   background: none;
@@ -1326,6 +1377,13 @@ function saveRule() {
   align-items: center;
   gap: 10px;
   margin-top: 10px;
+}
+
+.vat-bands__hint {
+  margin: 6px 0 0;
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .vat-dialog-trial {

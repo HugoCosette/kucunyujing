@@ -1,4 +1,4 @@
-// SKU 健康度评分：5 个维度各自配「高 / 中 / 低」三条风险区间与权重，
+// SKU 健康度评分：每个维度（默认 6 个）各自配「高 / 中 / 低」三条风险区间与权重，
 // 命中哪条区间就取对应档位的得分，再加权成综合分。
 // 这里只做口径计算，不依赖 Vue 与 store：SKU 弹窗负责展示，配置页负责改参数。
 
@@ -25,6 +25,7 @@ export const SCORING_DIMENSIONS = [
   { key: 'customers', label: '累计客户数', unit: '个', decimals: 0 },
   { key: 'growth', label: '销售环比率', unit: '%', decimals: 1 },
   { key: 'ratio', label: '本次进销比', unit: '%', decimals: 1 },
+  { key: 'activeMonths', label: '动销月份', unit: '月', decimals: 0 },
   { key: 'consumption', label: '预估月消耗', unit: '条', decimals: 1 },
 ]
 
@@ -36,9 +37,17 @@ const SCORING_DEFAULTS = {
     customers: { weight: 10, ranges: { high: [0, 10], mid: [11, 20], low: [21, null] } },
     growth: { weight: 20, ranges: { high: [null, -10], mid: [-10, 10], low: [10, null] } },
     ratio: { weight: 30, ranges: { high: [30, null], mid: [20, 30], low: [0, 20] } },
-    consumption: { weight: 25, ranges: { high: [0, null], mid: [0, 0], low: [null, 0] } },
+    // 动销月份：3 ~ 5 个月中风险，少于 3 个月高风险，6 个月及以上低风险。
+    activeMonths: { weight: 10, ranges: { high: [0, 2], mid: [3, 5], low: [6, null] } },
+    // 预估月消耗让出 10% 给动销月份。
+    consumption: { weight: 15, ranges: { high: [0, null], mid: [0, 0], low: [null, 0] } },
   },
 }
+
+// v4 老配置只有 5 个维度：补「动销月份」时从「预估月消耗」里扣同样多的权重，
+// 让权重合计仍是 100%，不必升版本号整份抛弃。
+const ACTIVE_MONTHS_WEIGHT = 10
+const LEGACY_CONSUMPTION_WEIGHT = 25
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -105,6 +114,14 @@ export function normalizeScoring(source) {
   const scores = isPlainObject(input.scores) ? input.scores : {}
   const total = isPlainObject(input.total) ? input.total : {}
   const dimensions = isPlainObject(input.dimensions) ? input.dimensions : {}
+  const legacy = isPlainObject(input.dimensions) && !('activeMonths' in input.dimensions)
+
+  function resolveWeight(key, weight) {
+    if (legacy && key === 'consumption') {
+      return Math.max(0, toNonNegative(weight, LEGACY_CONSUMPTION_WEIGHT) - ACTIVE_MONTHS_WEIGHT)
+    }
+    return toNonNegative(weight, defaults.dimensions[key].weight)
+  }
 
   return {
     scores: {
@@ -124,7 +141,7 @@ export function normalizeScoring(source) {
         return [
           definition.key,
           {
-            weight: toNonNegative(entry.weight, defaults.dimensions[definition.key].weight),
+            weight: resolveWeight(definition.key, entry.weight),
             ranges: normalizeRanges(entry.ranges, definition),
           },
         ]
@@ -152,7 +169,7 @@ export function validateScoring(source) {
   }
 
   if (!(weightTotal > 0)) {
-    errors.push({ message: '评分：5 个维度的权重合计必须大于 0' })
+    errors.push({ message: `评分：${SCORING_DIMENSIONS.length} 个维度的权重合计必须大于 0` })
   }
   if (
     scoring.total.midFrom !== null &&
@@ -297,6 +314,11 @@ function readMetrics(metrics, now) {
     metrics.activeCustomers === null || metrics.activeCustomers === undefined
       ? null
       : Number(metrics.activeCustomers)
+  // 动销月份：销售表清洗输出的「最长连续动销段」，整数月份。
+  const activeMonths =
+    metrics.activeMonths === null || metrics.activeMonths === undefined
+      ? null
+      : Number(metrics.activeMonths)
 
   const suggestedKg = Number.isFinite(suggestedQuantity) ? suggestedQuantity : null
   const projectedKg =
@@ -308,6 +330,7 @@ function readMetrics(metrics, now) {
     values: {
       cr5: Number.isFinite(cr5) ? cr5 * 100 : null,
       customers: Number.isFinite(customers) ? customers : null,
+      activeMonths: Number.isFinite(activeMonths) ? activeMonths : null,
       growth: computeGrowthRate(metrics.sales, now),
       ratio:
         Number.isFinite(cumulativeSales) && cumulativeSales > 0 && Number.isFinite(suggestedKg)
@@ -331,6 +354,7 @@ function readMetrics(metrics, now) {
 const MISSING_DETAILS = {
   cr5: '未导入客户 CR5 率',
   customers: '未导入累计客户数',
+  activeMonths: '未导入动销月份',
   growth: '缺少连续两个月的销量',
   ratio: '缺少建议补货量或累积销量',
   consumption: '缺少加权月销量或库存数据',
@@ -346,6 +370,8 @@ function buildDetail(key, value, detail) {
       return `前 5 客户销量占比 ${formatNumber(value, 1)}%`
     case 'customers':
       return `累计客户 ${formatNumber(value, 0)} 个`
+    case 'activeMonths':
+      return `最长连续动销 ${formatNumber(value, 0)} 个月`
     case 'ratio':
       return `建议补货 ${formatNumber(detail.suggestedKg, 2)} 公斤 ÷ 累积销量 ${formatNumber(
         detail.cumulativeSales,
@@ -433,7 +459,7 @@ export function evaluateScoring({
 }
 
 // —— 按量模式专属健康度：只判「本次进销比」与「累积客户数」两项，不做综合评分 ——
-// 本次进销比沿用 5 维评分里的同一口径（建议补货 ÷ 累积销量），按量模式下低于下界低风险、
+// 本次进销比沿用多维评分里的同一口径（建议补货 ÷ 累积销量），按量模式下低于下界低风险、
 // 区间内正常、高于上界高风险；累积客户数少于下界高风险、区间内中风险、多于上界低风险。
 // 两个区间都存在方案里「按量」模式的 healthScoring 段，配置页可改。
 export const BULK_SCORING_DEFAULTS = {

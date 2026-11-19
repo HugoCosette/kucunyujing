@@ -8,7 +8,7 @@ export const MAIN_PANEL = {
   allLabel: '销售表',
   allPath: '/sales',
   allRouteName: 'sales',
-  // 采购下单：在本次采购清单的基础上按染厂拆分订单；下单设置维护染厂、分单人员与 SKU 可选染厂。
+  // 采购下单：把主面板写下的需安排按染厂拆成分订单；设置页维护染厂、分单人员与 SKU 可选染厂。
   purchaseLabel: '采购下单',
   purchasePath: '/purchase',
   purchaseRouteName: 'purchase',

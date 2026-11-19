@@ -1,6 +1,6 @@
 // 极简 xlsx 写盘：不引第三方库，直接拼 OOXML 再用 fflate 打包。
 // 只做「多张工作表 + 表头加粗」这一档，够历史 / 对账这类只读导出用。
-// 主面板的采购清单导出仍在自己拼（口径与列宽已定稿），新页面统一走这里。
+// 主面板的「导入模板」导出仍在自己拼（口径与列宽已定稿），其余页面统一走这里。
 import { zipSync } from 'fflate'
 
 const SHEET_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'

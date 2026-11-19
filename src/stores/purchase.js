@@ -30,7 +30,7 @@ function snapshotOf(order) {
 }
 
 // 涓嬪崟妯″潡鍏ㄥ簲鐢ㄥ崟渚嬶細璁剧疆锛堟煋鍘?/ 鍒嗙被-浜哄憳 / SKU 鍙€夋煋鍘傦級涓庡垎璁㈠崟鍚勫瓨涓€浠姐€?
-// 鍒嗚鍗曚互銆屽敮涓€鏍囪瘑銆嶄负閿細涓婚潰鏉块噸鏂板鍏ュ悗 purchaseList 鐨?id 浼氶噸鎺掞紝鍙湁鍞竴鏍囪瘑绋冲畾銆?
+// 分订单以「唯一标识」为键：主面板重新导入后行 id 会重排，只有唯一标识稳定。
 export const usePurchaseStore = defineStore('purchase', () => {
   const settings = shallowRef(loadSettings())
   const orders = shallowRef(loadOrders())

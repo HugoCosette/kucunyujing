@@ -22,15 +22,15 @@ import ImportSplitTablesDialog from '@/components/ImportSplitTablesDialog.vue'
 import PurchaseOrderRecordsDialog from '@/components/PurchaseOrderRecordsDialog.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
-import SkuOrderDialog from '@/components/SkuOrderDialog.vue'
 import VirtualList from '@/components/VirtualList.vue'
 import { useSourceImport } from '@/composables/useSourceImport'
 import { useSplitImport } from '@/composables/useSplitImport'
 import { useInventoryStore } from '@/stores/inventory'
 import { useInventoryViewStore } from '@/stores/inventoryView'
 import { usePurchaseStore } from '@/stores/purchase'
+import { MAIN_PANEL } from '@/data/panels'
 import { persistFactLayer, schedulePlanPersist } from '@/data/persistence'
-import { categoryForSku, findFactoryById, orderSummaryOf, planOrderQuantity, resolveVatRule } from '@/purchase'
+import { orderSummaryOf } from '@/purchase'
 import { groupRowsByProduct } from '@/utils/productGroups'
 import {
   calculateInventoryRow,
@@ -67,7 +67,7 @@ const stockingEvaluator = computed(() =>
     baselineMonth: baselineMonth.value,
   }),
 )
-// 「评分」列直接复用 SKU 弹窗的健康度评分口径：5 维加权综合分；按量模式只做 2 项判定，没有综合分。
+// 「评分」列直接复用 SKU 弹窗的健康度评分口径：多维加权综合分；按量模式只做 2 项判定，没有综合分。
 const bulkHealthScoring = computed(
   () =>
     getAutoModes(stockingStore.config).find((mode) => mode.key === 'bulk')?.healthScoring ?? null,
@@ -118,47 +118,9 @@ function scoreCellTitle(row) {
 const spuGrades = computed(() => normalizeSpuGrades(stockingStore.config.spuGrades))
 const spuGradeThresholds = computed(() => describeSpuGradeThresholds(spuGrades.value))
 const inventoryItems = inventoryStore.inventoryItems
-const purchaseList = inventoryStore.purchaseList
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
-// 采购下单模块：分订单以唯一标识为键，采购清单只负责"哪些 SKU 要下、下多少"。
+// 采购下单模块：分订单以唯一标识为键；哪些 SKU 要下、下多少完全由「需安排」决定。
 const purchaseStore = usePurchaseStore()
-const purchaseListRows = computed(() =>
-  purchaseList.map((purchaseItem) => {
-    const item = itemById.value.get(purchaseItem.id)
-    // 品名/颜色没变时复用原对象，避免清单上万条时每次打开都重新分配上万个对象。
-    if (!item || (item.product === purchaseItem.product && item.color === purchaseItem.color)) {
-      return purchaseItem
-    }
-    return { ...purchaseItem, product: item.product, color: item.color }
-  }),
-)
-
-function purchaseRowSkuId(row) {
-  return String(row?.skuId ?? itemById.value.get(row?.id)?.skuId ?? '').trim()
-}
-
-function purchaseRowCategory(row) {
-  const item = itemById.value.get(row?.id)
-  return categoryForSku(purchaseStore.settings, purchaseRowSkuId(row), item?.treeCategory)
-}
-
-function purchaseRowOrders(row) {
-  return purchaseStore.orderSummary(purchaseRowSkuId(row))
-}
-
-// 采购清单导出用：需安排（公斤）× 品名绑定的缸规则 → 缸数 / 每缸公斤 / 建议下单量。
-function purchaseRowVatPlan(row) {
-  const item = itemById.value.get(row?.id)
-  const planned = Number(row?.planned) || 0
-  const rule = resolveVatRule(purchaseStore.settings, {
-    skuId: purchaseRowSkuId(row),
-    product: item?.product ?? row?.product,
-  })
-  return planOrderQuantity(planned, rule, {
-    planned,
-    monthlyAvgCount: item?.monthlyAvgCount,
-  })
-}
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 // 查看状态挂在 store 上：路由切换会重建本组件，筛选 / 展开 / 勾选 / 滚动位置不能跟着清空。
 const viewStore = useInventoryViewStore()
@@ -186,6 +148,49 @@ const addSkuDialogVisible = ref(false)
 function openSkuDetail(item) {
   skuDetailItem.value = item
   skuDetailVisible.value = true
+  // 从详情按钮 / 右键菜单打开弹窗时也把这一行标成「当前行」：
+  // 弹窗盖住了表格，用户需要知道看的是哪一行（只改高亮，不动勾选）。
+  if (item && !item.isProductGroup && item.id) selectedRowId.value = item.id
+}
+
+// 弹窗里的采纳 / 撤销会重建表格行，弹窗持有的是行对象快照，这里换成新行，
+// 否则「需安排」与评分会停在旧值上（虚拟列表的行对象是不可变的）。
+function syncSkuDetailItem() {
+  const current = skuDetailItem.value
+  if (!current) return
+  const index = leafRowIndexById.get(current.id)
+  const next = index === undefined ? null : inventoryLeafRows.value[index]
+  if (next && next !== current) skuDetailItem.value = next
+}
+
+// 弹窗「采纳」：走与行内采纳同一条写入路径（覆盖需安排 + 记撤销 + 落盘），但不跳转页面。
+function handleDialogAdoptPlanned({ item, planned } = {}) {
+  const target = item ? itemById.value.get(item.id) : null
+  if (!target) return
+  const written = writePlanned([{ id: target.id, planned }])
+  if (written.length === 0) return
+  syncSkuDetailItem()
+  ElMessage.success(`已采纳 ${formatQuantity(planned)} 公斤，已写入需安排（去「采购下单」拆单）`)
+}
+
+function handleDialogUndoPlanned({ item } = {}) {
+  if (!item || !hasPlannedUndo(item.id)) return
+  undoPlannedAcceptance(item)
+  syncSkuDetailItem()
+  ElMessage.success('已撤销这次采纳，需安排已恢复原值')
+}
+
+// 弹窗里的「需安排」与表格那一格共用同一份草稿（viewStore.plannedDrafts）：
+// 任一输入即时同步到另一边，已采纳的行两边都是锁定态。
+const dialogPlannedDraft = computed(() => {
+  const item = skuDetailItem.value
+  return item ? getPlannedDraft(item) : null
+})
+
+function handleDialogPlannedDraft(value) {
+  const item = skuDetailItem.value
+  if (!item) return
+  updatePlannedDraft(item.id, value)
 }
 
 // 导入 / 添加成功提示（带进度条）。action 有值时 toast 里带一个按钮，并把停留时间延长到 8 秒。
@@ -302,20 +307,8 @@ function handleSkuAdded(item) {
 }
 const urgentPlanDialogVisible = ref(false)
 const urgentPlanRows = ref([])
-const purchaseListDialogVisible = ref(false)
-// 单个 SKU 的分订单弹窗：清单里点「去下单」时打开。
-const purchaseOrderDialogVisible = ref(false)
-const purchaseOrderItem = ref(null)
-// 弹窗里的长列表按虚拟滚动渲染：上万个紧急 SKU / 采购条目时
-// 直接 v-for 会把主线程卡住十几秒。
+// 弹窗里的长列表按虚拟滚动渲染：上万个紧急 SKU 时直接 v-for 会把主线程卡住十几秒。
 const URGENT_PLAN_ROW_HEIGHT = 48
-const PURCHASE_LIST_ROW_HEIGHT = 48
-const flyingPurchaseIcon = ref(null)
-const purchaseListPulse = ref(false)
-// 批量确认补货：先落成可编辑的「需安排」清单，确认后覆盖写入并进入采购清单。
-const restockDialogVisible = ref(false)
-const restockRows = ref([])
-const RESTOCK_ROW_HEIGHT = 48
 
 // 主面板与销售表共用同一条导入流程：分表清洗出总表 + 销售表后在这里预览并确认写入。
 const sourceImport = useSourceImport({
@@ -340,8 +333,6 @@ const {
   start: startSplitImport,
   cancel: cancelSplitImport,
 } = useSplitImport({ sourceImport })
-let purchaseFlyTimer = 0
-let purchasePulseTimer = 0
 
 // —— 派生数据 ——
 // 3 万行量级下不能靠 computed 全量重算，改为「单行缓存 + 增量刷新」：
@@ -517,30 +508,67 @@ const orderSignature = computed(() => {
 })
 watch(orderSignature, rebuildLeafRows)
 
-// 需安排草稿只影响该行的预警预览色（采纳后会叠加进预计库存），单独存放，避免整表重算。
-const plannedPreviewTones = reactive({})
+// 需安排草稿的实时预览：键入时把草稿当成「已采纳」先算一遍，
+// 右侧「预计库存 / 日库销比 / 缺口量 / 缺口率」立刻显示结果（带预览样式），
+// 采纳后才落成正式数字。只重算正在编辑的那一行，不整表重算。
+const plannedPreviews = reactive({})
 
-function refreshPlannedPreviewTone(item) {
-  if (!item || !Reflect.has(plannedDrafts, item.id)) {
-    if (item) delete plannedPreviewTones[item.id]
-    return
-  }
+// 预览只认「填了正数」的草稿：清空输入框、填 0 都回到已采纳的口径，不显示预览。
+function hasPreviewDraft(row) {
+  if (!Reflect.has(plannedDrafts, row.id)) return false
+  const draft = Number(plannedDrafts[row.id])
+  return Number.isFinite(draft) && draft > 0
+}
 
+function buildPlannedPreview(item) {
   const evaluated = evaluateItem(
-    { ...item, planned: plannedDrafts[item.id] ?? 0 },
+    { ...item, planned: Number(plannedDrafts[item.id]) || 0 },
     stockingEvaluator.value,
   )
   const orders = orderSummaryOf(purchaseStore.orderIndex, evaluated.skuId)
-  plannedPreviewTones[item.id] = calculateInventoryRow({
+  return calculateInventoryRow({
     ...evaluated,
     ordered: orders.ordered,
     received: orders.received,
-  }).urgencyTone
+  })
+}
+
+function refreshPlannedPreview(item) {
+  if (!item) return
+  if (hasPreviewDraft(item)) plannedPreviews[item.id] = buildPlannedPreview(item)
+  else delete plannedPreviews[item.id]
+}
+
+// 品名父行的预估列是子行汇总，也要跟着预览：把草稿行换成预览行再按同一口径汇总。
+const productPlannedPreviews = computed(() => {
+  const previews = {}
+  for (const group of inventoryRows.value) {
+    if (!group.isProductGroup) continue
+    if (!group.children.some((child) => plannedPreviews[child.id])) continue
+    const aggregated = groupRowsByProduct(
+      group.children.map((child) => plannedPreviews[child.id] ?? child),
+    ).find((entry) => entry.isProductGroup)
+    if (aggregated) previews[group.id] = aggregated
+  }
+  return previews
+})
+
+function previewOf(row) {
+  if (!row) return null
+  if (row.isProductGroup) return productPlannedPreviews.value[row.id] ?? null
+  return plannedPreviews[row.id] ?? null
 }
 
 function getPlannedTone(row) {
-  if (!Reflect.has(plannedDrafts, row.id)) return row.urgencyTone
-  return plannedPreviewTones[row.id] ?? row.urgencyTone
+  return previewOf(row)?.urgencyTone || row.urgencyTone
+}
+
+// 预警灯也跟着草稿预览：键入时红点先变绿，采纳后才算真的落定（虚线环表示「预览中」）。
+function urgencyTitle(row) {
+  const preview = previewOf(row)
+  if (!preview) return row.strategyIssue || row.urgencyText
+  const draft = Number(plannedDrafts[row.id]) || 0
+  return `预览（未采纳）：需安排 ${formatQuantity(draft)} 后预警变为「${preview.urgencyText}」，采纳后才生效`
 }
 
 // —— 备货：订单弹窗 ——
@@ -569,7 +597,7 @@ function handleOrderCancelled({ skuId, quantity }) {
 
   const current = Reflect.has(plannedDrafts, item.id) ? Number(plannedDrafts[item.id]) || 0 : 0
   plannedDrafts[item.id] = current + (Number(quantity) || 0)
-  refreshPlannedPreviewTone(item)
+  refreshPlannedPreview(item)
 }
 
 const warningFilters = [
@@ -756,7 +784,7 @@ const TABLE_COLUMNS = [
   { key: 'color', label: '颜色', width: 132, group: '商品' },
   { key: 'urgency', label: '预警', width: 44, group: '商品' },
   { key: 'planned', label: '需安排', width: 142, group: '入口' },
-  { key: 'producing', label: '生产中', width: 76, group: '入口' },
+  { key: 'inTransitStock', label: '生产中', width: 84, group: '入口' },
   // 「备货」= 采购执行层：只来自订单流水，与导入数据无关。三列互为校验：累积下单 = 待收 + 到货。
   { key: 'ordered', label: '累积下单', width: 84, group: '备货' },
   { key: 'pending', label: '待收', width: 76, group: '备货' },
@@ -764,7 +792,8 @@ const TABLE_COLUMNS = [
   { key: 'backorder', label: '欠货', width: 68, group: '出口' },
   { key: 'weeklySales', label: '周销量', width: 76, group: '出口' },
   { key: 'turnoverIn', label: '周转入', width: 74, group: '库存(公斤)' },
-  { key: 'inTransitStock', label: '在途库存', width: 84, group: '库存(公斤)' },
+  // 在途库存与「累积下单」同源（订单流水，不来自导入）：显示该 SKU 累计下单公斤。
+  { key: 'inTransitOrdered', label: '在途库存', width: 84, group: '库存(公斤)' },
   { key: 'warehouseStock', label: '在仓库存', width: 84, group: '库存(公斤)' },
   { key: 'theoreticalStock', label: '理论库存', width: 84, group: '库存(公斤)' },
   { key: 'projectedStock', label: '预计库存', width: 84, group: '库存(公斤)' },
@@ -791,6 +820,75 @@ const tableScrollRef = ref(null)
 const tableViewportHeight = ref(600)
 let tableScrollFrame = 0
 let tableResizeObserver = null
+
+// 「数据反馈」里受需安排影响的 4 列：键入草稿时按预览值展示（其余列与理论库存是事实层，不动）。
+const PREVIEW_COLUMNS = [
+  {
+    key: 'projectedStock',
+    label: '预计库存',
+    value: (row) => row.projectedStock,
+    format: (row) => formatQuantity(row.projectedStock),
+  },
+  {
+    key: 'daysOfStock',
+    label: '日库销比',
+    value: (row) => row.daysOfStock,
+    format: (row) => (row.excluded ? '—' : formatRatio(row.daysOfStock)),
+  },
+  {
+    key: 'shortage',
+    label: '缺口量',
+    value: (row) => row.shortage,
+    format: (row) => (row.excluded ? '—' : formatQuantity(row.shortage)),
+  },
+  {
+    key: 'shortageRate',
+    label: '缺口率',
+    value: (row) => row.shortageRate,
+    format: (row) => (row.excluded ? '—' : formatRate(row.shortageRate, row.strategyAvailable)),
+  },
+]
+
+function previewText(row, column) {
+  const preview = previewOf(row)
+  return preview ? column.format(preview) : column.format(row)
+}
+
+// 只有「显示值真的变了」的格子才进入预览态：父行的日库销比这类汇总不出的列不打底色。
+function isPreviewCell(row, column) {
+  return previewOf(row) !== null && previewText(row, column) !== column.format(row)
+}
+
+// 变化量：只在两边都是数字且真的变了时给出（∞、缺省这类没有可比性）。
+function previewDelta(row, column) {
+  const preview = previewOf(row)
+  if (!preview) return null
+  const before = column.value(row)
+  const after = column.value(preview)
+  if (!Number.isFinite(before) || !Number.isFinite(after)) return null
+  const diff = Math.round(after - before)
+  if (diff === 0) return null
+  return { text: `${diff > 0 ? '+' : '−'}${Math.abs(diff)}`, direction: diff > 0 ? 'up' : 'down' }
+}
+
+function previewTone(row) {
+  const preview = previewOf(row)
+  if (!preview) return ''
+  // 父行没有自己的预警灯，用中性的主色提示「这是预览值」。
+  return row.isProductGroup ? 'neutral' : preview.urgencyTone || 'neutral'
+}
+
+function previewTitle(row, column) {
+  const preview = previewOf(row)
+  if (!preview) return ''
+  const before = column.format(row)
+  const after = column.format(preview)
+  if (row.isProductGroup) {
+    return `预览（未采纳）：该品名下已填写的需安排合计进来后，${column.label} ${before} → ${after}`
+  }
+  const draft = Number(plannedDrafts[row.id]) || 0
+  return `预览（未采纳）：需安排 ${formatQuantity(draft)} 后，${column.label} ${before} → ${after}；点「采纳」或回车才写入`
+}
 
 function handleTableScroll() {
   if (tableScrollFrame) return
@@ -865,7 +963,7 @@ function restoreTableView() {
 
   // 预警预览色是按行的缓存：按草稿重算一遍。
   for (const id of Object.keys(plannedDrafts)) {
-    refreshPlannedPreviewTone(itemById.value.get(id))
+    refreshPlannedPreview(itemById.value.get(id))
   }
   // 勾选可能来自屏蔽前的行，先剔掉已不可见的 SKU。
   pruneHiddenSelection()
@@ -886,8 +984,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   productTransitionTimers.forEach((timer) => clearTimeout(timer))
-  if (purchaseFlyTimer) clearTimeout(purchaseFlyTimer)
-  if (purchasePulseTimer) clearTimeout(purchasePulseTimer)
   if (filterDebounceTimer) clearTimeout(filterDebounceTimer)
   if (tableScrollFrame) cancelAnimationFrame(tableScrollFrame)
   if (importToastTimer) clearInterval(importToastTimer)
@@ -927,56 +1023,45 @@ function submitUrgentPlans() {
     }
   }
 
-  applyRestockPlans(accepted)
+  writePlanned(accepted)
   urgentPlanDialogVisible.value = false
   urgentPlanRows.value = []
 }
 
-// 采购清单的唯一写入路径：同一 SKU 只保留一条，重复写入按覆盖处理。
-// plans 里的 planned 是「需安排」的绝对值，返回实际写入的行数。
-function applyRestockPlans(plans) {
-  const accepted = plans.filter((plan) => Number(plan.planned) > 0)
-  if (accepted.length === 0) return 0
-
-  // 采购清单按 id 建一次索引：逐行 find / findIndex 会把整份清单重扫几千遍。
-  const purchaseIndexById = new Map(purchaseList.map((entry, index) => [entry.id, index]))
+// 需安排的唯一写入路径：同一 SKU 只保留一条绝对值（覆盖），
+// 采购下单页直接按「需安排 > 0」列出待下单的 SKU，不再另存一份采购清单。
+// plans 里的 planned 是「需安排」的绝对值（公斤），返回真正写进去的行。
+function writePlanned(plans) {
   const changedIds = []
-  for (const plan of accepted) {
+  const written = []
+  for (const plan of plans) {
     const item = itemById.value.get(plan.id)
-    if (!item) continue
+    const planned = Math.round(Number(plan.planned))
+    if (!item || !(planned > 0)) continue
 
-    plannedUndoHistory[item.id] = {
-      previousPlanned: item.planned,
-      previousPurchaseItem:
-        purchaseIndexById.has(item.id) ? { ...purchaseList[purchaseIndexById.get(item.id)] } : null,
-    }
-    item.planned = Number(plan.planned)
+    plannedUndoHistory[item.id] = { previousPlanned: item.planned }
+    item.planned = planned
     delete plannedDrafts[item.id]
-    delete plannedPreviewTones[item.id]
-
-    const purchaseIndex = purchaseIndexById.get(item.id)
-    if (purchaseIndex === undefined) {
-      purchaseIndexById.set(item.id, purchaseList.length)
-      purchaseList.push({
-        id: item.id,
-        skuId: item.skuId,
-        product: item.product,
-        color: item.color,
-        planned: item.planned ?? 0,
-      })
-    } else {
-      const purchaseItem = purchaseList[purchaseIndex]
-      purchaseItem.skuId = item.skuId
-      purchaseItem.product = item.product
-      purchaseItem.color = item.color
-      purchaseItem.planned = item.planned ?? 0
-    }
+    delete plannedPreviews[item.id]
     changedIds.push(item.id)
+    written.push(item)
   }
 
+  if (written.length === 0) return written
   refreshLeafRows(changedIds)
   schedulePlanPersist(inventoryStore)
-  return changedIds.length
+  return written
+}
+
+// 提交时的数量：需安排输入框里已填的草稿优先，空着就用占位建议值（补到正常库存的差额）；
+// 两者都没有（不缺货 / 缺系数 / 订单货没填）就是 0，不落地也不进入下单面板。
+function resolveSubmitPlanned(row) {
+  if (hasPlannedDraft(row.id)) {
+    const draft = Number(plannedDrafts[row.id])
+    return Number.isFinite(draft) && draft > 0 ? Math.round(draft) : 0
+  }
+  if (hasPlannedUndo(row.id)) return Number(row.planned) || 0
+  return getSuggestedPlanned(row)
 }
 
 function applyAllRecommendedPlans() {
@@ -994,6 +1079,9 @@ function hasPlannedUndo(id) {
 }
 
 function getPlannedDraft(row) {
+  // 先空读一下草稿表：hasOwnProperty 不走 Vue 的 get 陷阱，不读这一次的话
+  // 新增 / 删除草稿不会让读它的地方（表格那一格、SKU 弹窗的需安排）失效。
+  void plannedDrafts[row.id]
   if (hasPlannedDraft(row.id)) return plannedDrafts[row.id]
   // 0 与缺省都当作「还没填」：否则下单清零留下的一个 0 会把占位建议值挡住，看不出还差多少。
   if (hasPlannedUndo(row.id)) return row.planned
@@ -1012,7 +1100,7 @@ function getPlannedPlaceholder(row) {
 
 function getPlannedPlaceholderTitle(row) {
   if (row.manualBehavior === 'order') {
-    return '订单货：客户报多少单就在这里填多少公斤，采纳后写入本次采购清单（不参与预警与评分，不给建议值）'
+    return '订单货：客户报多少单就在这里填多少公斤，采纳后写入需安排（不跳转，去「采购下单」拆单；不参与预警与评分，不给建议值）'
   }
   if (!row.strategyAvailable) {
     return `备货模式缺省，无法计算建议需安排量：${row.strategyIssue || '系数不可用'}`
@@ -1020,7 +1108,7 @@ function getPlannedPlaceholderTitle(row) {
 
   const suggestion = getSuggestedPlanned(row)
   if (suggestion > 0) {
-    return `建议填写 ${formatQuantity(suggestion)}，采纳后预计库存达到正常库存（绿色带中位）；该建议不会自动采纳，下单页会再按缸规则建议整缸数量`
+    return `建议填写 ${formatQuantity(suggestion)}，采纳后预计库存达到正常库存（绿色带中位）；要去拆单时点顶部「采购下单」，下单页会再按缸规则建议整缸数量`
   }
   return `预计库存（已含累计下单 ${formatQuantity(row.ordered)} 公斤）不低于正常库存下限，无需再补；要加量可直接填写`
 }
@@ -1029,125 +1117,68 @@ function updatePlannedDraft(id, value) {
   if (Reflect.has(plannedUndoHistory, id)) return
 
   plannedDrafts[id] = value
-  refreshPlannedPreviewTone(itemById.value.get(id))
+  refreshPlannedPreview(itemById.value.get(id))
 }
 
-function snapshotPurchaseItem(id) {
-  const purchaseItem = purchaseList.find((entry) => entry.id === id)
-  return purchaseItem ? { ...purchaseItem } : null
-}
-
-function syncPurchaseItem(item) {
-  const purchaseIndex = purchaseList.findIndex((entry) => entry.id === item.id)
-  if (purchaseIndex === -1) {
-    purchaseList.push({
-      id: item.id,
-      skuId: item.skuId,
-      product: item.product,
-      color: item.color,
-      planned: item.planned ?? 0,
-    })
+// 「采纳」：把草稿（或占位建议值）落成锁定的需安排。
+// 采纳后不跳转，留在主面板继续处理下一行（要去拆单时自己点顶部「采购下单」）。
+function acceptPlannedDraft(row) {
+  const planned = resolveSubmitPlanned(row)
+  if (!(planned > 0)) {
+    ElMessage.warning(
+      row.manualBehavior === 'order'
+        ? '订单货请先在「需安排」填写客户报的量，再采纳'
+        : '该 SKU 没有可采纳的补货量：请先在「需安排」填写数量',
+    )
     return
   }
 
-  purchaseList[purchaseIndex].skuId = item.skuId
-  purchaseList[purchaseIndex].product = item.product
-  purchaseList[purchaseIndex].color = item.color
-  purchaseList[purchaseIndex].planned = item.planned ?? 0
+  const written = writePlanned([{ id: row.id, planned }])
+  if (written.length === 0) return
+  ElMessage.success(`已采纳 ${formatQuantity(planned)} 公斤，已写入需安排（去「采购下单」拆单）`)
 }
 
-function restorePurchaseItem(id, previousPurchaseItem) {
-  const purchaseIndex = purchaseList.findIndex((entry) => entry.id === id)
-  if (previousPurchaseItem) {
-    if (purchaseIndex === -1) purchaseList.push({ ...previousPurchaseItem })
-    else purchaseList.splice(purchaseIndex, 1, { ...previousPurchaseItem })
-  } else if (purchaseIndex !== -1) {
-    purchaseList.splice(purchaseIndex, 1)
-  }
+// 「采纳」在没有草稿时用占位建议值兜底，所以既没填数量、建议值又是 0 的行没什么可采纳的（按钮置灰）。
+function canAdoptPlanned(row) {
+  if (hasPlannedDraft(row.id) || hasPlannedUndo(row.id)) return true
+  return getSuggestedPlanned(row) > 0
 }
 
-// 清单里的「去下单」：把当前 SKU 交给分订单弹窗（染厂 / 分单人员 / 数量）。
-function openPurchaseOrder(row) {
-  const item = itemById.value.get(row.id)
-  if (!item) return
-  purchaseOrderItem.value = {
-    id: row.id,
-    skuId: purchaseRowSkuId(row),
-    product: item.product,
-    color: item.color,
-    treeCategory: purchaseRowCategory(row),
-    planned: row.planned ?? 0,
-    monthlyAvgCount: item.monthlyAvgCount,
-  }
-  purchaseOrderDialogVisible.value = true
-}
-
-function acceptPlannedDraft(row) {
-  if (!hasPlannedDraft(row.id)) {
+function handlePlannedAction(row) {
+  // 已采纳过（且没有新草稿）时，这个按钮就是撤销。
+  if (!hasPlannedDraft(row.id) && hasPlannedUndo(row.id)) {
     undoPlannedAcceptance(row)
     return
   }
-
-  const item = itemById.value.get(row.id)
-  if (!item) return
-
-  plannedUndoHistory[row.id] = {
-    previousPlanned: item.planned,
-    previousPurchaseItem: snapshotPurchaseItem(row.id),
-  }
-  item.planned = plannedDrafts[row.id] ?? 0
-  delete plannedDrafts[row.id]
-  delete plannedPreviewTones[row.id]
-  refreshLeafRow(row.id)
-  syncPurchaseItem(item)
-  schedulePlanPersist(inventoryStore)
-}
-
-function handlePlannedAction(row, event) {
-  const isAccepting = hasPlannedDraft(row.id)
   acceptPlannedDraft(row)
-  if (isAccepting) animatePurchaseListButton(event.currentTarget)
 }
 
-function animatePurchaseListButton(sourceElement) {
-  const targetElement = document.querySelector('.purchase-list-button')
-  if (!sourceElement || !targetElement) return
-
-  const source = sourceElement.getBoundingClientRect()
-  const target = targetElement.getBoundingClientRect()
-  const iconSize = 20
-
-  if (purchaseFlyTimer) clearTimeout(purchaseFlyTimer)
-
-  flyingPurchaseIcon.value = {
-    left: source.left + source.width / 2 - iconSize / 2,
-    top: source.top + source.height / 2 - iconSize / 2,
-    offsetX: target.left + target.width / 2 - source.left - source.width / 2,
-    offsetY: target.top + target.height / 2 - source.top - source.height / 2,
-  }
-
-  purchaseFlyTimer = window.setTimeout(clearFlyingPurchaseIcon, 1350)
+// 需安排输入框里按回车 = 点「采纳」（与行内按钮同一条路径）。
+// 只认输入框本身：按钮上的回车会自己合成 click，不拦就会触发两次；
+// 按钮置灰的行（没填也没建议值）回车同样不动作。
+function handlePlannedEnter(row, event) {
+  if (event?.target?.tagName !== 'INPUT') return
+  if (!canAdoptPlanned(row)) return
+  handlePlannedAction(row)
 }
 
-function clearFlyingPurchaseIcon() {
-  if (purchaseFlyTimer) clearTimeout(purchaseFlyTimer)
-  purchaseFlyTimer = 0
-  flyingPurchaseIcon.value = null
+// 批量提交后要落到「下单列表的第一条」：主面板按品名月均销量重排过，
+// 下单列表却按库存行顺序排，两边顺序不同 —— 直接拿主面板的第一条会落到下单列表的末尾或中间，
+// 所以按库存行顺序在这些刚写入的 SKU 里挑最靠上的一条。
+function firstWrittenInListOrder(written) {
+  const order = new Map()
+  inventoryItems.forEach((item, index) => order.set(item.id, index))
+  return written.reduce((best, item) =>
+    (order.get(item.id) ?? 0) < (order.get(best.id) ?? 0) ? item : best,
+  )
 }
 
-function pulsePurchaseListButton() {
-  purchaseListPulse.value = true
-  if (purchasePulseTimer) clearTimeout(purchasePulseTimer)
-  purchasePulseTimer = window.setTimeout(() => {
-    purchaseListPulse.value = false
-    purchasePulseTimer = 0
-  }, 650)
-}
-
-function onPurchaseIconAnimationEnd() {
-  if (!flyingPurchaseIcon.value) return
-  clearFlyingPurchaseIcon()
-  pulsePurchaseListButton()
+// 采购下单页按「需安排 > 0」列出 SKU；带上 sku 参数让右侧明细直接落到刚点的那一条。
+function goToPurchase(skuId = '') {
+  void router.push({
+    name: MAIN_PANEL.purchaseRouteName,
+    query: skuId ? { sku: skuId } : undefined,
+  })
 }
 
 function undoPlannedAcceptance(row) {
@@ -1158,9 +1189,13 @@ function undoPlannedAcceptance(row) {
   if (!item) return
 
   item.planned = undo.previousPlanned
-  restorePurchaseItem(row.id, undo.previousPurchaseItem)
+  // 采纳时下单页可能已经按缸规则自动带过一张建议分单：撤销要连它一起清掉，
+  // 否则这个 SKU 下次采纳时会带着上次的草稿回到下单页。
+  if (purchaseStore.orderEntries(item.skuId).length > 0) {
+    purchaseStore.clearOrderEntries(item.skuId)
+  }
   delete plannedDrafts[row.id]
-  delete plannedPreviewTones[row.id]
+  delete plannedPreviews[row.id]
   delete plannedUndoHistory[row.id]
   refreshLeafRow(row.id)
   schedulePlanPersist(inventoryStore)
@@ -1318,43 +1353,25 @@ watch(
   },
 )
 
-function openRestockDialog() {
-  restockRows.value = inventoryLeafRows.value
-    .filter((row) => selectedSkuIds.value.has(row.id))
-    .map((row) => {
-      // 需安排始终是精准公斤数；缸数建议只在采购下单页出现。
-      const suggested = getSuggestedPlanned(row)
-      return {
-        id: row.id,
-        product: row.product,
-        color: row.color,
-        strategyAvailable: row.strategyAvailable,
-        manualBehavior: row.manualBehavior,
-        currentPlanned: row.planned ?? 0,
-        suggested,
-        planned: suggested,
-      }
-    })
-  restockDialogVisible.value = true
-}
+// 底部「确认补货」：把勾选行落成需安排（草稿优先、其次占位建议值），然后直接进采购下单面板。
+function confirmRestock() {
+  const selected = inventoryLeafRows.value.filter((row) => selectedSkuIds.value.has(row.id))
+  if (selected.length === 0) return
 
-const hasRestockPlan = computed(() => restockRows.value.some((row) => Number(row.planned) > 0))
-
-function applyAllSuggestedRestock() {
-  restockRows.value.forEach((row) => {
-    row.planned = row.suggested
-  })
-}
-
-function submitRestock() {
-  const appliedCount = applyRestockPlans(restockRows.value)
-  if (appliedCount > 0) {
-    ElMessage.success(`已加入本次采购清单：${appliedCount} 个 SKU`)
-    pulsePurchaseListButton()
+  const written = writePlanned(
+    selected.map((row) => ({ id: row.id, planned: resolveSubmitPlanned(row) })),
+  )
+  if (written.length === 0) {
+    ElMessage.warning('选中的 SKU 都没有可补货的数量：请先在「需安排」填写，或缺货量已为 0')
+    return
   }
-  restockDialogVisible.value = false
-  restockRows.value = []
+
+  const skipped = selected.length - written.length
   clearSkuSelection()
+  ElMessage.success(
+    `已写入需安排：${written.length} 个 SKU${skipped > 0 ? `，${skipped} 个没有数量已跳过` : ''}`,
+  )
+  goToPurchase(firstWrittenInListOrder(written).skuId)
 }
 
 function getRowClassName({ row }) {
@@ -1419,130 +1436,10 @@ function createExcelCell(value, reference, styleIndex = 0) {
 
   return `<c r="${reference}" t="inlineStr"${style}><is><t xml:space="preserve">${escapeXml(value ?? '')}</t></is></c>`
 }
-
-// 采购清单与分单明细各一张工作表：清单给采购看总量，明细给染厂/跟单看分单。
-function buildPurchaseSheetXml(rows, columnWidths) {
-  const worksheetRows = rows
-    .map((row, rowIndex) => {
-      const cells = row
-        .map((value, columnIndex) => {
-          const reference = `${getExcelColumnName(columnIndex)}${rowIndex + 1}`
-          return createExcelCell(value, reference, rowIndex === 0 ? 1 : 0)
-        })
-        .join('')
-      return `<row r="${rowIndex + 1}">${cells}</row>`
-    })
-    .join('')
-  const cols = columnWidths
-    .map(
-      (width, index) =>
-        `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`,
-    )
-    .join('')
-  const lastColumn = getExcelColumnName(rows[0].length - 1)
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${cols}</cols><sheetData>${worksheetRows}</sheetData><autoFilter ref="A1:${lastColumn}${rows.length}"/></worksheet>`
-}
-
-function exportPurchaseListToExcel() {
-  const rows = [
-    ['品名', '颜色', '树形分类', '需安排', '缸数', '每缸公斤', '建议下单', '累积下单', '到货', '待收', '分单数量'],
-    ...purchaseListRows.value.map((item) => {
-      const orders = purchaseRowOrders(item)
-      const plan = purchaseRowVatPlan(item)
-      return [
-        item.product,
-        item.color,
-        purchaseRowCategory(item),
-        item.planned ?? 0,
-        plan.vatCount ?? '',
-        plan.kgPerVat ?? '',
-        plan.rounded,
-        orders.total,
-        orders.received,
-        orders.pending,
-        orders.count,
-      ]
-    }),
-  ]
-
-  const detailRows = [
-    ['品名', '颜色', '树形分类', '染厂', '分单人员', '缸数', '每缸公斤', '数量（公斤）', '到货', '待收', '备注'],
-  ]
-  for (const item of purchaseListRows.value) {
-    const skuId = purchaseRowSkuId(item)
-    if (!skuId) continue
-    const category = purchaseRowCategory(item)
-    for (const entry of purchaseRowOrders(item).orders) {
-      const factoryName =
-        entry.factoryName ||
-        findFactoryById(purchaseStore.settings, entry.factoryId)?.name ||
-        ''
-      detailRows.push([
-        item.product,
-        item.color,
-        category,
-        factoryName,
-        entry.assignee,
-        entry.vatCount ?? '',
-        entry.kgPerVat ?? '',
-        entry.quantity,
-        entry.receivedQty ?? 0,
-        Math.max(0, (Number(entry.quantity) || 0) - (Number(entry.receivedQty) || 0)),
-        entry.note,
-      ])
-    }
-  }
-
-  const worksheetXml = buildPurchaseSheetXml(rows, [24, 14, 18, 12, 10, 12, 12, 12, 10])
-  const detailSheetXml = buildPurchaseSheetXml(detailRows, [24, 14, 18, 16, 12, 10, 12, 14, 24])
-  const styleXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FF2F3B43"/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF3F6F8"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
-  const workbookXml = detailRows.length > 1
-    ? `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="本次采购清单" sheetId="1" r:id="rId1"/><sheet name="分单明细" sheetId="2" r:id="rId2"/></sheets></workbook>`
-    : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="本次采购清单" sheetId="1" r:id="rId1"/></sheets></workbook>`
-  // 采购清单工作簿：有分单时追加「分单明细」工作表。
-  const hasDetailSheet = detailRows.length > 1
-  const files = {
-    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>${hasDetailSheet ? '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' : ''}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
-    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
-    'xl/workbook.xml': workbookXml,
-    'xl/_rels/workbook.xml.rels': hasDetailSheet
-      ? `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
-      : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
-    'xl/worksheets/sheet1.xml': worksheetXml,
-    'xl/styles.xml': styleXml,
-    ...(hasDetailSheet ? { 'xl/worksheets/sheet2.xml': detailSheetXml } : {}),
-  }
-
-  try {
-    const workbookBytes = zipSync(
-      Object.fromEntries(
-        Object.entries(files).map(([path, content]) => [path, new TextEncoder().encode(content)]),
-      ),
-      { level: 6 },
-    )
-    const workbookBlob = new Blob([workbookBytes], {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    })
-    const downloadUrl = URL.createObjectURL(workbookBlob)
-    const link = document.createElement('a')
-    const timestamp = new Date().toLocaleString('sv-SE').replace(/[: ]/g, '-')
-    link.href = downloadUrl
-    link.download = `本次采购清单-${timestamp}.xlsx`
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000)
-    ElMessage.success('本次采购清单已导出')
-  } catch (error) {
-    console.error('Failed to export purchase list workbook', error)
-    ElMessage.error(`采购清单导出失败：${error instanceof Error ? error.message : '未知错误'}`)
-  }
-}
-
 // 导入成功后清空需安排草稿并重建表格；总表与销售表的写入已在 useSourceImport 内完成。
 function handleSourcesImported(summary) {
   for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
-  for (const key of Object.keys(plannedPreviewTones)) delete plannedPreviewTones[key]
+  for (const key of Object.keys(plannedPreviews)) delete plannedPreviews[key]
 
   rebuildLeafRows()
   selectedRowId.value = null
@@ -1661,29 +1558,6 @@ function downloadImportTemplate() {
         <div class="import-toast__progress-bar" :style="{ width: `${importToast.progress}%` }"></div>
       </div>
     </div>
-    <span
-      v-if="flyingPurchaseIcon"
-      class="purchase-fly-icon"
-      :style="{
-        left: `${flyingPurchaseIcon.left}px`,
-        top: `${flyingPurchaseIcon.top}px`,
-        '--purchase-fly-x': `${flyingPurchaseIcon.offsetX}px`,
-        '--purchase-fly-y': `${flyingPurchaseIcon.offsetY}px`,
-      }"
-      aria-hidden="true"
-      @animationend="onPurchaseIconAnimationEnd"
-    >
-      <svg viewBox="0 0 20 20">
-        <path
-          d="M4 6.5h12l-1 9H5l-1-9Zm3 0V5a3 3 0 0 1 6 0v1.5M8 10v2m4-2v2"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="1.6"
-        />
-      </svg>
-    </span>
     <div class="page-sticky-header">
       <PanelNavigation />
       <div class="page-head">
@@ -1715,14 +1589,6 @@ function downloadImportTemplate() {
             @click="openUrgentPlanDialog"
           >
             紧急补货 <span class="urgent-count">{{ urgentRows.length }}</span>
-          </ElButton>
-          <ElButton
-            class="purchase-list-button"
-            size="small"
-            :class="{ 'purchase-list-button--received': purchaseListPulse }"
-            @click="purchaseListDialogVisible = true"
-          >
-            本次采购清单 <span class="urgent-count urgent-count--muted">{{ purchaseList.length }}</span>
           </ElButton>
         </div>
       </div>
@@ -1837,7 +1703,7 @@ function downloadImportTemplate() {
               class="inventory-vtable__head-cell"
               :class="{
                 'inventory-vtable__head-cell--deep-right':
-                  column.key === 'planned' || column.key === 'warehouseStock',
+                  column.key === 'inTransitStock' || column.key === 'warehouseStock',
               }"
             >
               <ElCheckbox
@@ -1949,29 +1815,42 @@ function downloadImportTemplate() {
               </div>
               <div
                 class="inventory-vtable__cell"
-                :class="`urgency-cell urgency-cell--${row.urgencyTone}`"
+                :class="`urgency-cell urgency-cell--${getPlannedTone(row)}`"
               >
                 <span
                   v-if="!row.isProductGroup"
                   class="urgency-indicator"
-                  :class="`urgency-indicator--${row.urgencyTone}`"
-                  :title="row.strategyIssue || row.urgencyText"
-                  :aria-label="`紧急状态：${row.urgencyText}`"
+                  :class="[
+                    `urgency-indicator--${getPlannedTone(row)}`,
+                    { 'urgency-indicator--preview': previewOf(row) },
+                  ]"
+                  :title="urgencyTitle(row)"
+                  :aria-label="`紧急状态：${urgencyTitle(row)}`"
                 />
               </div>
               <div
-                class="inventory-vtable__cell inventory-vtable__cell--deep-right"
+                class="inventory-vtable__cell"
                 :class="[
                   `planned-cell planned-cell--${getPlannedTone(row)}`,
                   { 'planned-cell--order': row.manualBehavior === 'order' },
                 ]"
               >
-                <template v-if="row.isProductGroup">{{ formatQuantity(row.planned) }}</template>
+                <template v-if="row.isProductGroup">
+                  <span
+                    v-if="previewOf(row)"
+                    :key="formatQuantity(previewOf(row).planned)"
+                    class="preview-number"
+                  >
+                    {{ formatQuantity(previewOf(row).planned) }}
+                  </span>
+                  <template v-else>{{ formatQuantity(row.planned) }}</template>
+                </template>
                 <div v-else class="planned-entry">
                   <div
                     class="planned-input-shell"
                     :class="{ 'planned-input-shell--locked': hasPlannedUndo(row.id) }"
                     @click.stop
+                    @keydown.enter.prevent="handlePlannedEnter(row, $event)"
                   >
                     <ElInputNumber
                       :model-value="getPlannedDraft(row)"
@@ -2010,20 +1889,25 @@ function downloadImportTemplate() {
                   <ElButton
                     class="planned-accept-button"
                     size="small"
-                    :disabled="!hasPlannedDraft(row.id) && !hasPlannedUndo(row.id)"
+                    :disabled="!canAdoptPlanned(row)"
+                    :title="
+                      !hasPlannedDraft(row.id) && hasPlannedUndo(row.id)
+                        ? '撤销这次采纳：需安排恢复原值'
+                        : '采纳需安排（没填数量就按建议值），不跳转'
+                    "
                     :aria-label="`${row.product} ${row.color} ${
                       hasPlannedDraft(row.id) || !hasPlannedUndo(row.id)
                         ? '采纳需安排'
                         : '撤销需安排'
                     }`"
-                    @click.stop="handlePlannedAction(row, $event)"
+                    @click.stop="handlePlannedAction(row)"
                   >
                     {{ hasPlannedDraft(row.id) || !hasPlannedUndo(row.id) ? '采纳' : '撤销' }}
                   </ElButton>
                 </div>
               </div>
-              <div class="inventory-vtable__cell">
-                {{ formatQuantity(row.producing) }}
+              <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
+                {{ formatQuantity(row.inTransitStock) }}
               </div>
               <div
                 class="inventory-vtable__cell inventory-vtable__cell--ordered"
@@ -2079,8 +1963,8 @@ function downloadImportTemplate() {
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.turnoverIn) }}
               </div>
-              <div class="inventory-vtable__cell">
-                {{ formatQuantity(row.inTransitStock) }}
+              <div class="inventory-vtable__cell" :title="orderCellTitle(row)">
+                {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
                 {{ formatQuantity(row.warehouseKg) }}
@@ -2088,17 +1972,31 @@ function downloadImportTemplate() {
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.theoreticalStock) }}
               </div>
-              <div class="inventory-vtable__cell">
-                {{ formatQuantity(row.projectedStock) }}
-              </div>
-              <div class="inventory-vtable__cell">
-                {{ row.excluded ? '—' : formatRatio(row.daysOfStock) }}
-              </div>
-              <div class="inventory-vtable__cell">
-                {{ row.excluded ? '—' : formatQuantity(row.shortage) }}
-              </div>
-              <div class="inventory-vtable__cell">
-                {{ row.excluded ? '—' : formatRate(row.shortageRate, row.strategyAvailable) }}
+              <!-- 需安排草稿的实时预览：这 4 列在采纳前先按草稿算一版 -->
+              <div
+                v-for="column in PREVIEW_COLUMNS"
+                :key="column.key"
+                class="inventory-vtable__cell"
+                :class="[
+                  isPreviewCell(row, column)
+                    ? `preview-cell preview-cell--${previewTone(row)}`
+                    : '',
+                ]"
+                :title="isPreviewCell(row, column) ? previewTitle(row, column) : ''"
+              >
+                <template v-if="isPreviewCell(row, column)">
+                  <span :key="previewText(row, column)" class="preview-number">
+                    {{ previewText(row, column) }}
+                  </span>
+                  <span
+                    v-if="previewDelta(row, column)"
+                    class="preview-delta"
+                    :class="`preview-delta--${previewDelta(row, column).direction}`"
+                  >
+                    {{ previewDelta(row, column).text }}
+                  </span>
+                </template>
+                <template v-else>{{ column.format(row) }}</template>
               </div>
             </div>
           </div>
@@ -2113,7 +2011,11 @@ function downloadImportTemplate() {
         已选 <strong>{{ selectedSkuIds.size }}</strong> 个 SKU
       </span>
       <ElButton class="batch-restock-clear" @click="clearSkuSelection">清空</ElButton>
-      <ElButton class="batch-restock-confirm" @click="openRestockDialog">
+      <ElButton
+        class="batch-restock-confirm"
+        title="按需安排写入补货量（已填的数量优先，空着用建议值），然后直接进入采购下单"
+        @click="confirmRestock"
+      >
         确认补货
       </ElButton>
     </div>
@@ -2224,92 +2126,6 @@ function downloadImportTemplate() {
       </template>
     </ElDialog>
 
-    <ElDialog
-      v-model="restockDialogVisible"
-      title="确认补货"
-      width="820px"
-      class="restock-dialog"
-      :close-on-click-modal="false"
-      destroy-on-close
-      align-center
-    >
-      <p class="restock-hint">
-        默认填入与主表一致的建议需安排量；确认后按填写数量覆盖“需安排”，并写入本次采购清单（同一 SKU 只保留一条）。
-      </p>
-      <div class="restock-table" role="table" aria-label="确认补货">
-        <VirtualList
-          v-if="restockRows.length > 0"
-          :items="restockRows"
-          :item-height="RESTOCK_ROW_HEIGHT"
-          class="restock-list"
-        >
-          <template #header>
-            <div class="restock-header" role="row">
-              <span role="columnheader">商品信息</span>
-              <span role="columnheader">当前需安排</span>
-              <span role="columnheader">补货数量</span>
-              <span role="columnheader">建议量</span>
-            </div>
-          </template>
-          <template #default="{ item: row }">
-            <div class="restock-row" role="row">
-              <div class="restock-product" role="cell">
-                <strong>{{ row.product }}</strong>
-                <span>{{ row.color }}</span>
-              </div>
-              <span role="cell">{{ formatQuantity(row.currentPlanned) }}</span>
-              <div role="cell">
-                <ElInputNumber
-                  v-model="row.planned"
-                  :min="0"
-                  :precision="0"
-                  :controls="false"
-                  size="small"
-                  class="restock-input"
-                  :aria-label="`${row.product} ${row.color} 补货数量`"
-                />
-              </div>
-              <div class="restock-suggestion" role="cell">
-                <strong>
-                  {{
-                    row.manualBehavior === 'order'
-                      ? '按订单填写'
-                      : row.strategyAvailable
-                        ? formatQuantity(row.suggested)
-                        : '缺省'
-                  }}
-                </strong>
-                <ElButton
-                  text
-                  type="primary"
-                  :disabled="!row.strategyAvailable"
-                  @click="row.planned = row.suggested"
-                >
-                  采用
-                </ElButton>
-              </div>
-            </div>
-          </template>
-        </VirtualList>
-        <div v-if="restockRows.length === 0" class="restock-empty">尚未选择 SKU</div>
-      </div>
-      <template #footer>
-        <div class="dialog-footer">
-          <ElButton @click="restockDialogVisible = false">取消</ElButton>
-          <ElButton
-            class="apply-all-button"
-            :disabled="restockRows.length === 0"
-            @click="applyAllSuggestedRestock"
-          >
-            全部采用
-          </ElButton>
-          <ElButton type="primary" :disabled="!hasRestockPlan" @click="submitRestock">
-            确认补货
-          </ElButton>
-        </div>
-      </template>
-    </ElDialog>
-
     <ImportSourcesDialog
       v-model="importDialogVisible"
       :summary="importSummary"
@@ -2328,100 +2144,6 @@ function downloadImportTemplate() {
       @cancel="cancelSplitImport"
     />
 
-    <ElDialog
-      v-model="purchaseListDialogVisible"
-      title="本次采购清单"
-      width="880px"
-      class="purchase-list-dialog"
-      :close-on-click-modal="false"
-      destroy-on-close
-      align-center
-    >
-      <p class="purchase-list-hint">
-        已采纳的需安排会加入清单；同一商品颜色只保留一条。「累积下单」是分订单数量合计，点「去下单」按染厂拆单。
-      </p>
-      <div class="purchase-list-table" role="table" aria-label="本次采购清单">
-        <VirtualList
-          v-if="purchaseListRows.length > 0"
-          :items="purchaseListRows"
-          :item-height="PURCHASE_LIST_ROW_HEIGHT"
-          class="purchase-list-rows"
-        >
-          <template #header>
-            <div class="purchase-list-header" role="row">
-              <span role="columnheader">品名</span>
-              <span role="columnheader">颜色</span>
-              <span role="columnheader">树形分类</span>
-              <span role="columnheader">需安排</span>
-              <span role="columnheader">累积下单</span>
-              <span role="columnheader">到货</span>
-              <span role="columnheader">待收</span>
-              <span role="columnheader">操作</span>
-            </div>
-          </template>
-          <template #default="{ item: row }">
-            <div class="purchase-list-row" role="row">
-              <span class="purchase-list-product" role="cell" :title="row.product">
-                {{ row.product }}
-              </span>
-              <span role="cell">{{ row.color }}</span>
-              <span
-                class="purchase-list-category"
-                role="cell"
-                :title="purchaseRowCategory(row)"
-              >
-                {{ purchaseRowCategory(row) || '—' }}
-              </span>
-              <span role="cell">{{ formatQuantity(row.planned) }}</span>
-              <span
-                role="cell"
-                class="purchase-list-ordered"
-                :class="{ 'purchase-list-ordered--done': purchaseRowOrders(row).total > 0 }"
-              >
-                {{ formatQuantity(purchaseRowOrders(row).total) }}
-                <em v-if="purchaseRowOrders(row).count">
-                  （{{ purchaseRowOrders(row).count }} 张）
-                </em>
-              </span>
-              <span role="cell" class="purchase-list-received">
-                {{ formatQuantity(purchaseRowOrders(row).received) }}
-              </span>
-              <span
-                role="cell"
-                class="purchase-list-pending"
-                :class="{ 'purchase-list-pending--open': purchaseRowOrders(row).pending > 0 }"
-              >
-                {{ formatQuantity(purchaseRowOrders(row).pending) }}
-              </span>
-              <span role="cell">
-                <ElButton size="small" text type="primary" @click="openPurchaseOrder(row)">
-                  去下单
-                </ElButton>
-              </span>
-            </div>
-          </template>
-        </VirtualList>
-        <div v-if="purchaseListRows.length === 0" class="purchase-list-empty">
-          暂无已采纳的采购计划
-        </div>
-      </div>
-      <template #footer>
-        <div class="dialog-footer purchase-list-footer">
-          <RouterLink class="purchase-list-link" to="/purchase">进入采购下单页 →</RouterLink>
-          <ElButton @click="purchaseListDialogVisible = false">关闭</ElButton>
-          <ElButton
-            type="primary"
-            :disabled="purchaseList.length === 0"
-            @click="exportPurchaseListToExcel"
-          >
-            导出 Excel
-          </ElButton>
-        </div>
-      </template>
-    </ElDialog>
-
-    <SkuOrderDialog v-model:visible="purchaseOrderDialogVisible" :item="purchaseOrderItem" />
-
     <PurchaseOrderRecordsDialog
       v-model="orderDialogVisible"
       :item="orderDialogRow"
@@ -2436,6 +2158,12 @@ function downloadImportTemplate() {
     <SkuDetailDialog
       v-model:visible="skuDetailVisible"
       :item="skuDetailItem"
+      planned-editable
+      :planned-locked="Boolean(skuDetailItem && hasPlannedUndo(skuDetailItem.id))"
+      :planned-draft="dialogPlannedDraft"
+      @update:planned-draft="handleDialogPlannedDraft"
+      @adopt-planned="handleDialogAdoptPlanned"
+      @undo-planned="handleDialogUndoPlanned"
     />
   </main>
 </template>
@@ -2568,44 +2296,6 @@ function downloadImportTemplate() {
 
 .page-head__actions :deep(.el-button) {
   margin-left: 0;
-}
-
-.purchase-fly-icon {
-  position: fixed;
-  z-index: 4000;
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.85);
-  border-radius: 50%;
-  background: var(--industrial-primary);
-  box-shadow: 0 2px 7px rgba(34, 57, 69, 0.35);
-  pointer-events: none;
-  animation: purchase-icon-fly 900ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
-}
-
-.purchase-fly-icon svg {
-  width: 14px;
-  height: 14px;
-}
-
-@keyframes purchase-icon-fly {
-  to {
-    transform: translate3d(var(--purchase-fly-x), var(--purchase-fly-y), 0) scale(0.45);
-    opacity: 0.2;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .purchase-fly-icon {
-    animation-duration: 1ms;
-  }
-
-  .purchase-list-button--received {
-    animation-duration: 1ms;
-  }
 }
 
 .table-actions {
@@ -2768,11 +2458,6 @@ function downloadImportTemplate() {
   text-align: center;
 }
 
-.urgent-count--muted {
-  background: #e1e6e9;
-  color: #2f3b43;
-}
-
 .import-split-button,
 .import-template-button {
   --el-button-text-color: var(--industrial-primary);
@@ -2784,29 +2469,6 @@ function downloadImportTemplate() {
   --el-button-active-text-color: #fff;
   --el-button-active-bg-color: var(--industrial-primary-active);
   --el-button-active-border-color: var(--industrial-primary-active);
-}
-
-.purchase-list-button {
-  --el-button-text-color: var(--industrial-primary);
-  --el-button-bg-color: #e5edf1;
-  --el-button-border-color: #8da2ad;
-  --el-button-hover-text-color: #fff;
-  --el-button-hover-bg-color: var(--industrial-primary-hover);
-  --el-button-hover-border-color: var(--industrial-primary-hover);
-  --el-button-active-text-color: #fff;
-  --el-button-active-bg-color: var(--industrial-primary-active);
-  --el-button-active-border-color: var(--industrial-primary-active);
-}
-
-.purchase-list-button--received {
-  animation: purchase-list-pulse 600ms ease-out;
-}
-
-@keyframes purchase-list-pulse {
-  35% {
-    transform: scale(1.08);
-    box-shadow: 0 0 0 4px rgba(63, 113, 141, 0.2);
-  }
 }
 
 .dialog-footer {
@@ -2830,142 +2492,10 @@ function downloadImportTemplate() {
   flex-direction: column;
 }
 
-:global(.el-dialog.purchase-list-dialog) {
-  --el-color-primary: var(--industrial-primary);
-  --el-dialog-bg-color: var(--industrial-surface);
-  --el-text-color-primary: var(--industrial-text);
-  --el-text-color-regular: var(--industrial-text);
-  --el-border-color: var(--industrial-grid);
-  --el-border-color-light: var(--industrial-grid-light);
-  --el-fill-color-blank: var(--industrial-surface);
-  width: min(880px, calc(100vw - 32px));
-  max-height: calc(100vh - 32px);
-  display: flex;
-  flex-direction: column;
-}
-
 /* 内容高于视口时只让正文滚动，标题栏与按钮始终可见 */
-:global(.el-dialog.urgent-plan-dialog .el-dialog__body),
-:global(.el-dialog.purchase-list-dialog .el-dialog__body),
-:global(.el-dialog.restock-dialog .el-dialog__body) {
+:global(.el-dialog.urgent-plan-dialog .el-dialog__body) {
   min-height: 0;
   overflow: auto;
-}
-
-.purchase-list-hint {
-  margin: 0 0 14px;
-  color: var(--industrial-muted);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.purchase-list-table {
-  display: flex;
-  flex-direction: column;
-  /* 清单可能上万条：只渲染视口内的行，容器限高避免顶穿弹窗 */
-  max-height: min(55vh, 480px);
-  overflow: hidden;
-  color: var(--industrial-text);
-  border: 1px solid var(--industrial-grid);
-  border-radius: 4px;
-}
-
-.purchase-list-header,
-.purchase-list-row {
-  display: grid;
-  grid-template-columns:
-    minmax(130px, 1.5fr)
-    minmax(80px, 0.9fr)
-    minmax(110px, 1.2fr)
-    minmax(80px, 0.8fr)
-    minmax(90px, 0.9fr)
-    minmax(80px, 0.8fr)
-    minmax(80px, 0.8fr)
-    minmax(76px, 0.6fr);
-  align-items: center;
-  gap: 10px;
-  padding: 0 12px;
-  text-align: center;
-}
-
-.purchase-list-vat {
-  color: var(--industrial-muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.purchase-list-header {
-  min-height: 48px;
-  color: var(--industrial-text);
-  background: var(--industrial-header);
-  font-weight: 600;
-}
-
-.purchase-list-row {
-  height: 100%;
-  border-top: 1px solid var(--industrial-grid-light);
-  font-size: 13px;
-}
-
-.purchase-list-product {
-  overflow: hidden;
-  text-align: left;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.purchase-list-category {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.purchase-list-ordered {
-  color: var(--industrial-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.purchase-list-ordered--done {
-  color: var(--industrial-primary);
-  font-weight: 600;
-}
-
-.purchase-list-ordered em {
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 400;
-}
-
-.purchase-list-received,
-.purchase-list-pending {
-  color: var(--industrial-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.purchase-list-pending--open {
-  color: var(--industrial-urgent);
-  font-weight: 600;
-}
-
-.purchase-list-empty {
-  padding: 28px 12px;
-  color: var(--industrial-muted);
-  text-align: center;
-}
-
-.purchase-list-footer {
-  justify-content: flex-end;
-}
-
-.purchase-list-link {
-  margin-right: auto;
-  color: var(--industrial-primary);
-  font-size: 13px;
-  text-decoration: none;
-}
-
-.purchase-list-link:hover {
-  text-decoration: underline;
 }
 
 .urgent-plan-hint {
@@ -3040,98 +2570,6 @@ function downloadImportTemplate() {
 }
 
 .urgent-plan-empty {
-  padding: 28px 12px;
-  color: var(--industrial-muted);
-  text-align: center;
-}
-
-:global(.el-dialog.restock-dialog) {
-  --el-color-primary: var(--industrial-primary);
-  --el-dialog-bg-color: var(--industrial-surface);
-  --el-text-color-primary: var(--industrial-text);
-  --el-text-color-regular: var(--industrial-text);
-  --el-border-color: var(--industrial-grid);
-  --el-border-color-light: var(--industrial-grid-light);
-  --el-fill-color-blank: var(--industrial-surface);
-  /* 窄屏 / 分屏时收窄，弹窗不超出视口 */
-  width: min(820px, calc(100vw - 32px));
-  max-height: calc(100vh - 32px);
-  display: flex;
-  flex-direction: column;
-}
-
-.restock-hint {
-  margin: 0 0 14px;
-  color: var(--industrial-muted);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.restock-table {
-  display: flex;
-  flex-direction: column;
-  /* 可能一次补货上千个 SKU：只渲染视口内的行 */
-  max-height: min(55vh, 480px);
-  overflow: hidden;
-  border: 1px solid var(--industrial-grid);
-  border-radius: 4px;
-}
-
-.restock-header,
-.restock-row {
-  display: grid;
-  grid-template-columns: minmax(190px, 1.5fr) repeat(3, minmax(120px, 1fr));
-  align-items: center;
-  gap: 12px;
-  min-height: 48px;
-  padding: 6px 12px;
-  text-align: center;
-}
-
-.restock-header {
-  color: var(--industrial-text);
-  background: var(--industrial-header);
-  font-weight: 600;
-}
-
-.restock-row {
-  height: 100%;
-  border-top: 1px solid var(--industrial-grid-light);
-  color: var(--industrial-text);
-}
-
-.restock-product {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  text-align: left;
-}
-
-.restock-product strong {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.restock-product span {
-  color: var(--industrial-muted);
-}
-
-.restock-input {
-  width: 100%;
-}
-
-.restock-suggestion {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  color: var(--industrial-primary);
-}
-
-.restock-empty {
   padding: 28px 12px;
   color: var(--industrial-muted);
   text-align: center;
@@ -3556,6 +2994,118 @@ function downloadImportTemplate() {
   text-align: center;
 }
 
+/* 需安排草稿的实时预览：这几格在采纳前先按草稿算一版，
+   浅色底 + 虚线下划线 + 变化量标出「这是未落定的预览值」，采纳后才变成正式数字。 */
+.inventory-vtable__cell.preview-cell {
+  gap: 3px;
+  background-color: rgba(63, 113, 141, 0.12);
+  transition: background-color 160ms ease;
+}
+
+.preview-number {
+  display: inline-block;
+  font-weight: 700;
+  color: var(--industrial-primary);
+  border-bottom: 1px dashed currentColor;
+  animation: preview-number-pop 200ms ease-out;
+}
+
+.preview-delta {
+  padding: 1px 3px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: #fff;
+  background-color: var(--industrial-primary);
+  animation: preview-number-pop 200ms ease-out;
+}
+
+.preview-cell--red {
+  background-color: rgba(184, 79, 72, 0.13);
+}
+
+.preview-cell--red .preview-number {
+  color: #a4443d;
+}
+
+.preview-cell--red .preview-delta {
+  color: #fff;
+  background-color: #b05a53;
+}
+
+.preview-cell--yellow {
+  background-color: rgba(196, 154, 82, 0.18);
+}
+
+.preview-cell--yellow .preview-number {
+  color: #8a6a2f;
+}
+
+.preview-cell--yellow .preview-delta {
+  color: #fff;
+  background-color: #b28a45;
+}
+
+.preview-cell--green {
+  background-color: rgba(130, 154, 133, 0.18);
+}
+
+.preview-cell--green .preview-number {
+  color: #5b7460;
+}
+
+.preview-cell--green .preview-delta {
+  color: #fff;
+  background-color: #7c9480;
+}
+
+.preview-cell--purple {
+  background-color: rgba(142, 122, 145, 0.16);
+}
+
+.preview-cell--purple .preview-number {
+  color: #6b5a86;
+}
+
+.preview-cell--purple .preview-delta {
+  color: #fff;
+  background-color: #8b7790;
+}
+
+.preview-cell--neutral .preview-number {
+  color: var(--industrial-primary);
+}
+
+.preview-cell--neutral {
+  background-color: rgba(63, 113, 141, 0.12);
+}
+
+.preview-cell--unavailable {
+  background-color: rgba(101, 115, 124, 0.08);
+}
+
+.preview-cell--unavailable .preview-number {
+  color: var(--industrial-muted);
+}
+
+.preview-cell--unavailable .preview-delta {
+  color: #fff;
+  background-color: #8b98a0;
+}
+
+@keyframes preview-number-pop {
+  from {
+    opacity: 0.35;
+    transform: translateY(2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .inventory-vtable__row--body:hover .inventory-vtable__cell {
   box-shadow:
     inset 0 2px rgba(63, 113, 141, 0.58),
@@ -3806,6 +3356,12 @@ function downloadImportTemplate() {
   width: 16px;
   height: 16px;
   background-color: var(--industrial-overstock);
+}
+
+/* 预警灯的草稿预览：灯色已经是「补完之后的颜色」，虚线环提醒还没采纳。 */
+.inventory-vtable :deep(.urgency-indicator--preview) {
+  outline: 1px dashed rgba(47, 59, 67, 0.45);
+  outline-offset: 2px;
 }
 
 .inventory-vtable :deep(.urgency-indicator--green) {

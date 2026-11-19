@@ -9,10 +9,19 @@ import { useInventoryStore } from '@/stores/inventory'
 import { usePurchaseStore } from '@/stores/purchase'
 import { schedulePlanPersist } from '@/data/persistence'
 import { MAIN_PANEL } from '@/data/panels'
-import { categoryForSku, FILL_LOW_RATIO, fillTone, planOrderQuantity, resolveVatRule } from '@/purchase'
+import {
+  categoryForSku,
+  FILL_LOW_RATIO,
+  fillTone,
+  findFactoryById,
+  planOrderQuantity,
+  resolveVatRule,
+} from '@/purchase'
+import { saveWorkbook } from '@/utils/xlsxWrite'
 
 // 采购下单页 = 两个子面板：下单面板（拆单 + 确认）与下单历史（只读流水）。
-// 数据只来自主面板已采纳的需安排；分订单以唯一标识为键，重新导入后自动保留。
+// 列表直接由主面板的「需安排 > 0」派生：需安排就是"哪些 SKU 要下、下多少"的唯一来源。
+// 分订单以唯一标识为键，重新导入后自动保留。
 const inventoryStore = useInventoryStore()
 const purchaseStore = usePurchaseStore()
 const route = useRoute()
@@ -31,55 +40,58 @@ function fmtKg(value) {
   return kgFormat.format(Math.round((Number(value) || 0) * 100) / 100)
 }
 
-const itemById = computed(() => {
-  const map = new Map()
-  for (const item of inventoryStore.inventoryItems) map.set(item.id, item)
-  return map
-})
-
 // 左列表「下单数量」= 这一刻已填分订单的实际公斤数，颜色与右侧进度条同一套口径
 // （`src/purchase/fillTone.js`）：未下单灰、< 80% 黄、80% ~ 100% 绿、超一缸内绿、超过一缸红。
 function statusOf(filledKg, plannedKg, perVatKg) {
   return { tone: fillTone(filledKg, plannedKg, perVatKg), label: fmtKg(filledKg) }
 }
 
+// 下单列表 = 主面板「需安排 > 0」的 SKU：不再有单独的采购清单状态，
+// 采纳 / 批量补货写下的需安排直接就是这张列表，确认下单或撤销清零后行自然消失。
 const rows = computed(() =>
-  inventoryStore.purchaseList.map((entry) => {
-    const item = itemById.value.get(entry.id)
-    const skuId = String(entry.skuId ?? item?.skuId ?? '').trim()
-    const planned = Number(entry.planned) || 0
-    const product = item?.product ?? entry.product
-    const rule = resolveVatRule(purchaseStore.settings, { skuId, product })
-    const entries = purchaseStore.orderEntries(skuId)
-    const filled = entries.reduce((sum, one) => sum + (Number(one?.quantity) || 0), 0)
-    // 建议下单量已按品名绑定的缸规则换算（缸数 × 每缸公斤）。
-    const suggestion = planOrderQuantity(planned, rule, {
-      planned,
-      monthlyAvgCount: item?.monthlyAvgCount,
-    })
-    // 「一缸以内」按实际下单用的缸型判断：分订单里有快照就取最大的那档，没有就退回规则建议的缸型。
-    const perVat = Math.max(
-      Number(suggestion?.kgPerVat) || 0,
-      entries.reduce((max, one) => Math.max(max, Number(one?.kgPerVat) || 0), 0),
-    )
-    return {
-      id: entry.id,
-      key: entry.id,
-      skuId,
-      product,
-      color: item?.color ?? entry.color,
-      treeCategory: categoryForSku(purchaseStore.settings, skuId, item?.treeCategory),
-      planned,
-      rule,
-      entries,
-      filled,
-      perVat,
-      status: statusOf(filled, planned, perVat),
-      monthlyAvgCount: item?.monthlyAvgCount,
-      suggestion,
-    }
-  }),
+  inventoryStore.inventoryItems
+    .filter((item) => Number(item.planned) > 0)
+    .map((item) => {
+      const skuId = String(item.skuId ?? '').trim()
+      const planned = Number(item.planned) || 0
+      const rule = resolveVatRule(purchaseStore.settings, { skuId, product: item.product })
+      const entries = purchaseStore.orderEntries(skuId)
+      const filled = entries.reduce((sum, one) => sum + (Number(one?.quantity) || 0), 0)
+      // 建议下单量已按品名绑定的缸规则换算（缸数 × 每缸公斤）。
+      const suggestion = planOrderQuantity(planned, rule, {
+        planned,
+        monthlyAvgCount: item?.monthlyAvgCount,
+      })
+      // 「一缸以内」按实际下单用的缸型判断：分订单里有快照就取最大的那档，没有就退回规则建议的缸型。
+      const perVat = Math.max(
+        Number(suggestion?.kgPerVat) || 0,
+        entries.reduce((max, one) => Math.max(max, Number(one?.kgPerVat) || 0), 0),
+      )
+      return {
+        id: item.id,
+        key: item.id,
+        skuId,
+        product: item.product,
+        color: item.color,
+        treeCategory: categoryForSku(purchaseStore.settings, skuId, item.treeCategory),
+        planned,
+        rule,
+        entries,
+        filled,
+        perVat,
+        status: statusOf(filled, planned, perVat),
+        monthlyAvgCount: item.monthlyAvgCount,
+        suggestion,
+      }
+    }),
 )
+
+// 主面板「采纳 / 确认补货」跳过来时带 ?sku=唯一标识，直接落到这个 SKU 的明细。
+const initialSkuId = String(route.query.sku ?? '').trim()
+if (initialSkuId) {
+  const target = rows.value.find((row) => row.skuId === initialSkuId)
+  if (target) selectedKey.value = target.key
+}
 
 const filteredRows = computed(() => {
   const text = keyword.value.trim().toLowerCase()
@@ -188,6 +200,7 @@ async function clearCurrentOrders() {
 }
 
 // 撤销下单（确认前）：清空草稿，并把主面板该行的需安排清零、解除锁定。
+// 列表按「需安排 > 0」派生，清零后这一行自然从下单面板消失。
 function clearPlannedFor(skuId) {
   const item = inventoryStore.inventoryItems.find(
     (entry) => String(entry.skuId ?? '').trim() === skuId,
@@ -195,10 +208,6 @@ function clearPlannedFor(skuId) {
   if (!item) return
   item.planned = 0
   delete inventoryStore.plannedUndoHistory[item.id]
-  const purchaseItem = inventoryStore.purchaseList.find(
-    (entry) => String(entry.skuId ?? '').trim() === skuId,
-  )
-  if (purchaseItem) purchaseItem.planned = 0
 }
 
 async function revokeRowWithConfirm(row) {
@@ -207,8 +216,8 @@ async function revokeRowWithConfirm(row) {
   try {
     await ElMessageBox.confirm(
       hasOrdered
-        ? `确定撤销「${label}」？将从本次采购清单剔除，清空它的全部分订单，并把需安排清零解锁。`
-        : `确定撤销「${label}」？将从本次采购清单剔除，并把需安排清零解锁。`,
+        ? `确定撤销「${label}」？会清空它的全部分订单，并把需安排清零（回到主面板重新填写）。`
+        : `确定撤销「${label}」？会把需安排清零（回到主面板重新填写）。`,
       '撤销下单',
       { type: 'warning', confirmButtonText: '撤销', cancelButtonText: '取消' },
     )
@@ -238,10 +247,8 @@ function revokeRowNow(row) {
     purchaseStore.clearOrderEntries(row.skuId)
   }
   clearPlannedFor(row.skuId)
-  const index = inventoryStore.purchaseList.findIndex((entry) => entry.id === row.id)
-  if (index !== -1) inventoryStore.purchaseList.splice(index, 1)
   schedulePlanPersist(inventoryStore)
-  ElMessage.success(`已从采购清单剔除「${label}」`)
+  ElMessage.success(`已撤销「${label}」：需安排已清零`)
 }
 
 // 确认下单：草稿变成订单，主面板需安排清零并解锁；已下单由订单流水接管预计库存。
@@ -260,13 +267,7 @@ function submitRows(targets) {
   if (!result.items.length) return result
 
   const submitted = new Set(result.items.map((item) => item.skuId))
-  for (const skuId of submitted) {
-    clearPlannedFor(skuId)
-    const index = inventoryStore.purchaseList.findIndex(
-      (entry) => String(entry.skuId ?? '').trim() === skuId,
-    )
-    if (index !== -1) inventoryStore.purchaseList.splice(index, 1)
-  }
+  for (const skuId of submitted) clearPlannedFor(skuId)
   schedulePlanPersist(inventoryStore)
   void purchaseStore.flushOrders()
   return result
@@ -307,6 +308,74 @@ async function confirmAllDrafts() {
     return
   }
   ElMessage.success(`已确认下单：${result.items.length} 张分订单`)
+}
+
+// 待下单清单导出（原来挂主面板「本次采购清单」弹窗，清单删掉后搬到这里）：
+// 第一张表给采购看需安排与缸数建议，第二张表给染厂 / 跟单看已填的分单明细。
+function exportPurchaseRows() {
+  if (rows.value.length === 0) {
+    ElMessage.warning('还没有待下单的 SKU')
+    return
+  }
+
+  const summaryRows = [
+    ['品名', '颜色', '树形分类', '需安排', '缸数', '每缸公斤', '建议下单', '累积下单', '到货', '待收', '分单数量'],
+  ]
+  const detailRows = [
+    ['品名', '颜色', '树形分类', '染厂', '分单人员', '缸数', '每缸公斤', '数量（公斤）', '到货', '待收', '备注'],
+  ]
+
+  for (const row of rows.value) {
+    const orders = purchaseStore.orderSummary(row.skuId)
+    const plan = row.suggestion ?? {}
+    summaryRows.push([
+      row.product,
+      row.color,
+      row.treeCategory,
+      row.planned,
+      plan.vatCount ?? '',
+      plan.kgPerVat ?? '',
+      Number(plan.rounded) || 0,
+      orders.total,
+      orders.received,
+      orders.pending,
+      orders.count,
+    ])
+
+    for (const entry of orders.orders) {
+      const factoryName =
+        entry.factoryName || findFactoryById(purchaseStore.settings, entry.factoryId)?.name || ''
+      detailRows.push([
+        row.product,
+        row.color,
+        row.treeCategory,
+        factoryName,
+        entry.assignee,
+        entry.vatCount ?? '',
+        entry.kgPerVat ?? '',
+        entry.quantity,
+        entry.receivedQty ?? 0,
+        Math.max(0, (Number(entry.quantity) || 0) - (Number(entry.receivedQty) || 0)),
+        entry.note,
+      ])
+    }
+  }
+
+  const sheets = [
+    { name: '待下单清单', rows: summaryRows, widths: [24, 14, 18, 12, 10, 12, 12, 12, 10, 10, 10] },
+  ]
+  if (detailRows.length > 1) {
+    sheets.push({ name: '分单明细', rows: detailRows, widths: [24, 14, 18, 16, 12, 10, 12, 14, 10, 10, 24] })
+  }
+
+  const timestamp = new Date().toLocaleString('sv-SE').replace(/[: ]/g, '-')
+  try {
+    saveWorkbook(sheets, `待下单清单-${timestamp}.xlsx`)
+    ElMessage.success('待下单清单已导出')
+  } catch (error) {
+    console.error('Failed to export purchase rows', error)
+    ElMessage.error(`导出失败：${error instanceof Error ? error.message : '未知错误'}`)
+  }
 }
 
 function selectRow(row) {
@@ -375,7 +444,12 @@ function handleDocumentClick(event) {
 onMounted(() => {
   window.addEventListener('resize', syncPoLink)
   document.addEventListener('click', handleDocumentClick)
-  nextTick(syncPoLink)
+  nextTick(() => {
+    syncPoLink()
+    // 从主面板跳过来时选中的行可能不在可视区（列表按库存行顺序，行数多时排在后面），
+    // 滚到看得见的位置；本来就可见时 nearest 不会动，直接打开面板也不会跳一下。
+    activeRowEl.value?.scrollIntoView({ block: 'nearest' })
+  })
 })
 
 onBeforeUnmount(() => {
@@ -426,8 +500,8 @@ const progressTitle = computed(() => {
 
     <template v-if="activePanel === 'order'">
       <div v-if="rows.length === 0" class="purchase-empty">
-        <p>本次采购清单还是空的。</p>
-        <p>回到需求表勾选 SKU、完成批量/紧急补货后，这里就会出现待下单的 SKU。</p>
+        <p>还没有待下单的 SKU。</p>
+        <p>回到需求表勾选 SKU 点「确认补货」，或在行内填好「需安排」后点「采纳」，就会直接到这里下单。</p>
         <RouterLink class="purchase-empty__link" to="/">返回需求表</RouterLink>
       </div>
 
@@ -471,6 +545,14 @@ const progressTitle = computed(() => {
             >
               未下单
               <b>{{ progress.pending }}</b>
+            </button>
+            <button
+              type="button"
+              class="po-filter po-export"
+              title="导出待下单清单（需安排 / 缸数建议 + 已填分单明细）"
+              @click="exportPurchaseRows"
+            >
+              导出 Excel
             </button>
           </div>
           <div class="po-list__scroll" @scroll="syncPoLink">
@@ -516,8 +598,8 @@ const progressTitle = computed(() => {
                       :class="{ 'is-confirming': revokingKey === row.key }"
                       :title="
                         revokingKey === row.key
-                          ? '再点一次就从本次采购清单剔除，并把需安排清零'
-                          : '从本次采购清单剔除该 SKU（需再点一次确认）'
+                          ? '再点一次就把需安排清零、加入的 SKU 从下单面板移出'
+                          : '撤销这个 SKU（需再点一次确认）'
                       "
                       @click.stop="requestRevoke(row, $event)"
                     >
@@ -565,7 +647,7 @@ const progressTitle = computed(() => {
                       清空分订单
                     </ElDropdownItem>
                     <ElDropdownItem command="revoke" divided>
-                      从采购清单撤销
+                      撤销这个 SKU（需安排清零）
                     </ElDropdownItem>
                   </ElDropdownMenu>
                 </template>
@@ -598,7 +680,7 @@ const progressTitle = computed(() => {
                 type="button"
                 class="btn btn--sm btn--primary po-foot__confirm"
                 :disabled="selectedRow.entries.length === 0"
-                title="把这张 SKU 的分订单确认为订单，并从本次采购清单移出"
+                title="把这张 SKU 的分订单确认为订单，并把需安排清零、从下单面板移出"
                 @click="confirmSelectedRow"
               >
                 确认下单
@@ -873,6 +955,11 @@ const progressTitle = computed(() => {
   border-color: var(--industrial-replenish);
   background: #fbf3e4;
   color: #8a6a2f;
+}
+
+.po-export:hover {
+  border-color: var(--industrial-primary);
+  color: var(--industrial-primary);
 }
 
 .po-list__scroll {

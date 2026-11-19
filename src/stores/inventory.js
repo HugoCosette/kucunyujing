@@ -158,13 +158,12 @@ function createInventoryState() {
 
   const primedItems = primed?.inventoryItems ?? null
   const baseItems = primedItems ?? initialInventoryItems.map(withDemoSourceFields)
-  // 需安排 / 采购清单 / 撤销快照按 skuId 挂回行上：行 id 会随导入重排，不能用 id 存。
+  // 需安排 / 撤销快照按 skuId 挂回行上：行 id 会随导入重排，不能用 id 存。
   const plan = primed?.planLayer
     ? applyPlanLayer(baseItems, primed.planLayer)
-    : { purchaseList: [], plannedUndoHistory: {} }
+    : { plannedUndoHistory: {} }
 
   const inventoryItems = ref(baseItems)
-  const purchaseList = ref(plan.purchaseList)
   const plannedUndoHistory = ref(plan.plannedUndoHistory)
   // 销售表：在“销售表”面板导入的 1-12 月条数与重量，按唯一标识叠加到主面板行上。
   // 数据可达数万 SKU，用 shallowRef 保存整体替换的对象，不做逐行深度响应式。
@@ -175,8 +174,8 @@ function createInventoryState() {
   )
 
   // 模式与系数在视图计算时按当前配置现算，store 只保存导入的原始数据。
-  return { inventoryItems, purchaseList, plannedUndoHistory, salesSheet }
+  return { inventoryItems, plannedUndoHistory, salesSheet }
 }
 
-// 库存、采购清单、撤销记录与销售表都是全局唯一的一份运行状态。
+// 库存、需安排（采购下单的唯一来源）、撤销记录与销售表都是全局唯一的一份运行状态。
 export const useInventoryStore = defineStore('inventory', createInventoryState)

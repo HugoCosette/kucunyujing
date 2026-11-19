@@ -8,11 +8,12 @@ import {
   ElRadioButton,
   ElRadioGroup,
   ElSelect,
+  ElTooltip,
 } from 'element-plus'
 import { useInventoryStore } from '@/stores/inventory'
 import { useStockingConfigStore } from '@/stores/stocking'
 import { createEvaluator, evaluateItem, getAutoModes, getManualModes } from '@/stocking'
-import { calculateInventoryRow } from '@/utils/inventory'
+import { calculateInventoryRow, getSuggestedPlanned } from '@/utils/inventory'
 import { evaluateRowHealth } from '@/utils/skuHealth'
 
 const props = defineProps({
@@ -26,9 +27,29 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  // 需安排动作条：弹窗只负责输入与触发，写入由页面处理（主面板要重算表格行）。
+  plannedEditable: {
+    type: Boolean,
+    default: false,
+  },
+  // 已采纳（锁定的需安排）：由页面按撤销记录给，弹窗不自留状态。
+  plannedLocked: {
+    type: Boolean,
+    default: false,
+  },
+  // 需安排草稿：主面板把草稿存在 viewStore 里（表格那一格与这里共用一份），
+  // 传了就受控 —— 两边输入实时同步；不传（销售表页没有需安排列）就用组件内部草稿。
+  plannedDraft: {
+    default: undefined,
+  },
 })
 
-const emit = defineEmits(['update:visible'])
+const emit = defineEmits([
+  'update:visible',
+  'update:planned-draft',
+  'adopt-planned',
+  'undo-planned',
+])
 
 const inventoryStore = useInventoryStore()
 const stockingStore = useStockingConfigStore()
@@ -250,17 +271,85 @@ const scoring = computed(() => {
   })
 })
 // 按量模式没有「得分」，tooltip 里直接给出该项的判定规则。
-function scoringDimensionTitle(dimension) {
-  if (!dimension.available) return dimension.detail
-  const rule = dimension.tierRangeText ?? dimension.ruleText
-  return `${dimension.detail}；命中${dimension.tierLabel}（${rule}）`
-}
+// 维度在弹窗里的排法：同类的两张竖着放一列（客户 / 销售 / 月份），
+// 与 SCORING_DIMENSIONS 的自然顺序不同，所以单独排一次交给 grid 按列填充。
+const SCORE_COLUMN_ORDER = ['cr5', 'customers', 'growth', 'ratio', 'consumption', 'activeMonths']
+const orderedDimensions = computed(() => {
+  const dimensions = scoring.value?.dimensions ?? []
+  // 按量模式只有两张判定卡，保持「本次进销比 → 累积客户数」的原始顺序。
+  if (scoring.value?.mode === 'bulk') return dimensions
+  return [...dimensions].sort(
+    (a, b) => SCORE_COLUMN_ORDER.indexOf(a.key) - SCORE_COLUMN_ORDER.indexOf(b.key),
+  )
+})
 const salesData = computed(() =>
   months.value.map((month) => salesOfSku.value?.sales?.[month - 1] ?? null),
 )
 const countData = computed(() =>
   months.value.map((month) => salesOfSku.value?.counts?.[month - 1] ?? null),
 )
+// —— 需安排 + 采纳（弹窗里直接补货）——
+// 建议值与主面板「需安排」占位同一口径：补到正常库存 80% 下限的差额（公斤，精准到个位）。
+const suggestedPlanned = computed(() =>
+  calculatedRow.value ? getSuggestedPlanned(calculatedRow.value) : 0,
+)
+const savedPlanned = computed(() => {
+  const value = Number(calculatedRow.value?.planned)
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : 0
+})
+// 订单货（手动策略 behavior: order）没有建议值：这一格就是客户电话报的量。
+const plannedOrderGoods = computed(() => evaluated.value?.manualBehavior === 'order')
+const localPlannedDraft = ref(null)
+// 受控时用页面的草稿，否则回退到组件内部：两个入口（主面板 / 销售表）都不用各写一份。
+const plannedDraft = computed(() =>
+  props.plannedDraft === undefined ? localPlannedDraft.value : props.plannedDraft,
+)
+// 采纳数量：填了用填的 → 没填用已保存的需安排 → 再没有就按建议值（与主面板行内采纳一致）。
+const plannedResolved = computed(() => {
+  const draft = Number(plannedDraft.value)
+  if (Number.isFinite(draft) && draft > 0) return Math.round(draft)
+  if (savedPlanned.value > 0) return savedPlanned.value
+  return plannedOrderGoods.value ? 0 : Math.round(suggestedPlanned.value)
+})
+const canAdoptPlanned = computed(
+  () => props.plannedEditable && !props.plannedLocked && plannedResolved.value > 0,
+)
+const plannedPlaceholder = computed(() => {
+  if (plannedOrderGoods.value) return '按订单填写'
+  if (!calculatedRow.value?.strategyAvailable) return '无法建议'
+  return suggestedPlanned.value > 0 ? String(suggestedPlanned.value) : '0'
+})
+
+function handlePlannedInput(event) {
+  const raw = event.target.value
+  const next = raw === '' ? null : Number(raw)
+  if (props.plannedDraft === undefined) {
+    localPlannedDraft.value = next
+    return
+  }
+  emit('update:planned-draft', next)
+}
+
+function submitPlanned() {
+  if (!canAdoptPlanned.value) return
+  emit('adopt-planned', { item: props.item, planned: plannedResolved.value })
+  // 采纳后由页面写需安排并清草稿；这里只清内部那份（受控时草稿归页面管）。
+  localPlannedDraft.value = null
+}
+
+function undoPlanned() {
+  if (!props.plannedLocked) return
+  emit('undo-planned', { item: props.item })
+}
+
+// 换 SKU / 重新打开时清掉没提交的输入，避免上一个 SKU 的数字留在框里
+watch(
+  () => [props.visible, skuId.value],
+  ([isVisible]) => {
+    if (isVisible) localPlannedDraft.value = null
+  },
+)
+
 const hasSalesData = computed(
   () => months.value.length > 0 && salesData.value.some((value) => value !== null),
 )
@@ -281,6 +370,17 @@ const cumulativeText = computed(() => {
 const chartRef = ref(null)
 let chart = null
 
+const CHART_SERIES = { sales: '销量(公斤)', count: '条数' }
+// 图例开关：销量柱 / 条数折线可各自隐藏，但至少要留一条。
+const chartSeries = reactive({ sales: true, count: true })
+
+function toggleChartSeries(key) {
+  const other = key === 'sales' ? 'count' : 'sales'
+  if (chartSeries[key] && !chartSeries[other]) return
+  chartSeries[key] = !chartSeries[key]
+  chart?.dispatchAction({ type: 'legendToggleSelect', name: CHART_SERIES[key] })
+}
+
 function buildChartOption() {
   return {
     animationDuration: 260,
@@ -293,14 +393,16 @@ function buildChartOption() {
       textStyle: { color: '#2f3b43', fontSize: 12 },
       axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(63, 113, 141, 0.08)' } },
     },
+    // 图例交给弹窗标题行的自定义胶囊（见模板），这里只保留开关状态供 dispatchAction 使用。
     legend: {
-      top: 0,
-      right: 0,
-      itemWidth: 10,
-      itemHeight: 8,
-      textStyle: { color: '#65737c', fontSize: 12 },
+      show: false,
+      data: [CHART_SERIES.sales, CHART_SERIES.count],
+      selected: {
+        [CHART_SERIES.sales]: chartSeries.sales,
+        [CHART_SERIES.count]: chartSeries.count,
+      },
     },
-    grid: { left: 4, right: 4, top: 30, bottom: 0, containLabel: true },
+    grid: { left: 4, right: 4, top: 14, bottom: 0, containLabel: true },
     xAxis: {
       type: 'category',
       data: months.value.map((month) => `${month}月`),
@@ -311,29 +413,25 @@ function buildChartOption() {
     yAxis: [
       {
         type: 'value',
-        name: '销量(公斤)',
-        nameTextStyle: { color: '#65737c', fontSize: 11 },
         splitLine: { lineStyle: { color: '#e1e6e9' } },
         axisLabel: { color: '#65737c', fontSize: 11 },
       },
       {
         type: 'value',
-        name: '条数',
-        nameTextStyle: { color: '#c49a52', fontSize: 11 },
         splitLine: { show: false },
         axisLabel: { color: '#c49a52', fontSize: 11 },
       },
     ],
     series: [
       {
-        name: '销量(公斤)',
+        name: CHART_SERIES.sales,
         type: 'bar',
         barMaxWidth: 16,
         itemStyle: { color: '#3f718d', borderRadius: [2, 2, 0, 0] },
         data: salesData.value,
       },
       {
-        name: '条数',
+        name: CHART_SERIES.count,
         type: 'line',
         yAxisIndex: 1,
         smooth: true,
@@ -487,6 +585,7 @@ onBeforeUnmount(disposeChart)
     width="620px"
     append-to-body
     align-center
+    modal-class="sku-detail-overlay"
     :show-close="false"
     @opened="handleOpened"
     @closed="handleClosed"
@@ -538,20 +637,15 @@ onBeforeUnmount(disposeChart)
         </div>
       </div>
 
-      <h4 class="sku-detail__section">
-        健康度评分
-        <span v-if="scoring?.participates" class="sku-detail__section-hint">
-          {{
-            scoring.mode === 'bulk'
-              ? '按量模式 · 2 项判定'
-              : `5 维加权 · 参与权重 ${scoring.weightTotal}%`
-          }}
-        </span>
-      </h4>
+      <h4 class="sku-detail__section">健康度评分</h4>
       <div v-if="scoring && !scoring.participates" class="sku-detail__empty">
         该 SKU 不参与备货计算，不做健康度评分
       </div>
-      <div v-else-if="scoring" class="sku-score">
+      <div
+        v-else-if="scoring"
+        class="sku-score"
+        :class="{ 'sku-score--bulk': scoring.mode === 'bulk' }"
+      >
         <div
           v-if="scoring.mode !== 'bulk'"
           class="sku-score__total"
@@ -560,32 +654,91 @@ onBeforeUnmount(disposeChart)
           <span class="sku-score__total-label">综合评分</span>
           <strong class="sku-score__total-value">{{ scoring.totalText }}</strong>
           <span class="sku-score__badge">{{ scoring.toneLabel }}</span>
-          <span v-if="scoring.missing" class="sku-score__total-hint">
-            {{ scoring.missing }} 项无数据，按其余维度权重折算
-          </span>
         </div>
-        <div class="sku-score__grid" :class="{ 'sku-score__grid--bulk': scoring.mode === 'bulk' }">
-          <div
-            v-for="dimension in scoring.dimensions"
+        <div class="sku-score__grid">
+          <ElTooltip
+            v-for="dimension in orderedDimensions"
             :key="dimension.key"
-            class="sku-score__card"
-            :class="`sku-score__tone--${dimension.tone}`"
-            :title="scoringDimensionTitle(dimension)"
+            placement="top"
+            effect="light"
+            :show-after="120"
           >
-            <span class="sku-score__label">{{ dimension.label }}</span>
-            <div class="sku-score__main">
-              <strong class="sku-score__score">
-                {{ scoring.mode === 'bulk' ? dimension.valueText : dimension.scoreText }}
-              </strong>
-              <span class="sku-score__tier">{{ dimension.tierLabel }}</span>
-            </div>
-            <span v-if="scoring.mode === 'bulk'" class="sku-score__rule">{{ dimension.ruleText }}</span>
-            <template v-else>
-              <span class="sku-score__value">{{ dimension.valueText }}</span>
-              <span class="sku-score__weight">权重 {{ dimension.weightText }}</span>
+            <template #content>
+              <div class="sku-score-tip">
+                <div class="sku-score-tip__head">
+                  <span>{{ dimension.label }}</span>
+                  <span class="sku-score-tip__flag" :class="`sku-score-tip__flag--${dimension.tone}`">
+                    {{ dimension.tierLabel }}
+                  </span>
+                </div>
+                <div v-if="scoring.mode === 'bulk' && dimension.ruleText" class="sku-score-tip__row">
+                  <span>判定规则</span><span>{{ dimension.ruleText }}</span>
+                </div>
+                <template v-else-if="dimension.available">
+                  <div class="sku-score-tip__row">
+                    <span>命中区间</span><span>{{ dimension.tierRangeText || '—' }}</span>
+                  </div>
+                  <div class="sku-score-tip__row">
+                    <span>权重</span><span>{{ dimension.weightText }}</span>
+                  </div>
+                </template>
+                <div class="sku-score-tip__detail">{{ dimension.detail }}</div>
+              </div>
             </template>
-          </div>
+            <div class="sku-score__card" :class="`sku-score__tone--${dimension.tone}`">
+              <span class="sku-score__label">{{ dimension.label }}</span>
+              <strong class="sku-score__value">{{ dimension.valueText }}</strong>
+            </div>
+          </ElTooltip>
         </div>
+      </div>
+
+      <!-- 需安排：紧凑一行，放健康度评分下方；采纳不跳转，原地转成「已采纳」锁定态 -->
+      <div v-if="plannedEditable" class="sku-plan" :class="{ 'sku-plan--locked': plannedLocked }">
+        <span class="sku-plan__label">需安排</span>
+        <label class="sku-plan__field">
+          <input
+            class="sku-plan__input"
+            type="number"
+            min="0"
+            step="1"
+            inputmode="decimal"
+            :value="plannedLocked ? savedPlanned : plannedDraft ?? ''"
+            :placeholder="plannedPlaceholder"
+            :readonly="plannedLocked"
+            :disabled="plannedLocked"
+            aria-label="需安排（公斤）"
+            @input="handlePlannedInput"
+            @keydown.enter.prevent="submitPlanned()"
+          />
+          <span class="sku-plan__unit">公斤</span>
+          <svg v-if="plannedLocked" class="sku-plan__lock" viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M4.5 6V4.75a3.5 3.5 0 0 1 7 0V6m-8 0h9a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm4.5 3v2"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="1.5"
+            />
+          </svg>
+        </label>
+        <template v-if="plannedLocked">
+          <span class="sku-plan__badge">已采纳</span>
+          <button type="button" class="sku-plan__btn sku-plan__btn--ghost" @click="undoPlanned()">
+            撤销
+          </button>
+        </template>
+        <button
+          v-else
+          type="button"
+          class="sku-plan__btn"
+          :disabled="!canAdoptPlanned"
+          aria-label="采纳需安排"
+          @click="submitPlanned()"
+        >
+          采纳 <kbd>↵</kbd>
+        </button>
       </div>
 
       <template v-if="strategyDraft === 'manual'">
@@ -664,12 +817,31 @@ onBeforeUnmount(disposeChart)
         </div>
       </template>
 
-      <h4 class="sku-detail__section">
-        月度销量
-        <span v-if="months.length" class="sku-detail__section-hint">
-          销售表 {{ months[0] }}-{{ months[months.length - 1] }}月
-        </span>
-      </h4>
+      <div class="sku-detail__chart-head">
+        <h4 class="sku-detail__section">月度销量</h4>
+        <div v-if="hasSalesData" class="sku-detail__legend" role="group" aria-label="图表图例">
+          <button
+            type="button"
+            class="sku-detail__legend-item sku-detail__legend-item--sales"
+            :class="{ 'is-off': !chartSeries.sales }"
+            :aria-pressed="chartSeries.sales"
+            @click="toggleChartSeries('sales')"
+          >
+            <span class="sku-detail__legend-glyph sku-detail__legend-glyph--bar" aria-hidden="true"></span>
+            销量(公斤)
+          </button>
+          <button
+            type="button"
+            class="sku-detail__legend-item sku-detail__legend-item--count"
+            :class="{ 'is-off': !chartSeries.count }"
+            :aria-pressed="chartSeries.count"
+            @click="toggleChartSeries('count')"
+          >
+            <span class="sku-detail__legend-glyph sku-detail__legend-glyph--line" aria-hidden="true"></span>
+            条数
+          </button>
+        </div>
+      </div>
       <div v-if="hasSalesData" ref="chartRef" class="sku-detail__chart"></div>
       <div v-else class="sku-detail__empty">
         {{
@@ -712,6 +884,12 @@ onBeforeUnmount(disposeChart)
 </template>
 
 <style scoped>
+/* 弹窗打开后主面板「压灰但看得清」：还是原来那层灰（深色半透明），只把不透明度降下来，
+   表格数据在弹窗外仍然清楚可读；不要换成白色 / 浅灰遮罩。 */
+:global(.el-overlay.sku-detail-overlay) {
+  background-color: rgba(12, 22, 32, 0.22);
+}
+
 :global(.el-dialog.sku-detail-dialog) {
   --el-color-primary: var(--industrial-primary);
   --el-dialog-bg-color: var(--industrial-surface);
@@ -720,6 +898,10 @@ onBeforeUnmount(disposeChart)
   --el-border-color: var(--industrial-grid);
   --el-border-color-light: var(--industrial-grid-light);
   --el-fill-color-blank: var(--industrial-surface);
+  /* 遮罩变浅后弹窗边界要靠阴影立住 */
+  box-shadow:
+    0 24px 64px rgba(15, 32, 46, 0.2),
+    0 2px 10px rgba(15, 32, 46, 0.08);
   /* 窄屏 / 分屏时收窄宽度，弹窗始终留在视口内 */
   width: min(620px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
@@ -901,6 +1083,197 @@ onBeforeUnmount(disposeChart)
   text-overflow: ellipsis;
 }
 
+/* 需安排动作条：紧凑一行，放在健康度评分下方。左侧竖色条标出可操作区；
+   已采纳后整条转淡绿 + 输入锁定 + 按钮变撤销，与主面板行内状态一致。 */
+.sku-plan {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 14px;
+  padding: 6px 10px 6px 12px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #fbfdfe, #f6f9fa);
+}
+
+.sku-plan::before {
+  content: '';
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  left: 0;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(180deg, #4c819c, #35647d);
+}
+
+.sku-plan__label {
+  flex: 0 0 auto;
+  color: #414e57;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.sku-plan__field {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  width: 118px;
+  height: 26px;
+  padding: 0 36px 0 8px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 3px;
+  background: #fff;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.sku-plan__field:focus-within {
+  border-color: var(--industrial-primary);
+  box-shadow: 0 0 0 3px rgba(63, 113, 141, 0.14);
+}
+
+.sku-plan__input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--industrial-text);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  appearance: textfield;
+}
+
+.sku-plan__input::-webkit-outer-spin-button,
+.sku-plan__input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.sku-plan__input::placeholder {
+  color: #a9b6be;
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.sku-plan__unit {
+  position: absolute;
+  right: 8px;
+  color: var(--industrial-muted);
+  font-size: 10.5px;
+  pointer-events: none;
+}
+
+.sku-plan__lock {
+  position: absolute;
+  right: 36px;
+  width: 11px;
+  height: 11px;
+  color: #6f8871;
+}
+
+.sku-plan__btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px 0 11px;
+  border: 1px solid #35647d;
+  border-radius: 3px;
+  color: #fff;
+  background: linear-gradient(180deg, #4c819c, #35647d);
+  box-shadow:
+    0 1px 2px rgba(24, 50, 66, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+
+.sku-plan__btn kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+  font-family: inherit;
+  font-size: 9.5px;
+  line-height: 1;
+}
+
+.sku-plan__btn:disabled {
+  border-color: var(--industrial-grid-light);
+  color: #9aa8b1;
+  background: #e8edf0;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.sku-plan__btn:disabled kbd {
+  background: rgba(47, 59, 67, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(47, 59, 67, 0.08);
+}
+
+.sku-plan__btn--ghost {
+  padding: 0 10px;
+  border-color: var(--industrial-grid);
+  color: var(--industrial-muted);
+  background: #fff;
+  box-shadow: none;
+}
+
+.sku-plan__btn--ghost:hover {
+  border-color: var(--industrial-primary);
+  color: var(--industrial-text);
+}
+
+.sku-plan__badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(130, 154, 133, 0.18);
+  color: #4c6a50;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.sku-plan--locked {
+  border-color: rgba(130, 154, 133, 0.45);
+  background: linear-gradient(180deg, #f8fbf8, #f2f7f3);
+}
+
+.sku-plan--locked::before {
+  background: linear-gradient(180deg, #93a795, #6f8871);
+}
+
+.sku-plan--locked .sku-plan__field {
+  width: 132px;
+  padding-right: 54px;
+  border-color: rgba(130, 154, 133, 0.4);
+  background: #f4f7f4;
+}
+
+.sku-plan--locked .sku-plan__input {
+  color: #4c6a50;
+}
+
 .sku-detail__section {
   display: flex;
   align-items: baseline;
@@ -911,51 +1284,157 @@ onBeforeUnmount(disposeChart)
   font-weight: 600;
 }
 
-.sku-detail__section-hint {
-  color: var(--industrial-muted);
-  font-size: 11px;
-  font-weight: 400;
-  letter-spacing: 1px;
+/* 月度销量标题行：左标题 + 右图例胶囊。
+   自定义图例替代 ECharts 默认图例，既不会和 Y 轴名称挤在一起，
+   也保留了「点一下隐藏该序列」的开关能力。 */
+.sku-detail__chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
 }
 
-/* 健康度评分：5 张维度小卡 + 1 条综合评分，红 / 黄 / 绿三档背景；
-   按量模式改为 2 张判定卡（本次进销比 / 累积客户数），不显示综合评分 */
+.sku-detail__chart-head .sku-detail__section {
+  min-width: 0;
+  margin: 0;
+}
+
+/* 胶囊比标题矮，靠中心对齐时视觉上会偏上，往下压 3px 才和标题落在同一条水平线上 */
+.sku-detail__legend {
+  position: relative;
+  top: 3px;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.sku-detail__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 999px;
+  background: #fbfcfd;
+  color: #4c5b64;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  line-height: 1.65;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    opacity 0.16s ease;
+}
+
+.sku-detail__legend-item:hover {
+  border-color: rgba(63, 113, 141, 0.42);
+  background: #ffffff;
+  color: var(--industrial-text);
+}
+
+.sku-detail__legend-item.is-off {
+  border-style: dashed;
+  background: transparent;
+  opacity: 0.52;
+}
+
+.sku-detail__legend-item.is-off .sku-detail__legend-glyph {
+  filter: grayscale(1);
+}
+
+.sku-detail__legend-glyph {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.sku-detail__legend-glyph--bar {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #4c819c, #3f718d);
+}
+
+.sku-detail__legend-glyph--line {
+  position: relative;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: #c49a52;
+}
+
+.sku-detail__legend-glyph--line::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: #c49a52;
+  box-shadow: 0 0 0 1.5px #fbfcfd;
+}
+
+/* 健康度评分：左侧 150px 综合评分竖卡 + 右侧维度小卡（3 列 × 每列 2 张，
+   客户 / 销售 / 月份 各占一列）；小卡只留「维度名 + 实测值」，
+   档位 / 命中区间 / 权重 / 计算口径全部放到 hover 浮层里。
+   按量模式没有综合分，两张判定卡各占一列。 */
 .sku-score {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 10px;
   margin-bottom: 18px;
+  /* 维度名（键）比正文灰阶更深：它是每张卡的主语，不能靠猜 */
+  --sku-score-key: #414e57;
+}
+
+.sku-score--bulk {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .sku-score__tone--red {
   --sku-score-color: var(--industrial-urgent);
-  --sku-score-bg: rgba(184, 79, 72, 0.08);
-  --sku-score-border: rgba(184, 79, 72, 0.4);
+  --sku-score-bg: rgba(184, 79, 72, 0.085);
+  --sku-score-border: rgba(184, 79, 72, 0.42);
+  --sku-score-bar: rgba(184, 79, 72, 0.9);
+  --sku-score-tint: rgba(184, 79, 72, 0.1);
 }
 
 .sku-score__tone--yellow {
   --sku-score-color: var(--industrial-replenish);
-  --sku-score-bg: rgba(196, 154, 82, 0.1);
-  --sku-score-border: rgba(196, 154, 82, 0.45);
+  --sku-score-bg: rgba(196, 154, 82, 0.05);
+  --sku-score-border: rgba(196, 154, 82, 0.28);
+  --sku-score-bar: rgba(196, 154, 82, 0.7);
+  --sku-score-tint: rgba(196, 154, 82, 0.12);
 }
 
 .sku-score__tone--green {
   --sku-score-color: var(--industrial-normal);
-  --sku-score-bg: rgba(130, 154, 133, 0.1);
-  --sku-score-border: rgba(130, 154, 133, 0.45);
+  --sku-score-bg: rgba(130, 154, 133, 0.042);
+  --sku-score-border: rgba(130, 154, 133, 0.24);
+  --sku-score-bar: rgba(130, 154, 133, 0.45);
+  --sku-score-tint: rgba(130, 154, 133, 0.12);
 }
 
 .sku-score__tone--unavailable {
   --sku-score-color: var(--industrial-muted);
-  --sku-score-bg: #f0f3f5;
+  --sku-score-bg: #fafbfc;
   --sku-score-border: var(--industrial-grid-light);
+  --sku-score-bar: #e3e9ed;
+  --sku-score-tint: #eef2f5;
 }
 
 .sku-score__total {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding: 9px 12px;
-  color: var(--sku-score-color);
+  flex-direction: column;
+  gap: 2px;
+  justify-content: center;
+  padding: 12px 14px;
   background: var(--sku-score-bg);
   border: 1px solid var(--sku-score-border);
   border-radius: 6px;
@@ -963,16 +1442,22 @@ onBeforeUnmount(disposeChart)
 
 .sku-score__total-label {
   color: var(--industrial-muted);
-  font-size: 12px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
 }
 
 .sku-score__total-value {
-  font-size: 24px;
+  color: var(--sku-score-color);
+  font-size: 38px;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.05;
+  letter-spacing: -1px;
+  font-variant-numeric: tabular-nums;
 }
 
 .sku-score__badge {
+  align-self: flex-start;
+  margin-top: 6px;
   padding: 1px 8px;
   color: #fff;
   background: var(--sku-score-color);
@@ -980,76 +1465,197 @@ onBeforeUnmount(disposeChart)
   font-size: 11px;
 }
 
-.sku-score__total-hint {
-  margin-left: auto;
-  color: var(--industrial-muted);
-  font-size: 11px;
-}
-
 .sku-score__grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 行高下限 63px；窄屏下维度名折行时整行一起长高 */
+  grid-template-rows: repeat(2, minmax(63px, auto));
+  grid-auto-flow: column;
+  gap: 8px;
 }
 
-.sku-score__grid--bulk {
+.sku-score--bulk .sku-score__grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(63px, auto);
+  grid-auto-flow: row;
 }
 
 .sku-score__card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 5px;
+  justify-content: space-between;
   min-width: 0;
-  padding: 8px;
-  color: var(--sku-score-color);
+  padding: 9px 9px 10px;
   background: var(--sku-score-bg);
   border: 1px solid var(--sku-score-border);
   border-radius: 6px;
 }
 
+/* 卡片顶边的 2px 风险条：高风险最重，中 / 低依次变淡 */
+.sku-score__card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  border-radius: 6px 6px 0 0;
+  background: var(--sku-score-bar);
+}
+
 .sku-score__label {
-  overflow: hidden;
-  color: var(--industrial-muted);
-  font-size: 11px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.sku-score__main {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-}
-
-.sku-score__score {
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1.1;
-}
-
-.sku-score__tier {
-  font-size: 11px;
+  color: var(--sku-score-key);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.2px;
 }
 
 .sku-score__value {
   overflow: hidden;
   color: var(--industrial-text);
-  font-size: 11px;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.3px;
   white-space: nowrap;
   text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 
-.sku-score__weight {
+.sku-score__tone--unavailable .sku-score__label {
   color: var(--industrial-muted);
-  font-size: 10px;
 }
 
-/* 按量模式的判定规则文案（低于 40% 低风险 / 40% ~ 60% 正常 / 高于 60% 高风险 …） */
-.sku-score__rule {
+/* 窄屏（弹窗被压到窗口宽度）时：综合评分卡收窄，6 张卡改 2 列 × 3 行（每行一类），
+   更窄时再改成单列，避免维度名被挤成一字一行 */
+@media (max-width: 620px) {
+  .sku-score {
+    grid-template-columns: 118px minmax(0, 1fr);
+  }
+
+  .sku-score__total-value {
+    font-size: 30px;
+  }
+
+  .sku-score__label {
+    font-size: 11.5px;
+  }
+
+  .sku-score__value {
+    font-size: 16px;
+    letter-spacing: -0.4px;
+  }
+
+  .sku-score__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
+
+  .sku-score--bulk .sku-score__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 470px) {
+  .sku-score,
+  .sku-score--bulk {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sku-score__grid,
+  .sku-score--bulk .sku-score__grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
+
+  .sku-score__total {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+  }
+
+  .sku-score__total-value {
+    font-size: 26px;
+  }
+
+  .sku-score__badge {
+    margin-top: 0;
+  }
+}
+
+.sku-score__tone--unavailable .sku-score__value {
   color: var(--industrial-muted);
+  font-size: 15px;
+}
+
+/* hover 浮层：档位 + 命中区间 + 权重 + 计算口径（卡面上不显示这些） */
+.sku-score-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 240px;
+  color: var(--industrial-text);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.sku-score-tip__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sku-score-tip__flag {
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--sku-score-tint, #eef2f5);
+  color: var(--sku-score-color, var(--industrial-muted));
   font-size: 10px;
-  line-height: 1.4;
+  font-weight: 400;
+}
+
+.sku-score-tip__flag--red {
+  --sku-score-tint: rgba(184, 79, 72, 0.1);
+  --sku-score-color: var(--industrial-urgent);
+}
+
+.sku-score-tip__flag--yellow {
+  --sku-score-tint: rgba(196, 154, 82, 0.12);
+  --sku-score-color: #9a7538;
+}
+
+.sku-score-tip__flag--green {
+  --sku-score-tint: rgba(130, 154, 133, 0.12);
+  --sku-score-color: #5f7a63;
+}
+
+.sku-score-tip__flag--unavailable {
+  --sku-score-tint: #eef2f5;
+  --sku-score-color: var(--industrial-muted);
+}
+
+.sku-score-tip__row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.sku-score-tip__row > span:first-child {
+  flex: 0 0 auto;
+  color: var(--industrial-muted);
+}
+
+.sku-score-tip__detail {
+  margin-top: 3px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--industrial-grid-light);
+  color: var(--industrial-muted);
 }
 
 .sku-detail__chart {
