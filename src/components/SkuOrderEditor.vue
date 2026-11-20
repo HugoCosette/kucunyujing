@@ -9,6 +9,7 @@ import {
   findFactoryById,
   findFactoryByName,
   planOrderQuantity,
+  quantityModeOf,
   resolveVatBand,
   resolveVatRule,
   vatQuantityOptions,
@@ -18,7 +19,7 @@ import { formatQuantity } from '@/utils/inventory'
 // 单个 SKU 的分订单编辑器：采购下单页按需安排拆单时使用，缸规则换算也在这里。
 // 染厂来自「下单设置」里该 SKU 的可选染厂，允许临时手输（不回写设置）；
 // 分单人员优先用该 SKU 树形分类里维护的人，分类没配人时回退到分单人员表全部人员。
-// 缸数按品名（SPU）绑定的缸规则换算：改缸数自动算公斤，改公斤自动回算缸数。
+// 每张分订单独立选择按缸或按公斤；按缸时公斤由缸数 × 缸型计算。
 const props = defineProps({
   item: {
     type: Object,
@@ -59,7 +60,8 @@ const difference = computed(() => total.value - planned.value)
 // 颜色口径与采购下单页同一份（src/purchase/fillTone.js）：不足八成黄、八成到超一缸内绿、超过一缸红。
 const tonePerVat = computed(() =>
   props.modelValue.reduce(
-    (max, entry) => Math.max(max, Number(entry?.kgPerVat) || 0),
+    (max, entry) =>
+      quantityModeOf(entry) === 'vat' ? Math.max(max, Number(entry?.kgPerVat) || 0) : max,
     Number(kgPerVat.value) || 0,
   ),
 )
@@ -87,21 +89,25 @@ const kgPerVat = computed(() => {
   const per = Number(suggestion.value.kgPerVat)
   return per > 0 ? per : null
 })
-// 「数量（公斤）」下拉的候选：该 SKU 缸规则里的单缸重量（1 缸 = 该缸型，见 src/purchase/vat.js）。
-// 规则判定不下单 / 未绑定规则时为空，此时仍可手输任意公斤（allow-create）。
+// 缸型候选来自该 SKU 生效的缸规则（见 src/purchase/vat.js）；也允许手输自定义公斤数。
 const quantityOptions = computed(() => vatQuantityOptions(vatRule.value))
-function matchedOption(quantity) {
-  return quantityOptions.value.find((option) => Math.abs(option.quantity - quantity) < 0.005) ?? null
-}
 // 缸规则当前判定选中的缸型，在下拉里挂一个「建议」标记。
 function isSuggestedOption(option) {
   return Math.abs(option.kgPerVat - (Number(suggestion.value.kgPerVat) || 0)) < 0.005
 }
 const vatTotal = computed(() =>
-  props.modelValue.reduce((sum, entry) => sum + (Number(entry.vatCount) || 0), 0),
+  props.modelValue.reduce(
+    (sum, entry) =>
+      quantityModeOf(entry) === 'vat' ? sum + (Number(entry.vatCount) || 0) : sum,
+    0,
+  ),
 )
 
-// 正好整缸时返回缸数，否则返回 null（公斤允许不是整缸）。
+function roundKg(value) {
+  return Math.round(value * 100) / 100
+}
+
+// 切到按缸时尽量沿用当前公斤数；不能整除时取最近的整缸数。
 function nearestWholeVats(quantity, perVat) {
   if (!(perVat > 0) || !(quantity > 0)) return null
   const ratio = quantity / perVat
@@ -109,27 +115,9 @@ function nearestWholeVats(quantity, perVat) {
   return nearest > 0 && Math.abs(ratio - nearest) < 0.005 ? nearest : null
 }
 
-// 行内提示：整缸写「＝ 2 缸 × 240 公斤」，非整缸给出相邻两档整缸，让人决定改缸数还是改公斤。
-function quantityHint(entry) {
-  const quantity = Number(entry?.quantity) || 0
-  const perVat = Number(entry?.kgPerVat) || kgPerVat.value
-  if (!(quantity > 0) || !(perVat > 0)) return null
-  const whole = nearestWholeVats(quantity, perVat)
-  if (whole) return { tone: 'ok', text: `＝ ${formatQuantity(whole)} 缸 × ${formatQuantity(perVat)} 公斤` }
-  const ratio = quantity / perVat
-  const lower = Math.floor(ratio)
-  const upper = lower + 1
-  return {
-    tone: 'warn',
-    text: `非整缸：${formatQuantity(lower)} 缸 = ${formatQuantity(lower * perVat)} ／ ${formatQuantity(upper)} 缸 = ${formatQuantity(upper * perVat)} 公斤`,
-  }
-}
-
-const rowHints = computed(() => props.modelValue.map((entry) => quantityHint(entry)))
-const nonWholeCount = computed(() => rowHints.value.filter((hint) => hint?.tone === 'warn').length)
-
-// 缸数只认人填的整数；公斤不是整缸时留空（不反推小数），由行内提示说明差多少。
+// 按公斤的订单不计缸数；按缸的数量只由整数缸数和缸型生成。
 function vatCountOf(entry) {
+  if (quantityModeOf(entry) !== 'vat') return null
   const stored = Number(entry?.vatCount)
   return Number.isFinite(stored) && stored > 0 ? stored : null
 }
@@ -146,9 +134,7 @@ function patchEntry(index, patch) {
   )
 }
 
-// 新增的分订单一进来就带默认值：公斤与缸数按缸规则对「还差多少需安排」换算
-// （如还差 433 公斤 → 2 缸 × 240 = 480 公斤），染厂 / 分单人员沿用上一张，
-// 没有上一张就取下拉第一项，点一下就是一张看得见、能直接提交的单。
+// 新增分订单沿用上一张的下单方式；按公斤预填剩余需安排量，按缸则沿用规则建议。
 function addEntry() {
   const previous = props.modelValue[props.modelValue.length - 1]
   const factory = previous
@@ -159,15 +145,22 @@ function addEntry() {
       }
   const remaining = planned.value - total.value
   const result = remaining > 0.005 ? planOrderQuantity(remaining, vatRule.value, vatContext.value) : null
+  const previousMode = previous ? quantityModeOf(previous) : null
+  const perVat = Number(result?.kgPerVat) || Number(kgPerVat.value) || null
+  const quantityMode =
+    previousMode ?? (Number(result?.vatCount) > 0 && perVat ? 'vat' : 'kg')
+  const useVat = quantityMode === 'vat' && Boolean(perVat)
+  const kgQuantity = remaining > 0.005 ? roundKg(remaining) : 0
   updateEntries([
     ...props.modelValue,
     {
       id: `so-${Date.now().toString(36)}-${props.modelValue.length + 1}`,
       ...factory,
       assignee: previous?.assignee || assigneeOptions.value[0] || '',
-      quantity: result?.rounded ?? 0,
-      vatCount: result?.vatCount ?? null,
-      kgPerVat: result?.kgPerVat ?? kgPerVat.value,
+      quantityMode: useVat ? 'vat' : 'kg',
+      quantity: useVat ? result?.rounded ?? 0 : kgQuantity,
+      vatCount: useVat ? result?.vatCount ?? null : null,
+      kgPerVat: useVat ? perVat : null,
       note: '',
     },
   ])
@@ -201,29 +194,90 @@ watch(
   { flush: 'post' },
 )
 
-// 改缸数：公斤数跟着 ＝ 缸数 × 缸型（硬换算）；改公斤数：只有正好整缸才回填缸数，否则留空只提示。
+// 按缸模式：数量始终等于整数缸数 × 当前缸型。
 function handleVatCountChange(index, value) {
+  const entry = props.modelValue[index]
+  if (quantityModeOf(entry) !== 'vat') return
   const vatCount = Math.max(0, Math.round(Number(value) || 0))
-  // 乘的是这一行当前的缸型（人可能刚从下拉换了缸型），没记录时退回规则建议的缸型。
-  const perVat = Number(props.modelValue[index]?.kgPerVat) || kgPerVat.value
+  const perVat = Number(entry?.kgPerVat) || kgPerVat.value
+  if (!(perVat > 0)) return
   patchEntry(index, {
     vatCount: vatCount > 0 ? vatCount : null,
-    quantity: perVat ? Math.round(vatCount * perVat * 100) / 100 : Number(props.modelValue[index]?.quantity) || 0,
+    quantity: roundKg(vatCount * perVat),
     kgPerVat: perVat,
   })
 }
 
-function handleQuantityChange(index, value) {
-  // 公斤最多两位小数：整数就显示整数（480，不是 480.00），手输的小数也不会留一串尾数。
-  const quantity = Math.round(Math.max(0, Number(value) || 0) * 100) / 100
-  // 从下拉选中的公斤数自带缸型 / 缸数；手输的公斤数按这一行当前的缸型回算，只有正好整缸才回填缸数。
-  const matched = matchedOption(quantity)
-  const perVat = matched?.kgPerVat ?? (Number(props.modelValue[index]?.kgPerVat) || kgPerVat.value)
+function handleVatTypeChange(index, value) {
+  const entry = props.modelValue[index]
+  const perVat = Number(value)
+  if (quantityModeOf(entry) !== 'vat' || !(perVat > 0)) return
+  const currentQuantity = Number(entry?.quantity) || 0
+  const vatCount =
+    vatCountOf(entry) ??
+    (currentQuantity > 0
+      ? nearestWholeVats(currentQuantity, perVat) ?? Math.max(1, Math.round(currentQuantity / perVat))
+      : null)
   patchEntry(index, {
-    quantity,
-    vatCount: matched?.vatCount ?? nearestWholeVats(quantity, perVat),
     kgPerVat: perVat,
+    vatCount,
+    quantity: vatCount ? roundKg(vatCount * perVat) : 0,
   })
+}
+
+function handleQuantityModeChange(index, value) {
+  if (value !== 'vat' && value !== 'kg') return
+  const entry = props.modelValue[index]
+  const currentMode = quantityModeOf(entry)
+  if (value === currentMode) return
+
+  const quantity = roundKg(Math.max(0, Number(entry?.quantity) || 0))
+  if (value === 'kg') {
+    patchEntry(index, {
+      quantityMode: 'kg',
+      quantity: roundWholeKg(quantity),
+      vatCount: null,
+      kgPerVat: null,
+    })
+    highlightModeFields(index, 'kg')
+    return
+  }
+
+  const perVat = Number(entry?.kgPerVat) || kgPerVat.value
+  const vatCount = perVat
+    ? nearestWholeVats(quantity, perVat) ??
+      (quantity > 0 ? Math.max(1, Math.round(quantity / perVat)) : null)
+    : null
+  patchEntry(index, {
+    quantityMode: 'vat',
+    vatCount,
+    kgPerVat: perVat || null,
+    quantity: perVat && vatCount ? roundKg(perVat * vatCount) : quantity,
+  })
+  highlightModeFields(index, 'vat')
+}
+
+function handleQuantityChange(index, value) {
+  if (quantityModeOf(props.modelValue[index]) !== 'kg') return
+  patchEntry(index, {
+    quantity: Math.max(0, Math.round(Number(value) || 0)),
+  })
+}
+
+function roundWholeKg(value) {
+  return Math.max(0, Math.round(Number(value) || 0))
+}
+
+const modeHighlight = ref(null)
+let modeHighlightTimer = 0
+
+function highlightModeFields(index, mode) {
+  modeHighlight.value = { index, mode }
+  if (modeHighlightTimer) clearTimeout(modeHighlightTimer)
+  modeHighlightTimer = window.setTimeout(() => {
+    modeHighlight.value = null
+    modeHighlightTimer = 0
+  }, 1200)
 }
 
 function removeEntry(index) {
@@ -251,7 +305,10 @@ function handleDocumentClick(event) {
 }
 
 onMounted(() => document.addEventListener('click', handleDocumentClick))
-onBeforeUnmount(() => document.removeEventListener('click', handleDocumentClick))
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleDocumentClick)
+  if (modeHighlightTimer) clearTimeout(modeHighlightTimer)
+})
 // 分订单从「有」变成「一张不剩」= 人删光或点了清空：记下这个 SKU，别再自动补建议单，
 // 否则删完立刻又长回一张新单，看起来像删不掉（得删两轮才真的空）。
 let lastSkuId = skuId.value
@@ -324,7 +381,6 @@ const ruleTitle = computed(() => {
       <span class="so-bar__item">需安排 <b>{{ formatQuantity(planned) }}</b> 公斤</span>
       <span class="so-bar__item">已下单 <b>{{ formatQuantity(total) }}</b> 公斤</span>
       <span v-if="kgPerVat" class="so-bar__item">合计 <b>{{ formatQuantity(vatTotal) }}</b> 缸</span>
-      <span v-if="nonWholeCount > 0" class="so-bar__warn">{{ nonWholeCount }} 张非整缸</span>
       <span class="so-bar__state" :class="`so-bar__state--${totalTone}`">{{ totalHint }}</span>
       <span class="so-bar__rule" :title="ruleTitle">{{ ruleShort }}</span>
     </div>
@@ -332,28 +388,32 @@ const ruleTitle = computed(() => {
     <div class="so-table-wrap">
       <table class="so-table">
         <colgroup>
-          <col style="width: 38px" />
-          <col style="width: 26%" />
-          <col style="width: 17%" />
-          <col style="width: 9%" />
-          <col style="width: 14%" />
-          <col />
-          <col style="width: 66px" />
+          <col style="width: 40px" />
+          <col style="width: 150px" />
+          <col style="width: 130px" />
+          <col style="width: 104px" />
+          <col style="width: 80px" />
+          <col style="width: 130px" />
+          <col style="width: 140px" />
+          <col style="width: 160px" />
+          <col style="width: 72px" />
         </colgroup>
         <thead>
           <tr>
-            <th class="so-center">#</th>
+            <th>#</th>
             <th>染厂</th>
             <th>分单人员</th>
-            <th class="so-r">缸数</th>
-            <th class="so-r">数量（公斤）</th>
+            <th>下单方式</th>
+            <th>缸数</th>
+            <th>缸型（公斤）</th>
+            <th>下单量（公斤）</th>
             <th>备注</th>
             <th></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="(entry, index) in modelValue" :key="entry.id || index">
-            <td class="so-idx">{{ index + 1 }}</td>
+            <td>{{ index + 1 }}</td>
             <td>
               <ElSelect
                 class="so-cell"
@@ -388,47 +448,90 @@ const ruleTitle = computed(() => {
               </ElSelect>
             </td>
             <td>
+              <ElSelect
+                class="so-cell"
+                :model-value="quantityModeOf(entry)"
+                size="small"
+                :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单下单方式`"
+                title="按缸时下单量由缸数 × 缸型计算；按公斤时直接输入。按公斤切到按缸会折算为最近的整数缸数"
+                @update:model-value="handleQuantityModeChange(index, $event)"
+              >
+                <ElOption label="按缸" value="vat" />
+                <ElOption label="按公斤" value="kg" />
+              </ElSelect>
+            </td>
+            <td
+              :class="{
+                'is-mode-highlight':
+                  modeHighlight?.index === index && modeHighlight.mode === 'vat',
+              }"
+            >
               <ElInputNumber
+                v-if="quantityModeOf(entry) === 'vat'"
                 :model-value="vatCountOf(entry)"
                 :min="0"
                 :step="1"
                 :controls="false"
-                :disabled="!kgPerVat"
-                :placeholder="kgPerVat ? `× ${formatQuantity(kgPerVat)}` : '无缸'"
+                :disabled="!Number(entry.kgPerVat)"
                 size="small"
                 class="so-cell so-cell--num so-cell--vat-count"
                 :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单缸数`"
                 @update:model-value="handleVatCountChange(index, $event)"
               />
+              <span v-else class="so-static">—</span>
             </td>
-            <td>
+            <td
+              :class="{
+                'is-mode-highlight':
+                  modeHighlight?.index === index && modeHighlight.mode === 'vat',
+              }"
+            >
               <ElSelect
+                v-if="quantityModeOf(entry) === 'vat'"
                 class="so-cell so-cell--num"
-                :model-value="Number(entry.quantity) || 0"
+                :model-value="Number(entry.kgPerVat) || undefined"
                 size="small"
                 filterable
                 allow-create
-                :placeholder="quantityOptions.length ? '选缸量' : '输入公斤'"
-                :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单数量`"
-                @update:model-value="handleQuantityChange(index, $event)"
+                default-first-option
+                :placeholder="quantityOptions.length ? '选择缸型' : '输入缸型'"
+                :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单缸型（公斤）`"
+                @update:model-value="handleVatTypeChange(index, $event)"
               >
                 <ElOption
                   v-for="option in quantityOptions"
-                  :key="option.quantity"
-                  :label="formatQuantity(option.quantity)"
-                  :value="option.quantity"
+                  :key="option.kgPerVat"
+                  :label="formatQuantity(option.kgPerVat)"
+                  :value="option.kgPerVat"
                 >
-                  <span class="so-opt__kg">{{ formatQuantity(option.quantity) }} 公斤</span>
+                  <span class="so-opt__kg">{{ formatQuantity(option.kgPerVat) }} 公斤/缸</span>
                   <span v-if="isSuggestedOption(option)" class="so-opt__tag">建议</span>
                 </ElOption>
               </ElSelect>
-              <span
-                v-if="variant !== 'panel' && rowHints[index]"
-                class="so-hint"
-                :class="`so-hint--${rowHints[index].tone}`"
-              >
-                {{ rowHints[index].text }}
+              <span v-else class="so-static">—</span>
+            </td>
+            <td
+              :class="{
+                'is-mode-highlight':
+                  modeHighlight?.index === index && modeHighlight.mode === 'kg',
+              }"
+            >
+              <span v-if="quantityModeOf(entry) === 'vat'" class="so-static">
+                {{ formatQuantity(entry.quantity) }}
               </span>
+              <ElInputNumber
+                v-else
+                :model-value="roundWholeKg(entry.quantity)"
+                :min="0"
+                :step="1"
+                :precision="0"
+                :controls="false"
+                size="small"
+                class="so-cell so-cell--num"
+                placeholder="输入公斤数"
+                :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单下单量（公斤）`"
+                @update:model-value="handleQuantityChange(index, $event)"
+              />
             </td>
             <td>
               <ElInput
@@ -463,28 +566,34 @@ const ruleTitle = computed(() => {
           </tr>
 
           <tr v-if="modelValue.length === 0">
-            <td colspan="7" class="so-empty">
+            <td colspan="9" class="so-empty">
               还没有分订单。点下面「添加分订单」会按缸规则带出一张建议单，再按染厂拆。
             </td>
           </tr>
 
           <tr class="so-add-row">
-            <td colspan="7">
+            <td colspan="9">
               <button type="button" class="so-add" @click="addEntry">＋ 添加分订单</button>
             </td>
           </tr>
         </tbody>
         <tfoot v-if="variant !== 'panel' && modelValue.length">
           <tr>
-            <td colspan="3" class="so-foot-label">合计</td>
-            <td class="so-r so-foot-num">{{ formatQuantity(vatTotal) }}</td>
-            <td class="so-r so-foot-num">{{ formatQuantity(total) }}</td>
+            <td colspan="4" class="so-foot-label">合计</td>
+            <td class="so-foot-num">{{ formatQuantity(vatTotal) }}</td>
+            <td />
+            <td class="so-foot-num">{{ formatQuantity(total) }}</td>
             <td colspan="2" class="so-foot-state" :class="`so-foot-state--${totalTone}`">
               {{ totalHint }}
             </td>
           </tr>
         </tfoot>
       </table>
+    </div>
+    <div v-if="variant === 'panel'" class="so-mode-guide" aria-label="下单方式说明">
+      <div class="so-mode-guide__title">下单方式</div>
+      <p>按缸：填写缸数、选择缸型，下单量自动计算</p>
+      <p>按公斤：直接填写下单量（公斤）</p>
     </div>
   </div>
 </template>
@@ -495,6 +604,36 @@ const ruleTitle = computed(() => {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+}
+
+.so-editor--panel {
+  min-height: 100%;
+}
+
+.so-mode-guide {
+  display: flex;
+  flex: 1 0 180px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 180px;
+  padding: 18px 12px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.so-mode-guide__title {
+  margin-bottom: 2px;
+  color: #64737c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.so-mode-guide p {
+  margin: 0;
 }
 
 /* 一条指标条：只留当前 SKU 的三个数，缸规则收成右侧一行灰字（悬停看完整判定） */
@@ -513,15 +652,6 @@ const ruleTitle = computed(() => {
   font-size: 15px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-}
-
-.so-bar__warn {
-  padding: 1px 6px;
-  border: 1px solid #e2c9c7;
-  border-radius: 2px;
-  background: #f9efee;
-  color: var(--industrial-urgent);
-  font-size: 11px;
 }
 
 .so-bar__state {
@@ -560,7 +690,7 @@ const ruleTitle = computed(() => {
 /* 单元格里保留可编辑控件，但静止时没有边框：眼睛看到的是表格，不是一个表单 */
 .so-table {
   width: 100%;
-  min-width: 600px;
+  min-width: 1006px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 12px;
@@ -588,37 +718,78 @@ const ruleTitle = computed(() => {
   padding: 2px 6px;
   border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
+  text-align: left;
 }
 
 .so-table tbody tr:hover td {
   background: #f8fafb;
 }
 
+.so-table td.is-mode-highlight {
+  background: #fff9ed;
+  animation: so-mode-cell-flash 1.2s ease-out;
+}
+
+.so-table td.is-mode-highlight :deep(.el-input__wrapper),
+.so-table td.is-mode-highlight :deep(.el-select__wrapper) {
+  animation: so-mode-control-flash 1.2s ease-out;
+}
+
+@keyframes so-mode-cell-flash {
+  0%,
+  100% {
+    background: transparent;
+  }
+  18%,
+  48% {
+    background: #fff2d6;
+  }
+  32%,
+  68% {
+    background: #fff9ed;
+  }
+}
+
+@keyframes so-mode-control-flash {
+  0%,
+  100% {
+    box-shadow: none;
+  }
+  18%,
+  48% {
+    box-shadow: 0 0 0 2px #d7c18b inset, 0 0 5px rgb(190 164 105 / 28%);
+  }
+  32%,
+  68% {
+    box-shadow: 0 0 0 1px #e5d8b8 inset, 0 0 2px rgb(190 164 105 / 16%);
+  }
+}
+
 .so-table tbody tr:last-child td {
   border-bottom: 0;
-}
-
-.so-r {
-  text-align: right;
-}
-
-.so-center {
-  text-align: center;
 }
 
 .so-idx {
   color: var(--industrial-muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  text-align: center;
 }
 
 .so-cell {
   width: 100%;
 }
 
+.so-static {
+  display: block;
+  min-height: 26px;
+  padding: 5px 4px 0;
+  color: var(--industrial-text);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
 .so-cell--num :deep(.el-input__inner) {
-  text-align: right;
+  text-align: left;
   font-variant-numeric: tabular-nums;
 }
 
@@ -626,9 +797,9 @@ const ruleTitle = computed(() => {
   text-align: left;
 }
 
-/* 数量下拉（缸规则候选）也右对齐，跟缸数列同一列手感 */
+/* 缸型下拉里的数字也左对齐，表格列统一阅读方向。 */
 .so-cell--num :deep(.el-select__selection) {
-  justify-content: flex-end;
+  justify-content: flex-start;
   font-variant-numeric: tabular-nums;
 }
 
@@ -644,24 +815,6 @@ const ruleTitle = computed(() => {
   background: #eef6f1;
   color: var(--industrial-normal);
   font-size: 10.5px;
-}
-
-/* 数量下方的整缸提示：整缸绿、非整缸黄，不占额外列宽 */
-.so-hint {
-  display: block;
-  margin-top: 2px;
-  font-size: 10.5px;
-  line-height: 1.3;
-  font-variant-numeric: tabular-nums;
-  white-space: normal;
-}
-
-.so-hint--ok {
-  color: var(--industrial-normal);
-}
-
-.so-hint--warn {
-  color: var(--industrial-replenish);
 }
 
 .so-table :deep(.el-input__wrapper),
@@ -729,7 +882,7 @@ const ruleTitle = computed(() => {
 /* 删除列：平时两个字，确认态四个字，列宽按确认态留 */
 .so-table td.so-op {
   padding: 0 2px;
-  text-align: right;
+  text-align: left;
 }
 
 .so-empty {

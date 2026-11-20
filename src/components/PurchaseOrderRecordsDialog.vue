@@ -130,6 +130,19 @@ function pendingOf(order) {
   return Math.max(0, (Number(order.quantity) || 0) - receivedOf(order))
 }
 
+function quantityPatchOf(order, quantity) {
+  const perVat = Number(order?.kgPerVat) || 0
+  const vatCount = perVat > 0 ? Math.round(quantity / perVat) : 0
+  if (
+    order?.quantityMode === 'vat' &&
+    vatCount > 0 &&
+    Math.abs(quantity / perVat - vatCount) < 0.005
+  ) {
+    return { quantity, quantityMode: 'vat', vatCount, kgPerVat: perVat }
+  }
+  return { quantity, quantityMode: 'kg', vatCount: null, kgPerVat: null }
+}
+
 // 待收归零 = 这单已经收齐：登记区整块不出现，只留结论
 function isSettled(order) {
   return pendingOf(order) <= 0
@@ -241,8 +254,13 @@ async function handleRemovePending(order) {
   } catch {
     return
   }
-  purchaseStore.updateOrder(order.id, { quantity: received })
-  ElMessage.success(`已删除待收 ${formatNumber(pending)} 公斤`)
+  const quantityPatch = quantityPatchOf(order, received)
+  purchaseStore.updateOrder(order.id, quantityPatch)
+  const modeNotice =
+    order.quantityMode === 'vat' && quantityPatch.quantityMode === 'kg'
+      ? '，剩余量不足整缸，已改按公斤记录'
+      : ''
+  ElMessage.success(`已删除待收 ${formatNumber(pending)} 公斤${modeNotice}`)
 }
 
 async function handleEditQuantity(order) {
@@ -273,8 +291,13 @@ async function handleEditQuantity(order) {
 
   const amount = Number(input)
   if (!Number.isFinite(amount) || amount <= 0 || amount === order.quantity) return
-  purchaseStore.updateOrder(order.id, { quantity: amount })
-  ElMessage.success(`下单量已改为 ${formatNumber(amount)} 公斤`)
+  const quantityPatch = quantityPatchOf(order, amount)
+  purchaseStore.updateOrder(order.id, quantityPatch)
+  const modeNotice =
+    order.quantityMode === 'vat' && quantityPatch.quantityMode === 'kg'
+      ? '，该数量不是整缸，已改按公斤记录'
+      : ''
+  ElMessage.success(`下单量已改为 ${formatNumber(amount)} 公斤${modeNotice}`)
 }
 
 // 撤销整单：整张分订单作废（含到货记录），公斤数退回主面板需安排。

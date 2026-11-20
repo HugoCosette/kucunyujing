@@ -4,6 +4,8 @@
 // 批次 = 一次「确认下单」产生的 batchId（可能含多个 SKU、多个染厂）；
 // 分订单 = 订单流水的一行（SKU × 染厂），到货与待收由 receipts 派生，不单独存。
 
+import { quantityModeOf } from './validate.js'
+
 const STATUS_CANCELLED = 'cancelled'
 
 const RECEIVE_LABELS = {
@@ -61,6 +63,7 @@ function rowOf(order) {
     color: text(order?.color),
     factoryName: text(order?.factoryName) || '未指定染厂',
     assignee: text(order?.assignee),
+    quantityMode: quantityModeOf(order),
     vatCount: num(order?.vatCount) || null,
     kgPerVat: num(order?.kgPerVat) || null,
     quantity,

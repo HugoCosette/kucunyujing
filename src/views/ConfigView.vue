@@ -1251,40 +1251,25 @@ function handleProfileMenu(command) {
           <button
             type="button"
             class="rail__item"
-            :class="{ 'is-active': activePanel === 'factories' }"
+            :class="{ 'is-active': ['factories', 'sku-factories'].includes(activePanel) }"
             @click="activePanel = 'factories'"
           >
-            <span class="rail__title">染厂清单</span>
+            <span class="rail__title">染厂管理</span>
             <span class="rail__meta">
-              {{ purchaseMeta.factories }} 家 · {{ purchaseMeta.enabledFactories }} 家启用
+              {{ purchaseMeta.factories }} 家 · {{ purchaseMeta.enabledFactories }} 家启用 ·
+              {{ purchaseMeta.skus }} 个 SKU 有约束
             </span>
           </button>
           <button
             type="button"
             class="rail__item"
-            :class="{ 'is-active': activePanel === 'people' }"
+            :class="{ 'is-active': ['people', 'categories'].includes(activePanel) }"
             @click="activePanel = 'people'"
           >
-            <span class="rail__title">分单人员表</span>
-            <span class="rail__meta">{{ purchaseMeta.people }} 人</span>
-          </button>
-          <button
-            type="button"
-            class="rail__item"
-            :class="{ 'is-active': activePanel === 'categories' }"
-            @click="activePanel = 'categories'"
-          >
-            <span class="rail__title">树形分类与分单</span>
-            <span class="rail__meta">{{ purchaseMeta.categories }} 个分类</span>
-          </button>
-          <button
-            type="button"
-            class="rail__item"
-            :class="{ 'is-active': activePanel === 'sku-factories' }"
-            @click="activePanel = 'sku-factories'"
-          >
-            <span class="rail__title">SKU 可选染厂</span>
-            <span class="rail__meta">{{ purchaseMeta.skus }} 个 SKU 有约束</span>
+            <span class="rail__title">人员与分类</span>
+            <span class="rail__meta">
+              {{ purchaseMeta.people }} 人 · {{ purchaseMeta.categories }} 个分类
+            </span>
           </button>
         </div>
 

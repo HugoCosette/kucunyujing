@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "updatedAt": "2026-11-20T01:58:07.231Z",
+  "updatedAt": "2026-11-20T02:55:00.000Z",
   "dyeFactories": [
     {
       "id": "df-1",
@@ -40,6 +40,26 @@
     {
       "id": "df-8",
       "name": "长乐力宏",
+      "enabled": true
+    },
+    {
+      "id": "df-9",
+      "name": "连江治建霞",
+      "enabled": true
+    },
+    {
+      "id": "df-10",
+      "name": "福清璇华",
+      "enabled": true
+    },
+    {
+      "id": "df-11",
+      "name": "长乐悦妍",
+      "enabled": true
+    },
+    {
+      "id": "df-12",
+      "name": "汕头东欢染厂",
       "enabled": true
     }
   ],

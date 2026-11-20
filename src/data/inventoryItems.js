@@ -1,4 +1,4 @@
-export const initialInventoryItems = [
+const demoSeedItems = [
   { id: 1, category: '黑白', product: '挪威网', color: '1#黑色', planned: null, producing: 37, inTransitStock: 37, backorder: 0, weeklyUsage: 17.25, warehouseStock: 56, turnoverIn: 0 },
   { id: 2, category: '黑白', product: '挪威网', color: '2#本白', planned: null, producing: 7, inTransitStock: 7, backorder: 0, weeklyUsage: 6.13, warehouseStock: 10, turnoverIn: 0 },
   { id: 3, category: '黑白', product: '挪威网', color: '1#黑色-AAA', planned: null, producing: 83, inTransitStock: 83, backorder: 0, weeklyUsage: 1.25, warehouseStock: 125, turnoverIn: 0 },
@@ -100,3 +100,62 @@ export const initialInventoryItems = [
   { id: 99, category: '彩色', product: '小BK', color: '11#杏色', planned: null, producing: 9, inTransitStock: 9, backorder: 0, weeklyUsage: 4.88, warehouseStock: 13, turnoverIn: 3 },
   { id: 100, category: '彩色', product: '小BK', color: '17#深灰', planned: null, producing: 46, inTransitStock: 46, backorder: 30, weeklyUsage: 30, warehouseStock: 69, turnoverIn: 0 },
 ]
+
+const DEMO_SEED_COPIES = 10
+
+const expandedDemoItems = Array.from(
+  { length: demoSeedItems.length * DEMO_SEED_COPIES },
+  (_, index) => {
+    const seedItem = demoSeedItems[index % demoSeedItems.length]
+    const copyNumber = Math.floor(index / demoSeedItems.length)
+    return {
+      ...seedItem,
+      id: index + 1,
+      color:
+        copyNumber === 0
+          ? seedItem.color
+          : `${seedItem.color}（演示${copyNumber + 1}）`,
+    }
+  },
+)
+
+const demoItemsByProduct = new Map()
+for (const item of expandedDemoItems) {
+  const items = demoItemsByProduct.get(item.product) ?? []
+  items.push(item)
+  demoItemsByProduct.set(item.product, items)
+}
+
+function demoHash(item, salt) {
+  let hash = 2166136261
+  for (const character of `${item.product}:${item.id}:${salt}`) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16777619) >>> 0
+  }
+  return hash / 0x100000000
+}
+
+function demoShortageTarget(item) {
+  const tier = demoHash(item, 'shortage-tier')
+  const variation = demoHash(item, 'shortage-value')
+  if (tier < 0.015) return 2200 + variation * 650
+  if (tier < 0.07) return 900 + variation * 900
+  if (tier < 0.25) return 450 + variation * 450
+  return 135 + variation * 300
+}
+
+for (const items of demoItemsByProduct.values()) {
+  const hotFlowItems = items.filter(
+    (item) => item.weeklyUsage * 4 >= 30 && item.id % 13 !== 0,
+  )
+
+  // 用稳定散列给热销流通 SKU 分配不均匀的长尾销量；页面缺口仍由备货引擎计算。
+  for (const item of hotFlowItems) {
+    const shortageKg = demoShortageTarget(item)
+    const normalDays = item.category === '黑白' ? 40 : 30
+    const theoreticalStock = item.warehouseStock + item.inTransitStock
+    const targetMonthlySales = ((shortageKg + theoreticalStock) * 30) / normalDays
+    item.weeklyUsage = targetMonthlySales / 4
+  }
+}
+
+export const initialInventoryItems = expandedDemoItems

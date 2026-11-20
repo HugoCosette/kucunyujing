@@ -21,7 +21,6 @@ defineProps({
     default: 'vat',
   },
 })
-
 const purchaseStore = usePurchaseStore()
 const inventoryStore = useInventoryStore()
 
@@ -84,7 +83,15 @@ const spuOptions = computed(() => {
 const newFactoryName = ref('')
 const newPersonName = ref('')
 const newCategoryName = ref('')
-const skuKeyword = ref('')
+const factoryKeyword = ref('')
+const relationSkuKeyword = ref('')
+const relationCandidateKeyword = ref('')
+const selectedFactoryId = ref('')
+const selectedCandidateSkuIds = ref([])
+const relationAddDialogVisible = ref(false)
+const relationImportDialogVisible = ref(false)
+const relationImportRecords = ref([])
+const relationImportLimitUnrestricted = ref(false)
 const importInputRef = ref(null)
 const settingsInputRef = ref(null)
 const importMode = ref('')
@@ -106,7 +113,7 @@ const itemBySkuId = computed(() => {
 })
 
 const skuCandidates = computed(() => {
-  const text = skuKeyword.value.trim().toLowerCase()
+  const text = relationCandidateKeyword.value.trim().toLowerCase()
   if (!text) return []
   const matched = []
   for (const item of inventoryStore.inventoryItems) {
@@ -114,9 +121,15 @@ const skuCandidates = computed(() => {
     if (!skuId) continue
     const product = String(item.product ?? '').toLowerCase()
     const color = String(item.color ?? '').toLowerCase()
-    if (!product.includes(text) && !color.includes(text)) continue
-    matched.push({ skuId, product: item.product, color: item.color })
-    if (matched.length >= 30) break
+    const id = skuId.toLowerCase()
+    if (!product.includes(text) && !color.includes(text) && !id.includes(text)) continue
+    matched.push({
+      skuId,
+      product: item.product,
+      color: item.color,
+      treeCategory: item.treeCategory,
+    })
+    if (matched.length >= 100) break
   }
   return matched
 })
@@ -136,6 +149,102 @@ const configuredSkus = computed(() =>
 
 const factoryOptions = computed(() => draft.value.dyeFactories)
 const categoryOptions = computed(() => draft.value.treeCategories.map((entry) => entry.name))
+const searchedFactories = computed(() => {
+  const text = factoryKeyword.value.trim().toLowerCase()
+  if (!text) return draft.value.dyeFactories
+  return draft.value.dyeFactories.filter((factory) => factory.name.toLowerCase().includes(text))
+})
+const selectedFactory = computed(
+  () => draft.value.dyeFactories.find((factory) => factory.id === selectedFactoryId.value) ?? null,
+)
+const currentFactorySkus = computed(() => {
+  const factoryId = selectedFactoryId.value
+  if (!factoryId) return []
+  const text = relationSkuKeyword.value.trim().toLowerCase()
+  return Object.entries(draft.value.skuFactories)
+    .filter(([, ids]) => ids.includes(factoryId))
+    .map(([skuId, ids]) => {
+      const item = itemBySkuId.value.get(skuId)
+      return {
+        skuId,
+        ids,
+        product: item?.product ?? skuId.split('|')[0] ?? skuId,
+        color: item?.color ?? skuId.split('|')[1] ?? '',
+        treeCategory: draft.value.skuCategoryOverrides[skuId] ?? item?.treeCategory ?? '',
+      }
+    })
+    .filter((row) => {
+      if (!text) return true
+      return [row.skuId, row.product, row.color, row.treeCategory]
+        .join(' ')
+        .toLowerCase()
+        .includes(text)
+    })
+    .sort((a, b) => a.product.localeCompare(b.product, 'zh-CN') || a.color.localeCompare(b.color, 'zh-CN'))
+})
+const factorySkuCounts = computed(() => {
+  const counts = new Map(draft.value.dyeFactories.map((factory) => [factory.id, 0]))
+  for (const item of inventoryStore.inventoryItems) {
+    const skuId = String(item.skuId ?? '').trim()
+    if (!skuId) continue
+    const picked = draft.value.skuFactories[skuId]
+    for (const factory of draft.value.dyeFactories) {
+      const allowed = picked
+        ? picked.includes(factory.id)
+        : factory.enabled !== false
+      if (allowed) counts.set(factory.id, (counts.get(factory.id) ?? 0) + 1)
+    }
+  }
+  return counts
+})
+const relationImportRows = computed(() => {
+  const factoriesByName = new Map(
+    draft.value.dyeFactories.map((factory) => [factory.name.trim().toLowerCase(), factory]),
+  )
+  const seenPairs = new Set()
+  return relationImportRecords.value.map((record) => {
+    const factory = factoriesByName.get(record.factoryName.trim().toLowerCase())
+    if (!factory) return { ...record, status: '未匹配染厂' }
+    if (!itemBySkuId.value.has(record.skuId)) return { ...record, factory, status: '未匹配 SKU' }
+
+    const pair = `${factory.id}\u0000${record.skuId}`
+    if (seenPairs.has(pair)) return { ...record, factory, status: '文件内重复' }
+    seenPairs.add(pair)
+
+    const existing = draft.value.skuFactories[record.skuId]
+    if (existing?.includes(factory.id)) return { ...record, factory, status: '已存在' }
+    if (!existing && !relationImportLimitUnrestricted.value) {
+      return { ...record, factory, status: '需确认限制范围' }
+    }
+    return {
+      ...record,
+      factory,
+      status: existing ? '待新增' : '将该 SKU 限定为导入染厂',
+    }
+  })
+})
+const relationImportCounts = computed(() =>
+  relationImportRows.value.reduce(
+    (counts, row) => {
+      counts[row.status] = (counts[row.status] ?? 0) + 1
+      return counts
+    },
+    {},
+  ),
+)
+const relationImportAddCount = computed(
+  () =>
+    (relationImportCounts.value['待新增'] ?? 0) +
+    (relationImportCounts.value['将该 SKU 限定为导入染厂'] ?? 0),
+)
+
+watch(
+  () => draft.value.dyeFactories.map((factory) => factory.id),
+  (ids) => {
+    if (!ids.includes(selectedFactoryId.value)) selectedFactoryId.value = ids[0] ?? ''
+  },
+  { immediate: true },
+)
 
 function nextFactoryId() {
   const used = new Set(draft.value.dyeFactories.map((factory) => factory.id))
@@ -211,21 +320,59 @@ function removeSelectedCategory() {
   if (index >= 0) removeCategory(index)
 }
 
-function addSkuConfig(candidate) {
-  if (!candidate?.skuId) return
-  if (draft.value.skuFactories[candidate.skuId]) {
-    ElMessage.info(`「${candidate.product} ${candidate.color}」已单独配置`)
-    return
-  }
-  // 新加入的 SKU 先全选启用染厂，用户再取消不可用的那几个。
-  draft.value.skuFactories[candidate.skuId] = draft.value.dyeFactories
-    .filter((factory) => factory.enabled !== false)
-    .map((factory) => factory.id)
-  skuKeyword.value = ''
+function isUnrestrictedSku(skuId) {
+  return !Object.prototype.hasOwnProperty.call(draft.value.skuFactories, skuId)
 }
 
-function removeSkuConfig(skuId) {
-  delete draft.value.skuFactories[skuId]
+function beginAddRelation() {
+  if (!selectedFactory.value) {
+    ElMessage.warning('请先选择染厂')
+    return
+  }
+  relationCandidateKeyword.value = ''
+  selectedCandidateSkuIds.value = []
+  relationAddDialogVisible.value = true
+}
+
+function isAlreadyRelatedToSelectedFactory(skuId) {
+  return draft.value.skuFactories[skuId]?.includes(selectedFactoryId.value) ?? false
+}
+
+function addSelectedRelations() {
+  const factoryId = selectedFactoryId.value
+  const factory = selectedFactory.value
+  if (!factory) return
+  let added = 0
+  let restricted = 0
+  for (const skuId of selectedCandidateSkuIds.value) {
+    const current = draft.value.skuFactories[skuId]
+    if (current?.includes(factoryId)) continue
+    if (current) current.push(factoryId)
+    else {
+      draft.value.skuFactories[skuId] = [factoryId]
+      restricted += 1
+    }
+    added += 1
+  }
+  relationAddDialogVisible.value = false
+  selectedCandidateSkuIds.value = []
+  if (added) {
+    ElMessage.success(
+      restricted
+        ? `已添加 ${added} 个 SKU，其中 ${restricted} 个从「全部启用染厂」改为仅限「${factory.name}」`
+        : `已为「${factory.name}」添加 ${added} 个 SKU`,
+    )
+  }
+}
+
+function removeFactoryRelation(row) {
+  const next = row.ids.filter((id) => id !== selectedFactoryId.value)
+  if (next.length) {
+    draft.value.skuFactories[row.skuId] = next
+  } else {
+    delete draft.value.skuFactories[row.skuId]
+    ElMessage.info('已解除该 SKU 的染厂限制，恢复为全部启用染厂可选')
+  }
 }
 
 function setSkuCategory(skuId, category) {
@@ -264,9 +411,44 @@ async function readColumnValues(file, headerName) {
   return values
 }
 
+async function readSkuFactoryRelations(file) {
+  const { rows } = readWorkbookRows(await file.arrayBuffer())
+  let headerRowNumber = null
+  let factoryColumn = -1
+  let skuColumn = -1
+
+  for (const row of rows.slice(0, 10)) {
+    const headers = row.cells.map((cell) => String(cell ?? '').trim())
+    factoryColumn = headers.findIndex((header) => header === '染厂名称')
+    skuColumn = headers.findIndex((header) =>
+      ['SKU唯一标识', '唯一标识', 'skuId'].includes(header),
+    )
+    if (factoryColumn >= 0 && skuColumn >= 0) {
+      headerRowNumber = row.rowNumber
+      break
+    }
+  }
+  if (headerRowNumber === null) {
+    throw new Error('需要「染厂名称」和「SKU唯一标识」（或「唯一标识」）两列')
+  }
+
+  return rows
+    .filter((row) => row.rowNumber > headerRowNumber)
+    .map((row) => ({
+      rowNumber: row.rowNumber,
+      factoryName: String(row.cells[factoryColumn] ?? '').trim(),
+      skuId: String(row.cells[skuColumn] ?? '').trim(),
+    }))
+    .filter((row) => row.factoryName || row.skuId)
+}
+
 function pickImportFile(mode) {
   importMode.value = mode
   importInputRef.value?.click()
+}
+
+function pickRelationImport() {
+  pickImportFile('sku-factories')
 }
 
 async function handleImportFile(event) {
@@ -289,6 +471,16 @@ async function handleImportFile(event) {
       return
     }
 
+    if (importMode.value === 'sku-factories') {
+      relationImportRecords.value = await readSkuFactoryRelations(file)
+      relationImportLimitUnrestricted.value = false
+      relationImportDialogVisible.value = true
+      if (!relationImportRecords.value.length) {
+        ElMessage.info('文件中没有可预览的染厂与 SKU 关联行')
+      }
+      return
+    }
+
     const names = await readColumnValues(file, '树形分类')
     const existing = new Set(draft.value.treeCategories.map((entry) => entry.name))
     let added = 0
@@ -302,6 +494,32 @@ async function handleImportFile(event) {
   } catch (error) {
     ElMessage.error(`导入失败：${error instanceof Error ? error.message : '未知错误'}`)
   }
+}
+
+function applyRelationImport() {
+  const additions = relationImportRows.value.filter((row) =>
+    ['待新增', '将该 SKU 限定为导入染厂'].includes(row.status),
+  )
+  if (!additions.length) {
+    ElMessage.info('没有可新增的关联')
+    return
+  }
+
+  const grouped = new Map()
+  for (const row of additions) {
+    const factoryIds = grouped.get(row.skuId) ?? new Set()
+    factoryIds.add(row.factory.id)
+    grouped.set(row.skuId, factoryIds)
+  }
+  for (const [skuId, ids] of grouped) {
+    const existing = draft.value.skuFactories[skuId]
+    draft.value.skuFactories[skuId] = existing
+      ? [...new Set([...existing, ...ids])]
+      : [...ids]
+  }
+
+  relationImportDialogVisible.value = false
+  ElMessage.success(`已导入 ${additions.length} 条染厂与 SKU 关联`)
 }
 
 function pickSettingsFile() {
@@ -350,6 +568,9 @@ async function confirm() {
 const enabledFactoryCount = computed(
   () => draft.value.dyeFactories.filter((factory) => factory.enabled !== false).length,
 )
+const factoryNamesSummary = computed(() =>
+  draft.value.dyeFactories.map((factory) => factory.name).join('、'),
+)
 
 // 左栏摘要：外壳只读这个对象，不直接碰 draft。
 const meta = computed(() => ({
@@ -375,22 +596,47 @@ function factoryName(factoryId) {
 }
 
 // —— 染厂弹窗 ——
+const factoryListDialogVisible = ref(false)
 const factoryDialogVisible = ref(false)
 const factoryEditingId = ref('')
-const factoryDraft = reactive({ name: '', enabled: true })
+const factoryDraft = reactive({ name: '' })
 
 function openCreateFactory() {
-  factoryEditingId.value = ''
+  cancelFactoryEdit()
   factoryDraft.name = ''
-  factoryDraft.enabled = true
   factoryDialogVisible.value = true
 }
 
 function openEditFactory(factory) {
   factoryEditingId.value = factory.id
   factoryDraft.name = factory.name
-  factoryDraft.enabled = factory.enabled !== false
-  factoryDialogVisible.value = true
+}
+
+function cancelFactoryEdit() {
+  factoryEditingId.value = ''
+  factoryDraft.name = ''
+}
+
+function confirmFactoryEdit(factory) {
+  const name = factoryDraft.name.trim()
+  if (!name) {
+    ElMessage.warning('染厂名称不能为空')
+    return
+  }
+  if (
+    draft.value.dyeFactories.some(
+      (entry) => entry.name === name && entry.id !== factory.id,
+    )
+  ) {
+    ElMessage.warning(`染厂「${name}」已存在`)
+    return
+  }
+  factory.name = name
+  cancelFactoryEdit()
+}
+
+function toggleFactoryEnabled(factory, enabled) {
+  factory.enabled = enabled
 }
 
 function saveFactoryDraft() {
@@ -400,22 +646,12 @@ function saveFactoryDraft() {
     return
   }
   if (
-    draft.value.dyeFactories.some(
-      (factory) => factory.name === name && factory.id !== factoryEditingId.value,
-    )
+    draft.value.dyeFactories.some((factory) => factory.name === name)
   ) {
     ElMessage.warning(`染厂「${name}」已存在`)
     return
   }
-  if (factoryEditingId.value) {
-    const target = draft.value.dyeFactories.find((factory) => factory.id === factoryEditingId.value)
-    if (target) {
-      target.name = name
-      target.enabled = factoryDraft.enabled
-    }
-  } else {
-    draft.value.dyeFactories.push({ id: nextFactoryId(), name, enabled: factoryDraft.enabled })
-  }
+  draft.value.dyeFactories.push({ id: nextFactoryId(), name, enabled: true })
   factoryDialogVisible.value = false
 }
 
@@ -485,30 +721,42 @@ function saveCategoryDraft() {
 
 // —— SKU 可选染厂弹窗 ——
 const skuDialogVisible = ref(false)
-const skuAddDialogVisible = ref(false)
 const skuEditingId = ref('')
+const skuUnrestricted = ref(false)
 const skuDraft = reactive({ category: '', factoryIds: [] })
-const skuEditingRow = computed(
-  () => configuredSkus.value.find((row) => row.skuId === skuEditingId.value) ?? null,
-)
+const skuEditingRow = computed(() => {
+  const skuId = skuEditingId.value
+  const item = itemBySkuId.value.get(skuId)
+  if (!skuId || !item) return null
+  return {
+    skuId,
+    product: item.product ?? skuId.split('|')[0] ?? skuId,
+    color: item.color ?? skuId.split('|')[1] ?? '',
+    treeCategory: item.treeCategory ?? '',
+  }
+})
 
 function openEditSku(row) {
   skuEditingId.value = row.skuId
   skuDraft.category = draft.value.skuCategoryOverrides[row.skuId] ?? ''
-  skuDraft.factoryIds = [...(row.ids ?? [])]
+  skuUnrestricted.value = isUnrestrictedSku(row.skuId)
+  skuDraft.factoryIds = skuUnrestricted.value
+    ? draft.value.dyeFactories
+        .filter((factory) => factory.enabled !== false)
+        .map((factory) => factory.id)
+    : [...(draft.value.skuFactories[row.skuId] ?? [])]
   skuDialogVisible.value = true
 }
 
 function saveSkuDraft() {
+  if (!skuUnrestricted.value && skuDraft.factoryIds.length === 0) {
+    ElMessage.warning('至少选择一家染厂，或启用「全部启用染厂可选」')
+    return
+  }
   setSkuCategory(skuEditingId.value, skuDraft.category)
-  draft.value.skuFactories[skuEditingId.value] = [...skuDraft.factoryIds]
+  if (skuUnrestricted.value) delete draft.value.skuFactories[skuEditingId.value]
+  else draft.value.skuFactories[skuEditingId.value] = [...skuDraft.factoryIds]
   skuDialogVisible.value = false
-}
-
-// 新增入口：复用同一个搜索框与候选列表，选中后立即按「全部启用染厂」加入。
-function addSkuFromDialog(candidate) {
-  addSkuConfig(candidate)
-  skuAddDialogVisible.value = false
 }
 
 // 外壳工具条通过 ref 调用这几个方法；dirty / meta 用于状态标签与左栏摘要。
@@ -521,81 +769,55 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
           <VatRuleSettings v-show="activePanel === 'vat'" v-model="vatSettings" :spus="spuOptions" />
 
           <!-- 染厂清单 -->
-          <section v-show="activePanel === 'factories'" class="panel">
+          <section v-show="['factories', 'sku-factories'].includes(activePanel)" class="panel">
             <div class="panel__head">
               <h2 class="panel__title">染厂清单</h2>
             </div>
             <div class="panel__body">
-              <div class="tbl-block">
-                <table class="score-table">
-                  <thead>
-                    <tr>
-                      <th>染厂名称</th>
-                      <th style="width: 84px">状态</th>
-                      <th class="is-actions" style="width: 64px">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(factory, index) in draft.dyeFactories" :key="factory.id">
-                      <td>{{ factory.name }}</td>
-                      <td>
-                        <span class="tag" :class="{ 'tag--muted': factory.enabled === false }">
-                          {{ factory.enabled === false ? '停用' : '启用' }}
-                        </span>
-                      </td>
-                      <td class="is-actions">
-                        <span class="row-acts">
-                          <button
-                            type="button"
-                            class="icon-btn"
-                            title="编辑"
-                            @click="openEditFactory(factory)"
-                          >
-                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                              <path
-                                d="m10.6 2.9 2.5 2.5-7.1 7.1-3.1.6.6-3.1 7.1-7.1Z"
-                                stroke="currentColor"
-                                stroke-width="1.2"
-                                stroke-linejoin="round"
-                              />
-                            </svg>
-                          </button>
-                          <button
-                            type="button"
-                            class="icon-btn icon-btn--danger"
-                            title="删除"
-                            @click="removeFactory(index)"
-                          >
-                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                              <path
-                                d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8h5l.5-8M6.7 6.6v4M9.3 6.6v4"
-                                stroke="currentColor"
-                                stroke-width="1.2"
-                                stroke-linecap="round"
-                              />
-                            </svg>
-                          </button>
-                        </span>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-                <p v-if="draft.dyeFactories.length === 0" class="manual-block__empty">还没有染厂</p>
-                <div class="tbl-foot">
-                  <span class="tbl-foot__hint">
-                    共 {{ draft.dyeFactories.length }} 家 · {{ enabledFactoryCount }} 家启用
-                  </span>
-                  <button type="button" class="btn btn--text btn--sm" @click="pickImportFile('factories')">
-                    从 Excel 导入
-                  </button>
-                  <button type="button" class="btn btn--sm" @click="openCreateFactory">新增</button>
-                </div>
-              </div>
+              <button
+                type="button"
+                class="factory-summary"
+                :title="factoryNamesSummary || '还没有染厂'"
+                aria-label="打开染厂清单管理"
+                @click="factoryListDialogVisible = true"
+              >
+                <span class="factory-summary__icon" aria-hidden="true">
+                  <svg viewBox="0 0 20 20" fill="none">
+                    <path
+                      d="M3.5 16.5V6.8L10 3.5l6.5 3.3v9.7M2.5 16.5h15M7 16.5v-4h6v4M7 8.2h.01M10 8.2h.01M13 8.2h.01"
+                      stroke="currentColor"
+                      stroke-width="1.4"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </span>
+                <span class="factory-summary__names">
+                  {{ factoryNamesSummary || '还没有染厂' }}
+                </span>
+                <span class="factory-summary__meta">
+                  <strong>{{ draft.dyeFactories.length }}</strong> 家染厂
+                  <i aria-hidden="true"></i>
+                  <strong>{{ enabledFactoryCount }}</strong> 家启用
+                </span>
+                <span class="factory-summary__action">
+                  管理清单
+                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="m6 3.5 4.5 4.5L6 12.5"
+                      stroke="currentColor"
+                      stroke-width="1.4"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </span>
+              </button>
             </div>
           </section>
 
           <!-- 分单人员表 -->
-          <section v-show="activePanel === 'people'" class="panel">
+          <section v-show="['people', 'categories'].includes(activePanel)" class="panel">
             <div class="panel__head">
               <h2 class="panel__title">分单人员表</h2>
             </div>
@@ -639,7 +861,7 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
           </section>
 
           <!-- 树形分类与分单人员 -->
-          <section v-show="activePanel === 'categories'" class="panel">
+          <section v-show="['people', 'categories'].includes(activePanel)" class="panel">
             <div class="panel__head">
               <h2 class="panel__title">树形分类与分单人员</h2>
             </div>
@@ -720,127 +942,298 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
           </section>
 
           <!-- SKU 可选染厂 -->
-          <section v-show="activePanel === 'sku-factories'" class="panel">
+          <section v-show="['factories', 'sku-factories'].includes(activePanel)" class="panel">
             <div class="panel__head">
-              <h2 class="panel__title">SKU 可选染厂</h2>
+              <h2 class="panel__title">染厂与 SKU 关联</h2>
             </div>
             <div class="panel__body">
-              <div class="tbl-block tbl-block--wide">
-                <div class="tbl-toolbar">
-                  <label class="field">
-                    <svg class="field__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <circle cx="7" cy="7" r="4.2" stroke="currentColor" stroke-width="1.3" />
-                      <path
-                        d="m10.4 10.4 3 3"
-                        stroke="currentColor"
-                        stroke-width="1.3"
-                        stroke-linecap="round"
-                      />
-                    </svg>
-                    <input
-                      v-model="skuKeyword"
-                      class="input input--search"
-                      placeholder="搜索品名 / 颜色，点结果加入"
-                      style="width: 232px"
-                    />
-                  </label>
-                  <span class="tbl-toolbar__meta">
-                    已配置 {{ configuredSkus.length }} 个 SKU
-                  </span>
-                </div>
-
-                <div v-if="skuKeyword.trim()" class="sku-candidates">
-                  <button
-                    v-for="candidate in skuCandidates"
-                    :key="candidate.skuId"
-                    type="button"
-                    class="sku-candidate"
-                    @click="addSkuConfig(candidate)"
-                  >
-                    {{ candidate.product }} · {{ candidate.color }}
-                  </button>
-                  <p v-if="skuCandidates.length === 0" class="sku-candidates__empty">
-                    没有匹配的 SKU（需要先导入总表）
+              <div class="relation-manager">
+                <div class="relation-manager__intro">
+                  <p>
+                    未限制的 SKU 默认可由所有启用染厂生产；只为确有特殊要求的 SKU 设置限制。
                   </p>
+                  <div class="relation-manager__actions">
+                    <button type="button" class="btn btn--text btn--sm" @click="pickRelationImport">
+                      Excel 导入关联
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn--primary btn--sm"
+                      :disabled="!selectedFactory"
+                      @click="beginAddRelation"
+                    >
+                      ＋ 添加 SKU
+                    </button>
+                  </div>
                 </div>
 
-                <table class="score-table">
-                  <thead>
-                    <tr>
-                      <th style="width: 148px">唯一标识</th>
-                      <th style="width: 188px">品名 / 颜色</th>
-                      <th style="width: 110px">树形分类</th>
-                      <th>可选染厂</th>
-                      <th class="is-actions" style="width: 64px">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="row in configuredSkus" :key="row.skuId">
-                      <td class="score-table__mono">{{ row.skuId }}</td>
-                      <td>{{ row.product }} · {{ row.color }}</td>
-                      <td>
-                        {{ draft.skuCategoryOverrides[row.skuId] ?? row.treeCategory ?? '—' }}
-                      </td>
-                      <td>
-                        <span v-if="row.ids.length" class="chips">
-                          <span v-for="id in row.ids" :key="id" class="tag">
-                            {{ factoryName(id) }}
-                          </span>
+                <div class="relation-manager__layout">
+                  <aside class="relation-factories">
+                    <div class="relation-factories__head">
+                      <strong>染厂</strong>
+                      <span>{{ draft.dyeFactories.length }}</span>
+                    </div>
+                    <ElInput
+                      v-model="factoryKeyword"
+                      size="small"
+                      clearable
+                      placeholder="搜索染厂"
+                      aria-label="搜索染厂"
+                    />
+                    <div class="relation-factories__list">
+                      <button
+                        v-for="factory in searchedFactories"
+                        :key="factory.id"
+                        type="button"
+                        class="relation-factory"
+                        :class="{
+                          'relation-factory--active': factory.id === selectedFactoryId,
+                          'relation-factory--disabled': factory.enabled === false,
+                        }"
+                        :aria-pressed="factory.id === selectedFactoryId"
+                        @click="selectedFactoryId = factory.id"
+                      >
+                        <span class="relation-factory__name">{{ factory.name }}</span>
+                        <span class="relation-factory__meta">
+                          {{ factory.enabled === false ? '停用' : `${factorySkuCounts.get(factory.id) ?? 0} 个 SKU` }}
                         </span>
-                        <span v-else class="score-table__muted">全部启用染厂</span>
-                      </td>
-                      <td class="is-actions">
-                        <span class="row-acts">
-                          <button
-                            type="button"
-                            class="icon-btn"
-                            title="编辑"
-                            @click="openEditSku(row)"
-                          >
-                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                              <path
-                                d="m10.6 2.9 2.5 2.5-7.1 7.1-3.1.6.6-3.1 7.1-7.1Z"
-                                stroke="currentColor"
-                                stroke-width="1.2"
-                                stroke-linejoin="round"
-                              />
-                            </svg>
-                          </button>
-                          <button
-                            type="button"
-                            class="icon-btn icon-btn--danger"
-                            title="删除"
-                            @click="removeSkuConfig(row.skuId)"
-                          >
-                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                              <path
-                                d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8h5l.5-8M6.7 6.6v4M9.3 6.6v4"
-                                stroke="currentColor"
-                                stroke-width="1.2"
-                                stroke-linecap="round"
-                              />
-                            </svg>
-                          </button>
-                        </span>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-                <p v-if="configuredSkus.length === 0" class="manual-block__empty">
-                  还没有单独配置的 SKU，全部 SKU 默认可用所有已启用染厂
-                </p>
+                      </button>
+                      <p v-if="searchedFactories.length === 0" class="relation-empty">
+                        没有匹配的染厂
+                      </p>
+                    </div>
+                  </aside>
 
-                <div class="tbl-foot">
-                  <span class="tbl-foot__hint">
-                    未单独配置 = 全部启用染厂可选；空列表同样视为全部
-                  </span>
-                  <button type="button" class="btn btn--sm" @click="skuAddDialogVisible = true">
-                    新增
-                  </button>
+                  <div v-if="selectedFactory" class="relation-detail">
+                    <div class="relation-detail__head">
+                      <div>
+                        <div class="relation-detail__eyebrow">当前染厂</div>
+                        <h3>{{ selectedFactory.name }}</h3>
+                      </div>
+                      <span
+                        class="tag"
+                        :class="{ 'tag--muted': selectedFactory.enabled === false }"
+                      >
+                        {{ selectedFactory.enabled === false ? '已停用' : '已启用' }}
+                      </span>
+                    </div>
+
+                    <div class="relation-detail__toolbar">
+                      <ElInput
+                        v-model="relationSkuKeyword"
+                        size="small"
+                        clearable
+                        placeholder="筛选已限制的 SKU"
+                        aria-label="筛选当前染厂 SKU"
+                      />
+                      <span>{{ currentFactorySkus.length }} 个明确关联</span>
+                    </div>
+
+                    <div v-if="currentFactorySkus.length" class="relation-sku-table-wrap">
+                      <table class="score-table relation-sku-table">
+                        <thead>
+                          <tr>
+                            <th>SKU</th>
+                            <th>唯一标识</th>
+                            <th>树形分类</th>
+                            <th class="is-actions">操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="row in currentFactorySkus" :key="row.skuId">
+                            <td>
+                              <strong>{{ row.product }}</strong>
+                              <span class="relation-sku-table__color">{{ row.color || '—' }}</span>
+                            </td>
+                            <td class="score-table__mono">{{ row.skuId }}</td>
+                            <td>{{ row.treeCategory || '—' }}</td>
+                            <td class="is-actions">
+                              <span class="row-acts">
+                                <button
+                                  type="button"
+                                  class="btn btn--text btn--sm"
+                                  @click="openEditSku(row)"
+                                >
+                                  配置
+                                </button>
+                                <button
+                                  type="button"
+                                  class="btn btn--text btn--sm"
+                                  @click="removeFactoryRelation(row)"
+                                >
+                                  解除
+                                </button>
+                              </span>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div v-else class="relation-empty relation-empty--detail">
+                      <strong>暂无单独限制的 SKU</strong>
+                      <span>未限制的 SKU 仍可由所有启用染厂生产，不会出现在此列表中。</span>
+                      <button
+                        type="button"
+                        class="btn btn--sm"
+                        :disabled="!selectedFactory"
+                        @click="beginAddRelation"
+                      >
+                        添加 SKU 限制
+                      </button>
+                    </div>
+                  </div>
+                  <div v-else class="relation-empty relation-empty--detail">
+                    还没有染厂，请先添加染厂或导入清单。
+                  </div>
                 </div>
               </div>
             </div>
           </section>
+
+    <ElDialog
+      v-model="factoryListDialogVisible"
+      class="ui-dialog"
+      width="min(720px, calc(100vw - 24px))"
+      append-to-body
+      align-center
+      title="管理染厂清单"
+    >
+      <div class="factory-list-dialog">
+        <div class="factory-list-dialog__intro">
+          <div>
+            <p class="factory-list-dialog__description">
+              维护采购下单时可选的染厂。停用的染厂不会出现在新订单中。
+            </p>
+          </div>
+          <div class="factory-list-dialog__stats" aria-label="染厂数量">
+            <span><strong>{{ draft.dyeFactories.length }}</strong> 家染厂</span>
+            <span><strong>{{ enabledFactoryCount }}</strong> 家启用</span>
+          </div>
+        </div>
+        <div class="factory-list-dialog__table-wrap">
+          <table class="score-table factory-list-dialog__table">
+            <thead>
+              <tr>
+                <th>染厂名称</th>
+                <th style="width: 130px">状态</th>
+                <th class="is-actions" style="width: 150px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(factory, index) in draft.dyeFactories" :key="factory.id">
+                  <td>
+                    <template v-if="factoryEditingId === factory.id">
+                      <ElInput
+                        v-model="factoryDraft.name"
+                        size="small"
+                        :aria-label="`编辑染厂名称：${factory.name}`"
+                        @keyup.enter="confirmFactoryEdit(factory)"
+                        @keyup.esc="cancelFactoryEdit"
+                      />
+                    </template>
+                    <span v-else>{{ factory.name }}</span>
+                  </td>
+                  <td>
+                    <div class="factory-state-control">
+                      <ElSwitch
+                        :model-value="factory.enabled !== false"
+                        :aria-label="`${factory.name}启用状态`"
+                        @change="toggleFactoryEnabled(factory, $event)"
+                      />
+                      <span
+                        class="factory-state-label"
+                        :class="{
+                          'factory-state-label--enabled': factory.enabled !== false,
+                        }"
+                      >
+                        {{ factory.enabled === false ? '停用' : '启用' }}
+                      </span>
+                    </div>
+                  </td>
+                  <td class="is-actions">
+                    <span class="row-acts">
+                      <template v-if="factoryEditingId === factory.id">
+                        <button
+                          type="button"
+                          class="btn btn--primary btn--sm"
+                          @click="confirmFactoryEdit(factory)"
+                        >
+                          确认
+                        </button>
+                        <button type="button" class="btn btn--sm" @click="cancelFactoryEdit">
+                          取消
+                        </button>
+                      </template>
+                      <template v-else>
+                        <button
+                          type="button"
+                          class="icon-btn"
+                          title="编辑名称"
+                          :disabled="Boolean(factoryEditingId)"
+                          @click="openEditFactory(factory)"
+                        >
+                          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path
+                              d="m10.6 2.9 2.5 2.5-7.1 7.1-3.1.6.6-3.1 7.1-7.1Z"
+                              stroke="currentColor"
+                              stroke-width="1.2"
+                              stroke-linejoin="round"
+                            />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          class="icon-btn icon-btn--danger"
+                          title="删除"
+                          :disabled="Boolean(factoryEditingId)"
+                          @click="removeFactory(index)"
+                        >
+                          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path
+                              d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8h5l.5-8M6.7 6.6v4M9.3 6.6v4"
+                              stroke="currentColor"
+                              stroke-width="1.2"
+                              stroke-linecap="round"
+                            />
+                          </svg>
+                        </button>
+                      </template>
+                    </span>
+                  </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-if="draft.dyeFactories.length === 0" class="manual-block__empty">还没有染厂</p>
+        <div class="tbl-foot">
+          <span class="tbl-foot__hint">仅本机草稿变更，点击页面顶部「确定」后生效</span>
+          <button type="button" class="btn btn--text btn--sm" @click="pickImportFile('factories')">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M8 10.5V2.8m0 0L5.2 5.6M8 2.8l2.8 2.8M3 9.5v3h10v-3"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            从 Excel 导入
+          </button>
+          <button type="button" class="btn btn--primary btn--sm" @click="openCreateFactory">
+            <span aria-hidden="true">＋</span>
+            新增染厂
+          </button>
+        </div>
+      </div>
+      <template #footer>
+        <div class="form__foot">
+          <span class="form__foot-spacer"></span>
+          <button type="button" class="btn btn--sm" @click="factoryListDialogVisible = false">
+            关闭
+          </button>
+        </div>
+      </template>
+    </ElDialog>
 
     <!-- 染厂编辑 -->
     <ElDialog
@@ -849,20 +1242,13 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
       width="480px"
       append-to-body
       align-center
-      :title="factoryEditingId ? '编辑染厂' : '新增染厂'"
+      title="新增染厂"
     >
       <div class="form">
         <div class="form__row">
           <span class="form__row-label">染厂名称</span>
           <div class="form__row-ctrl">
             <ElInput v-model="factoryDraft.name" size="small" aria-label="染厂名称" />
-          </div>
-        </div>
-        <div class="form__row">
-          <span class="form__row-label">状态</span>
-          <div class="form__row-ctrl">
-            <ElSwitch v-model="factoryDraft.enabled" size="small" aria-label="是否启用" />
-            <span class="form__row-hint">停用后不出现在下单下拉里，已有分订单保留原厂名。</span>
           </div>
         </div>
       </div>
@@ -965,54 +1351,169 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
       </template>
     </ElDialog>
 
-    <!-- SKU 可选染厂编辑 -->
     <ElDialog
-      v-model="skuAddDialogVisible"
-      class="ui-dialog"
-      width="480px"
+      v-model="relationAddDialogVisible"
+      class="ui-dialog relation-add-dialog"
+      width="min(720px, calc(100vw - 24px))"
       append-to-body
       align-center
-      title="新增 SKU 约束"
+      :title="`为「${selectedFactory?.name ?? ''}」添加 SKU`"
     >
-      <div class="form">
-        <div class="form__row">
-          <span class="form__row-label">搜索 SKU</span>
-          <div class="form__row-ctrl">
-            <ElInput
-              v-model="skuKeyword"
-              size="small"
-              clearable
-              placeholder="品名或颜色"
-              aria-label="搜索品名或颜色"
-            />
-            <span class="form__row-hint">需要先导入总表；点击结果即可加入约束。</span>
-          </div>
-        </div>
-        <div class="chips">
-          <button
+      <div class="relation-add">
+        <p class="relation-add__hint">
+          搜索 SKU 后勾选并批量添加。未限制的 SKU 加入后将改为仅限所选染厂；可在 SKU 配置中调整为多家或全部启用染厂。
+        </p>
+        <ElInput
+          v-model="relationCandidateKeyword"
+          size="small"
+          clearable
+          autofocus
+          placeholder="搜索品名、颜色或 SKU 唯一标识"
+          aria-label="搜索 SKU"
+        />
+        <ElCheckboxGroup
+          v-if="relationCandidateKeyword.trim()"
+          v-model="selectedCandidateSkuIds"
+          class="relation-add__results"
+        >
+          <div
             v-for="candidate in skuCandidates"
             :key="candidate.skuId"
-            type="button"
-            class="sku-candidate"
-            @click="addSkuFromDialog(candidate)"
+            class="relation-add__row"
           >
-            {{ candidate.product }} · {{ candidate.color }}
-          </button>
+            <ElCheckbox
+              :value="candidate.skuId"
+              :disabled="isAlreadyRelatedToSelectedFactory(candidate.skuId)"
+            >
+              <span class="relation-add__sku">
+                <strong>{{ candidate.product }} · {{ candidate.color }}</strong>
+                <small>{{ candidate.skuId }}</small>
+              </span>
+            </ElCheckbox>
+            <span class="relation-add__state">
+              {{
+                isAlreadyRelatedToSelectedFactory(candidate.skuId)
+                  ? '已关联'
+                  : isUnrestrictedSku(candidate.skuId)
+                    ? '当前不限染厂'
+                    : '已有染厂限制'
+              }}
+            </span>
+            <button type="button" class="btn btn--text btn--sm" @click="openEditSku(candidate)">
+              配置
+            </button>
+          </div>
+          <p v-if="skuCandidates.length === 0" class="relation-empty">
+            没有匹配的 SKU，请确认已导入库存总表。
+          </p>
+          <p v-else-if="skuCandidates.length >= 100" class="relation-add__hint">
+            仅显示前 100 个结果，请继续输入缩小范围。
+          </p>
+        </ElCheckboxGroup>
+        <div v-else class="relation-empty relation-add__empty">
+          输入品名、颜色或唯一标识，查找库存中的 SKU。
         </div>
-        <p v-if="skuKeyword.trim() && skuCandidates.length === 0" class="sku-candidates__empty">
-          没有匹配的 SKU（需要先导入总表）
-        </p>
       </div>
       <template #footer>
         <div class="form__foot">
           <span class="form__foot-spacer"></span>
-          <button type="button" class="btn btn--sm" @click="skuAddDialogVisible = false">
+          <button type="button" class="btn btn--sm" @click="relationAddDialogVisible = false">
             取消
+          </button>
+          <button
+            type="button"
+            class="btn btn--primary btn--sm"
+            :disabled="selectedCandidateSkuIds.length === 0"
+            @click="addSelectedRelations"
+          >
+            添加 {{ selectedCandidateSkuIds.length || '' }} 个 SKU
           </button>
         </div>
       </template>
     </ElDialog>
 
+    <ElDialog
+      v-model="relationImportDialogVisible"
+      class="ui-dialog relation-import-dialog"
+      width="min(900px, calc(100vw - 24px))"
+      append-to-body
+      align-center
+      title="预览染厂与 SKU 关联导入"
+    >
+      <div class="relation-import">
+        <p class="relation-add__hint">
+          仅应用有效的新关联。未匹配、重复、已存在的行会保留在预览中但不会写入。
+        </p>
+        <div class="relation-import__stats">
+          <span><strong>{{ relationImportRecords.length }}</strong> 条数据行</span>
+          <span><strong>{{ relationImportAddCount }}</strong> 可新增</span>
+          <span><strong>{{ relationImportCounts['需确认限制范围'] ?? 0 }}</strong> 待确认范围</span>
+          <span><strong>{{ relationImportCounts['已存在'] ?? 0 }}</strong> 已存在</span>
+          <span><strong>{{ (relationImportCounts['未匹配染厂'] ?? 0) + (relationImportCounts['未匹配 SKU'] ?? 0) }}</strong> 未匹配</span>
+          <span><strong>{{ relationImportCounts['文件内重复'] ?? 0 }}</strong> 文件重复</span>
+        </div>
+        <label
+          v-if="relationImportCounts['需确认限制范围'] || relationImportCounts['将该 SKU 限定为导入染厂']"
+          class="relation-import__confirm"
+        >
+          <ElCheckbox v-model="relationImportLimitUnrestricted" />
+          <span>
+            确认将文件中未限制的 SKU 收窄为文件列出的染厂
+            <small>
+              当前未限制 SKU 默认可选所有启用染厂；勾选后，只允许文件中列出的染厂。
+            </small>
+          </span>
+        </label>
+        <div class="relation-import__table-wrap">
+          <table class="score-table relation-import__table">
+            <thead>
+              <tr>
+                <th style="width: 64px">行号</th>
+                <th>染厂</th>
+                <th>SKU 唯一标识</th>
+                <th style="width: 190px">预览结果</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in relationImportRows" :key="row.rowNumber">
+                <td>{{ row.rowNumber }}</td>
+                <td>{{ row.factoryName || '—' }}</td>
+                <td class="score-table__mono">{{ row.skuId || '—' }}</td>
+                <td>
+                  <span
+                    class="tag"
+                    :class="{
+                      'tag--muted': ['已存在', '文件内重复'].includes(row.status),
+                      'tag--warning': ['未匹配染厂', '未匹配 SKU', '需确认限制范围'].includes(row.status),
+                    }"
+                  >
+                    {{ row.status }}
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <template #footer>
+        <div class="form__foot">
+          <span class="form__foot-spacer"></span>
+          <button type="button" class="btn btn--sm" @click="relationImportDialogVisible = false">
+            取消
+          </button>
+          <button
+            type="button"
+            class="btn btn--primary btn--sm"
+            :disabled="relationImportRows.every((row) => !['待新增', '将该 SKU 限定为导入染厂'].includes(row.status))"
+            @click="applyRelationImport"
+          >
+            确认导入
+          </button>
+        </div>
+      </template>
+    </ElDialog>
+
+    <!-- SKU 可选染厂编辑 -->
     <ElDialog
       v-model="skuDialogVisible"
       class="ui-dialog"
@@ -1050,6 +1551,10 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
         <div class="form__row">
           <span class="form__row-label">可选染厂</span>
           <div class="form__row-ctrl">
+            <label class="relation-unrestricted">
+              <ElCheckbox v-model="skuUnrestricted" />
+              <span>全部启用染厂可选</span>
+            </label>
             <ElSelect
               v-model="skuDraft.factoryIds"
               size="small"
@@ -1057,8 +1562,9 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
               filterable
               collapse-tags
               collapse-tags-tooltip
-              placeholder="选择染厂（空 = 全部）"
+              placeholder="选择一家或多家染厂"
               aria-label="可选染厂"
+              :disabled="skuUnrestricted"
             >
               <ElOption
                 v-for="factory in factoryOptions"
@@ -1068,7 +1574,9 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
                 :disabled="factory.enabled === false"
               />
             </ElSelect>
-            <span class="form__row-hint">全不选 = 全部启用染厂可选。</span>
+            <span class="form__row-hint">
+              不限时删除单独限制；否则至少选择一家启用染厂。
+            </span>
           </div>
         </div>
       </div>
@@ -1103,37 +1611,633 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
   display: none;
 }
 
-.sku-candidates {
+.factory-summary {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--industrial-grid-light);
-  background: #f0f4f6;
-}
-
-.sku-candidate {
-  height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--industrial-grid-light);
-  border-radius: 2px;
-  background: #fff;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 7px 10px;
+  border: 1px solid #c7d2d9;
+  border-radius: 4px;
+  background: linear-gradient(110deg, #fff 0%, #f9fbfc 100%);
   color: var(--industrial-text);
   font: inherit;
-  font-size: 11.5px;
+  text-align: left;
   cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background 120ms ease;
 }
 
-.sku-candidate:hover {
+.factory-summary:hover {
   border-color: var(--industrial-primary);
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(47, 59, 67, 0.08);
+}
+
+.factory-summary:focus-visible {
+  outline: 2px solid var(--industrial-primary);
+  outline-offset: 2px;
+}
+
+.factory-summary__icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d5e0e6;
+  border-radius: 4px;
+  background: #edf4f7;
   color: var(--industrial-primary);
 }
 
-.sku-candidates__empty {
-  margin: 0;
+.factory-summary__icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.factory-summary__names {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--industrial-text);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.factory-summary__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
   color: var(--industrial-muted);
   font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.factory-summary__meta strong {
+  color: var(--industrial-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.factory-summary__meta i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #9aa8b0;
+}
+
+.factory-summary__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  padding: 5px 8px;
+  border: 1px solid #d3dfe5;
+  border-radius: 3px;
+  background: #f5f9fb;
+  color: var(--industrial-primary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.factory-summary__action svg {
+  width: 13px;
+  height: 13px;
+}
+
+.factory-list-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: min(68vh, 600px);
+}
+
+.factory-list-dialog__intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 12px;
+  border: 1px solid #d7e1e6;
+  border-radius: 4px;
+  background: #f0f5f7;
+}
+
+.factory-list-dialog__description {
+  margin: 0;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.factory-list-dialog__stats {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.factory-list-dialog__stats span {
+  padding: 4px 8px;
+  border: 1px solid #d3dfe5;
+  border-radius: 3px;
+  background: #fff;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.factory-list-dialog__stats strong {
+  margin-right: 2px;
+  color: var(--industrial-primary-active);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.factory-list-dialog__table-wrap {
+  max-height: min(46vh, 400px);
+  overflow: auto;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.factory-list-dialog__table {
+  border: 0;
+}
+
+.factory-list-dialog__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 34px;
+  background: #e8eff3;
+  color: #43535d;
+}
+
+.factory-list-dialog__table td {
+  height: 40px;
+  background: #fff;
+}
+
+.factory-list-dialog__table tbody tr:nth-child(even) td {
+  background: #fbfcfd;
+}
+
+.factory-list-dialog__table tbody tr:hover td {
+  background: #f0f6f8;
+}
+
+.factory-list-dialog__table td:first-child {
+  font-weight: 500;
+}
+
+.factory-list-dialog__table td:first-child .el-input {
+  max-width: 360px;
+}
+
+.factory-list-dialog__table td:first-child :deep(.el-input__wrapper) {
+  min-height: 30px;
+}
+
+.factory-list-dialog__table .row-acts .icon-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+
+.factory-state-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.factory-state-control :deep(.el-switch) {
+  --el-switch-on-color: var(--industrial-primary);
+  --el-switch-off-color: #aeb9c0;
+  height: 22px;
+}
+
+.factory-state-control :deep(.el-switch__core) {
+  min-width: 42px;
+  height: 24px;
+  border-radius: 12px;
+}
+
+.factory-state-control :deep(.el-switch__action) {
+  width: 18px;
+  height: 18px;
+}
+
+.factory-state-label {
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+}
+
+.factory-state-label--enabled {
+  color: #47745c;
+  font-weight: 600;
+}
+
+.factory-list-dialog__table .row-acts .btn {
+  min-width: 48px;
+}
+
+.factory-list-dialog .tbl-foot {
+  gap: 8px;
+  margin-top: 0;
+  padding-top: 2px;
+}
+
+.factory-list-dialog .tbl-foot__hint {
+  max-width: 300px;
+  line-height: 1.4;
+}
+
+.factory-list-dialog .btn--text {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.factory-list-dialog .btn--text svg {
+  width: 14px;
+  height: 14px;
+}
+
+@media (max-width: 600px) {
+  .factory-summary {
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .factory-summary__icon {
+    width: 26px;
+    height: 26px;
+  }
+
+  .factory-summary__meta {
+    display: none;
+  }
+
+  .factory-summary__action {
+    padding: 4px 6px;
+  }
+
+  .factory-list-dialog__intro {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .factory-list-dialog .tbl-foot {
+    flex-wrap: wrap;
+  }
+
+  .factory-list-dialog .tbl-foot__hint {
+    flex: 1 0 100%;
+    max-width: none;
+  }
+}
+
+.relation-manager {
+  display: grid;
+  gap: 14px;
+}
+
+.relation-manager__intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid #dce5eb;
+  border-radius: 4px;
+  background: #f6f9fb;
+}
+
+.relation-manager__intro p,
+.relation-add__hint {
+  margin: 0;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.relation-manager__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.relation-manager__layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
+  min-height: 380px;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 4px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.relation-factories {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-right: 1px solid var(--industrial-grid-light);
+  background: #f8fafb;
+}
+
+.relation-factories__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--industrial-text);
+  font-size: 13px;
+}
+
+.relation-factories__head span,
+.relation-factory__meta {
+  color: var(--industrial-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.relation-factories__list {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  max-height: 430px;
+  overflow: auto;
+}
+
+.relation-factory {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--industrial-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.relation-factory:hover {
+  background: #eef4f7;
+}
+
+.relation-factory--active {
+  border-color: #b6d2e3;
+  background: #eaf3f8;
+  color: var(--industrial-primary);
+}
+
+.relation-factory--disabled .relation-factory__name {
+  color: var(--industrial-muted);
+}
+
+.relation-factory__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relation-detail {
+  min-width: 0;
+  padding: 18px;
+}
+
+.relation-detail__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #edf1f4;
+}
+
+.relation-detail__eyebrow {
+  margin-bottom: 4px;
+  color: var(--industrial-muted);
+  font-size: 10px;
+}
+
+.relation-detail__head h3 {
+  margin: 0;
+  color: var(--industrial-text);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.relation-detail__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.relation-detail__toolbar .el-input {
+  max-width: 280px;
+}
+
+.relation-sku-table-wrap,
+.relation-import__table-wrap {
+  max-height: 390px;
+  overflow: auto;
+}
+
+.relation-sku-table {
+  min-width: 620px;
+}
+
+.relation-sku-table__color {
+  display: block;
+  margin-top: 3px;
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.relation-sku-table .row-acts {
+  gap: 4px;
+}
+
+.relation-empty {
+  padding: 20px 12px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.relation-empty--detail {
+  display: flex;
+  min-height: 220px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.relation-empty--detail strong {
+  color: var(--industrial-text);
+  font-size: 13px;
+}
+
+.relation-empty--detail span {
+  max-width: 380px;
+  line-height: 1.6;
+}
+
+.relation-add {
+  display: grid;
+  gap: 12px;
+}
+
+.relation-add__results {
+  max-height: min(440px, 55vh);
+  overflow: auto;
+  border: 1px solid var(--industrial-grid-light);
+  border-radius: 3px;
+}
+
+.relation-add__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px 54px;
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+  padding: 7px 11px;
+  border-bottom: 1px solid #edf1f4;
+}
+
+.relation-add__row:last-child {
+  border-bottom: 0;
+}
+
+.relation-add__sku {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 360px;
+  color: var(--industrial-text);
+}
+
+.relation-add__sku strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relation-add__sku small,
+.relation-add__state {
+  color: var(--industrial-muted);
+  font-size: 10px;
+}
+
+.relation-add__empty {
+  border: 1px dashed var(--industrial-grid-light);
+  border-radius: 3px;
+}
+
+.relation-unrestricted {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--industrial-text);
+  font-size: 12px;
+}
+
+.relation-import {
+  display: grid;
+  gap: 12px;
+}
+
+.relation-import__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 10px 12px;
+  border: 1px solid #e3eaf0;
+  border-radius: 3px;
+  background: #f7f9fb;
+  color: var(--industrial-muted);
+  font-size: 11px;
+}
+
+.relation-import__stats strong {
+  color: var(--industrial-text);
+  font-size: 13px;
+}
+
+.relation-import__confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #f0d7a8;
+  border-radius: 3px;
+  background: #fffaf0;
+  color: #745a28;
+  font-size: 12px;
+}
+
+.relation-import__confirm small {
+  display: block;
+  margin-top: 3px;
+  color: var(--industrial-muted);
+  font-size: 10px;
+}
+
+.relation-import__table {
+  min-width: 620px;
+}
+
+.tag--warning {
+  border-color: #f0d7a8;
+  background: #fff7e8;
+  color: #986d1e;
+}
+
+@media (max-width: 760px) {
+  .relation-manager__intro {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .relation-manager__layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .relation-factories {
+    border-right: 0;
+    border-bottom: 1px solid var(--industrial-grid-light);
+  }
+
+  .relation-factories__list {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    max-height: 180px;
+  }
 }
 
 .category-people {

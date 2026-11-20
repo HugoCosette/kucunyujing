@@ -83,9 +83,12 @@ function percentOf(progress) {
 }
 
 function vatText(row) {
-  if (row.vatCount && row.kgPerVat) return `${row.vatCount} 缸 × ${row.kgPerVat}`
-  if (row.vatCount) return `${row.vatCount} 缸`
-  if (row.kgPerVat) return `${row.kgPerVat} kg/缸`
+  if (row.quantityMode === 'kg') return '按公斤'
+  if (row.quantityMode === 'vat') {
+    if (row.vatCount && row.kgPerVat) return `${row.vatCount} 缸 × ${row.kgPerVat} 公斤/缸`
+    return '按缸（缸规未完整）'
+  }
+  if (row.vatCount && row.kgPerVat) return `按缸 · ${row.vatCount} × ${row.kgPerVat}`
   return '—'
 }
 
@@ -117,7 +120,7 @@ function handleExport() {
   ]
 
   const orderRows = [
-    ['批次号', '确认时间', '品名', '颜色', '唯一标识', '染厂', '分单人员', '缸', '下单（kg）', '已到货（kg）', '待收（kg）', '状态', '到货记录', '撤回记录', '改单次数', '备注'],
+    ['批次号', '确认时间', '品名', '颜色', '唯一标识', '染厂', '分单人员', '下单方式 / 缸型', '下单（kg）', '已到货（kg）', '待收（kg）', '状态', '到货记录', '撤回记录', '改单次数', '备注'],
   ]
   for (const batch of batches.value) {
     for (const row of batch.orders) {
@@ -150,7 +153,7 @@ function handleExport() {
         {
           name: '分订单明细',
           rows: orderRows,
-          widths: [18, 18, 22, 16, 20, 16, 12, 12, 12, 12, 12, 14, 10, 10, 10, 24],
+          widths: [18, 18, 22, 16, 20, 16, 12, 20, 12, 12, 12, 14, 10, 10, 10, 24],
         },
       ],
       `下单历史-${timestamp}.xlsx`,
@@ -205,7 +208,7 @@ function handleExport() {
           <col style="width: 160px" />
           <col style="width: 126px" />
           <col style="width: 78px" />
-          <col style="width: 88px" />
+          <col style="width: 126px" />
           <col style="width: 94px" />
           <col style="width: 84px" />
           <col style="width: 84px" />
@@ -220,7 +223,7 @@ function handleExport() {
             <th>颜色</th>
             <th>染厂</th>
             <th>分单人员</th>
-            <th>缸</th>
+            <th>下单方式 / 缸型</th>
             <th class="is-num">下单（kg）</th>
             <th class="is-num">已到货</th>
             <th class="is-num">待收</th>

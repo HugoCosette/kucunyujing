@@ -23,6 +23,27 @@ function toNumber(value) {
   return Number.isFinite(number) ? number : null
 }
 
+export function quantityModeOf(entry) {
+  const mode = text(entry?.quantityMode)
+  if (mode === 'vat' || mode === 'kg') return mode
+  return toNumber(entry?.vatCount) >= 1 && toNumber(entry?.kgPerVat) > 0 ? 'vat' : 'kg'
+}
+
+function quantityFieldsOf(entry) {
+  const quantityMode = quantityModeOf(entry)
+  return {
+    quantityMode,
+    vatCount:
+      quantityMode === 'vat' && toNumber(entry?.vatCount) >= 1
+        ? Math.round(toNumber(entry.vatCount))
+        : null,
+    kgPerVat:
+      quantityMode === 'vat' && toNumber(entry?.kgPerVat) > 0
+        ? toNumber(entry.kgPerVat)
+        : null,
+  }
+}
+
 // id 必须唯一：重命名工厂时 id 保持不变，SKU 与分订单的引用才不会断。
 function uniqueId(base, used) {
   let id = base
@@ -149,6 +170,7 @@ function normalizeDraftEntry(entry, index, keepBlankEntries) {
   const assignee = text(entry.assignee)
   const note = text(entry.note)
   const quantity = toNumber(entry.quantity ?? 0)
+  const quantityFields = quantityFieldsOf(entry)
   // 完全空白的占位行（没选染厂、没人、没数量、没备注）：落盘时丢弃；
   // 运行时可保留，供「添加分订单」先建行再填写。
   const isBlank = !factoryId && !factoryName && !assignee && !(quantity > 0) && !note
@@ -159,11 +181,13 @@ function normalizeDraftEntry(entry, index, keepBlankEntries) {
     factoryId,
     factoryName,
     assignee,
-    quantity: quantity > 0 ? quantity : 0,
-    // 缸快照：下单时的缸数与每缸公斤，导出与对账要能还原当时按什么缸规下的单。
-    // 缸数只存整数（公斤可以不整缸，此时 vatCount 为空、只留每缸公斤）。
-    vatCount: toNumber(entry.vatCount) >= 1 ? Math.round(toNumber(entry.vatCount)) : null,
-    kgPerVat: toNumber(entry.kgPerVat) > 0 ? toNumber(entry.kgPerVat) : null,
+    quantity:
+      quantity > 0
+        ? quantityFields.quantityMode === 'kg'
+          ? Math.round(quantity)
+          : quantity
+        : 0,
+    ...quantityFields,
     note,
   }
 }
@@ -203,6 +227,7 @@ function normalizeOrder(order, index) {
   const assignee = text(order.assignee)
   const note = text(order.note)
   const quantity = toNumber(order.quantity ?? 0)
+  const quantityFields = quantityFieldsOf(order)
   const isBlank = !skuId || (!factoryId && !factoryName && !assignee && !(quantity > 0) && !note)
   if (isBlank) return null
 
@@ -221,8 +246,7 @@ function normalizeOrder(order, index) {
     factoryName,
     assignee,
     quantity: quantity > 0 ? quantity : 0,
-    vatCount: toNumber(order.vatCount) >= 1 ? Math.round(toNumber(order.vatCount)) : null,
-    kgPerVat: toNumber(order.kgPerVat) > 0 ? toNumber(order.kgPerVat) : null,
+    ...quantityFields,
     note,
     status:
       text(order.status) === ORDER_STATUS.CANCELLED ? ORDER_STATUS.CANCELLED : ORDER_STATUS.ACTIVE,

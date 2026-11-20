@@ -1,0 +1,4 @@
+﻿"Bug ID","Title","Severity","Component","Test Case ID","Status","Reported Date","Reported By","Description","Steps to Reproduce","Expected Result","Actual Result","Environment","Resolution"
+"BUG-001","小批量补单规则文档描述与实际配置不一致","P3","文档/缸规则","UX-02","Open","2026-11-20","Horizon QA","采购下单流程.md §4.3 描述小批量补单为「≤50不下单，51以上每缸60公斤」，但实际 settings.json 配置为三段（≤50 skip / 51-100 fixed60 / >100 round10），代码默认规则又是另一套。三处口径不一致，照文档配置会产生错误下单量。","1. 查看文档 §4.3 小批量补单规则
+2. 对比 src/purchase/settings.json 的 vr-small
+3. 以 need=150 调用 planOrderQuantity 对比","文档描述应与实际生产配置一致（need=150 应为 150 公斤 round 到整十，或明确说明分段规则）","文档写 180 公斤（每缸60×3缸），实际配置为 150 公斤（round整十），three-way 不一致","Windows / Node v22.22.2 / kucunyujing1.1","待更新文档 §4.3/§4.4"

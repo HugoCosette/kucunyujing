@@ -1,7 +1,14 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElDropdown, ElDropdownItem, ElDropdownMenu, ElMessage, ElMessageBox } from 'element-plus'
+import {
+  ElDropdown,
+  ElDropdownItem,
+  ElDropdownMenu,
+  ElMessage,
+  ElMessageBox,
+  ElTooltip,
+} from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import OrderHistoryPanel from '@/components/OrderHistoryPanel.vue'
 import SkuOrderEditor from '@/components/SkuOrderEditor.vue'
@@ -165,24 +172,21 @@ const detail = computed(() => {
   }
 })
 
-// 缸规则判定（原来贴在进度条尾部的「建议 N 缸 · 每缸 X 公斤」）收进 hover，不再占一行版面。
-const figureTitle = computed(() => {
-  const rule = ruleTitleOf(selectedRow.value)
-  return rule ? `${toneRuleTitle} · ${rule}` : toneRuleTitle
-})
-
-// 悬停缸规则那行灰字时给出完整判定（缸型 / 建议缸数 / 告警），不占版面。
-function ruleTitleOf(row) {
-  if (!row) return ''
-  const parts = [row.rule?.name]
+const figureTooltip = computed(() => {
+  const row = selectedRow.value
+  if (!row) return null
   const suggestion = row.suggestion ?? {}
-  if (suggestion.bandText) parts.push(suggestion.bandText)
-  if (Number(suggestion.vatCount) > 0 && suggestion.rounded > 0) {
-    parts.push(`建议 ${fmtKg(suggestion.vatCount)} 缸 ＝ ${fmtKg(suggestion.rounded)} 公斤`)
+  const hasVatSuggestion = Number(suggestion.vatCount) > 0 && Number(suggestion.rounded) > 0
+  return {
+    ratio: row.planned > 0 ? (row.filled / row.planned) * 100 : 0,
+    ruleName: row.rule?.name || '未绑定',
+    bandText: suggestion.bandText || '',
+    vatSuggestion: hasVatSuggestion
+      ? `${fmtKg(suggestion.vatCount)} 缸 × ${fmtKg(suggestion.kgPerVat)} 公斤 = ${fmtKg(suggestion.rounded)} 公斤`
+      : '',
+    warnings: suggestion.warnings ?? [],
   }
-  for (const warning of suggestion.warnings ?? []) parts.push(warning)
-  return parts.filter(Boolean).join(' · ')
-}
+})
 
 async function clearCurrentOrders() {
   if (!selectedRow.value) return
@@ -278,7 +282,7 @@ async function confirmSelectedRow() {
   const label = `${selectedRow.value.product} ${selectedRow.value.color}`
   const result = submitRows([selectedRow.value])
   if (!result?.items.length) {
-    ElMessage.warning('这张单还没有填染厂或公斤数，先补全再确认')
+    ElMessage.warning('先补齐染厂和下单量；按缸方式还需选择缸型并填写缸数')
     return
   }
   ElMessage.success(`已下单：${label}`)
@@ -304,7 +308,7 @@ async function confirmAllDrafts() {
 
   const result = submitRows(targets)
   if (!result?.items.length) {
-    ElMessage.warning('没有可提交的分订单（缺染厂或公斤数）')
+    ElMessage.warning('没有可提交的分订单（请补齐染厂、下单量，以及按缸方式的缸型和缸数）')
     return
   }
   ElMessage.success(`已确认下单：${result.items.length} 张分订单`)
@@ -322,7 +326,7 @@ function exportPurchaseRows() {
     ['品名', '颜色', '树形分类', '需安排', '缸数', '每缸公斤', '建议下单', '累积下单', '到货', '待收', '分单数量'],
   ]
   const detailRows = [
-    ['品名', '颜色', '树形分类', '染厂', '分单人员', '缸数', '每缸公斤', '数量（公斤）', '到货', '待收', '备注'],
+    ['品名', '颜色', '树形分类', '染厂', '分单人员', '下单方式', '缸数', '缸型（公斤）', '下单量（公斤）', '到货', '待收', '备注'],
   ]
 
   for (const row of rows.value) {
@@ -351,6 +355,7 @@ function exportPurchaseRows() {
         row.treeCategory,
         factoryName,
         entry.assignee,
+        entry.quantityMode === 'kg' ? '按公斤' : '按缸',
         entry.vatCount ?? '',
         entry.kgPerVat ?? '',
         entry.quantity,
@@ -365,7 +370,7 @@ function exportPurchaseRows() {
     { name: '待下单清单', rows: summaryRows, widths: [24, 14, 18, 12, 10, 12, 12, 12, 10, 10, 10] },
   ]
   if (detailRows.length > 1) {
-    sheets.push({ name: '分单明细', rows: detailRows, widths: [24, 14, 18, 16, 12, 10, 12, 14, 10, 10, 24] })
+    sheets.push({ name: '分单明细', rows: detailRows, widths: [24, 14, 18, 16, 12, 12, 8, 12, 14, 10, 10, 24] })
   }
 
   const timestamp = new Date().toLocaleString('sv-SE').replace(/[: ]/g, '-')
@@ -380,6 +385,18 @@ function exportPurchaseRows() {
 
 function selectRow(row) {
   autoSelected.value = false
+  if (selectedKey.value === row.key) return
+
+  selectionAnimationId.value += 1
+  selectionAnimating.value = true
+  if (selectionAnimationTimer) window.clearTimeout(selectionAnimationTimer)
+  selectionAnimationTimer = window.setTimeout(() => {
+    selectionAnimating.value = false
+    selectionAnimationTimer = null
+  }, 720)
+  activeRowEl.value = null
+  linkStyle.value = null
+  selectionBarStyle.value = null
   selectedKey.value = row.key
 }
 
@@ -388,6 +405,10 @@ function selectRow(row) {
 const layoutEl = ref(null)
 const activeRowEl = ref(null)
 const linkStyle = ref(null)
+const selectionBarStyle = ref(null)
+const selectionAnimating = ref(false)
+const selectionAnimationId = ref(0)
+let selectionAnimationTimer = null
 
 function setRowRef(key, el) {
   if (el && key === selectedKey.value) activeRowEl.value = el
@@ -398,20 +419,35 @@ function syncPoLink() {
   const row = activeRowEl.value
   if (!layout || !row || !row.isConnected) {
     linkStyle.value = null
+    selectionBarStyle.value = null
     return
   }
 
   const layoutRect = layout.getBoundingClientRect()
-  if (layoutRect.height < 60) return
+  if (layoutRect.height < 60) {
+    linkStyle.value = null
+    selectionBarStyle.value = null
+    return
+  }
 
   const listPanel = layout.querySelector('.po-panel--list')
   const detailPanel = layout.querySelector('.po-panel--detail')
-  if (!listPanel || !detailPanel) return
+  if (!listPanel || !detailPanel) {
+    linkStyle.value = null
+    selectionBarStyle.value = null
+    return
+  }
 
   const listRect = listPanel.getBoundingClientRect()
   const detailRect = detailPanel.getBoundingClientRect()
   const rowRect = row.getBoundingClientRect()
   const rowHeight = Math.round(rowRect.height) || 32
+  selectionBarStyle.value = {
+    left: `${Math.round(listRect.left - layoutRect.left)}px`,
+    width: `${Math.round(listRect.width)}px`,
+    top: `${Math.round(rowRect.top - layoutRect.top)}px`,
+    height: `${rowHeight}px`,
+  }
   const height = Math.round(layoutRect.height / 4)
   const center = rowRect.top - layoutRect.top + rowHeight / 2
 
@@ -455,6 +491,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', syncPoLink)
   document.removeEventListener('click', handleDocumentClick)
+  if (selectionAnimationTimer) window.clearTimeout(selectionAnimationTimer)
 })
 
 // 标题栏只留一个主操作（确认下单）：「添加分订单」在表格底部那一行已经有了，
@@ -506,7 +543,21 @@ const progressTitle = computed(() => {
       </div>
 
       <div v-else ref="layoutEl" class="po-layout">
-        <div v-if="linkStyle" class="po-link" :style="linkStyle" aria-hidden="true"></div>
+        <div
+          v-if="selectionAnimating && selectionBarStyle"
+          :key="`bar-${selectionAnimationId}`"
+          class="po-selection-bar"
+          :style="selectionBarStyle"
+          aria-hidden="true"
+        ></div>
+        <div
+          v-if="linkStyle"
+          :key="`link-${selectionAnimationId}`"
+          class="po-link"
+          :class="{ 'is-animating': selectionAnimating }"
+          :style="linkStyle"
+          aria-hidden="true"
+        ></div>
 
         <!-- 左：下单列表 -->
         <section class="po-panel po-panel--list">
@@ -654,15 +705,70 @@ const progressTitle = computed(() => {
               </ElDropdown>
             </div>
 
-            <!-- 单 SKU 进度：已下单 / 需安排 + 进度条 + 还差多少（缸规则悬停了看） -->
+            <!-- 单 SKU 进度：缸规则与颜色说明集中在进度条悬浮提示中 -->
             <div class="po-figure">
-              <span class="po-figure__lead" :title="figureTitle">
+              <span class="po-figure__lead">
                 已下单 <b :class="`is-${detail.tone}`">{{ fmtKg(detail.filled) }}</b> /
                 {{ fmtKg(detail.planned) }} 公斤
               </span>
-              <span class="po-figure__track" :class="`is-${detail.tone}`" :title="figureTitle">
-                <i :style="{ width: `${detail.pct.toFixed(1)}%` }"></i>
-              </span>
+              <ElTooltip
+                placement="top"
+                effect="light"
+                :show-after="120"
+                popper-class="po-progress-tooltip"
+              >
+                <template #content>
+                  <div v-if="figureTooltip" class="po-progress-tip">
+                    <section class="po-progress-tip__section">
+                      <h3>下单进度</h3>
+                      <div class="po-progress-tip__row">
+                        <span>完成比例</span>
+                        <strong>{{ figureTooltip.ratio.toFixed(1) }}%</strong>
+                      </div>
+                    </section>
+                    <section class="po-progress-tip__section">
+                      <h3>缸规则</h3>
+                      <div class="po-progress-tip__row">
+                        <span>适用规则</span>
+                        <span>{{ figureTooltip.ruleName }}</span>
+                      </div>
+                      <div v-if="figureTooltip.bandText" class="po-progress-tip__row">
+                        <span>命中区间</span>
+                        <span>{{ figureTooltip.bandText }}</span>
+                      </div>
+                      <div v-if="figureTooltip.vatSuggestion" class="po-progress-tip__row">
+                        <span>建议下单</span>
+                        <span>{{ figureTooltip.vatSuggestion }}</span>
+                      </div>
+                      <p
+                        v-for="warning in figureTooltip.warnings"
+                        :key="warning"
+                        class="po-progress-tip__warning"
+                      >
+                        {{ warning }}
+                      </p>
+                    </section>
+                    <section class="po-progress-tip__section">
+                      <h3>颜色说明</h3>
+                      <div class="po-progress-tip__row">
+                        <span>未下单</span><span>灰色</span>
+                      </div>
+                      <div class="po-progress-tip__row">
+                        <span>不足 80%</span><span>黄色</span>
+                      </div>
+                      <div class="po-progress-tip__row">
+                        <span>80% ~ 100%</span><span>绿色</span>
+                      </div>
+                      <div class="po-progress-tip__row">
+                        <span>超出需安排</span><span>一缸以内绿色，超过一缸红色</span>
+                      </div>
+                    </section>
+                  </div>
+                </template>
+                <span class="po-figure__track" :class="`is-${detail.tone}`">
+                  <i :style="{ width: `${detail.pct.toFixed(1)}%` }"></i>
+                </span>
+              </ElTooltip>
             </div>
 
             <div class="po-order__scroll">
@@ -804,11 +910,21 @@ const progressTitle = computed(() => {
   min-height: 0;
 }
 
+.po-selection-bar {
+  position: absolute;
+  z-index: 2;
+  background: rgb(63 113 141 / 11%);
+  pointer-events: none;
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: po-selection-sweep 280ms ease-out both;
+}
+
 /* 连接件：从左侧选中行「开口」流向右侧明细，位置与开口由 syncPoLink() 实测后覆盖，
    配色从标签端（深）到面板端（浅）渐隐，末端与面板自然融合 */
 .po-link {
   position: absolute;
-  z-index: 2;
+  z-index: 3;
   background: linear-gradient(
     90deg,
     rgba(63, 113, 141, 0.72) 0%,
@@ -821,6 +937,40 @@ const progressTitle = computed(() => {
     rgba(63, 113, 141, 0) 100%
   );
   pointer-events: none;
+}
+
+.po-link.is-animating {
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: po-link-expand 360ms cubic-bezier(0.2, 0.7, 0.25, 1) 280ms both;
+}
+
+@keyframes po-selection-sweep {
+  0% {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+  12% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes po-link-expand {
+  from {
+    opacity: 0.25;
+    transform: scaleX(0);
+  }
+  to {
+    opacity: 1;
+    transform: scaleX(1);
+  }
 }
 
 /* 扇形撞到右侧面板的左框线时，把这一段框线擦掉，接缝才不留色差 */
@@ -839,6 +989,18 @@ const progressTitle = computed(() => {
     rgba(245, 247, 248, 0) 100%
   );
   pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .po-selection-bar {
+    display: none;
+  }
+
+  .po-link.is-animating {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .po-panel {
@@ -1196,6 +1358,48 @@ const progressTitle = computed(() => {
 
 .po-figure__track.is-err i {
   background: var(--industrial-danger);
+}
+
+.po-progress-tip {
+  min-width: 250px;
+  max-width: 320px;
+  color: var(--industrial-text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.po-progress-tip__section + .po-progress-tip__section {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--industrial-grid-light);
+}
+
+.po-progress-tip__section h3 {
+  margin: 0 0 4px;
+  color: var(--industrial-muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.po-progress-tip__row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.po-progress-tip__row > span:first-child {
+  color: var(--industrial-muted);
+}
+
+.po-progress-tip__row > span:last-child,
+.po-progress-tip__row > strong {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.po-progress-tip__warning {
+  margin: 3px 0 0 66px;
+  color: var(--industrial-replenish);
 }
 
 /* 左列表的数字列（表头 + 单元格）居中，跟表头对齐（原来右对齐看着像挤在撤销按钮旁边） */

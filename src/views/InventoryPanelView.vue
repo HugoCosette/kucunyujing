@@ -390,6 +390,10 @@ const inventoryLeafRows = shallowRef([])
 const productMonthlyTotals = shallowRef(new Map())
 const leafRowIndexById = new Map()
 
+function displayColor(color) {
+  return String(color ?? '').replace(/（演示\d+）$/, '')
+}
+
 // 模式列悬停说明：该模式怎么比较、为什么可能不参与计算。
 function modeTitle(row) {
   if (!row) return ''
@@ -776,8 +780,9 @@ const orderedCount = computed(
 )
 
 function toggleOrderFilter() {
+  const isSelected = onlyOrdered.value
   selectedWarningTones.value = []
-  onlyOrdered.value = true
+  onlyOrdered.value = !isSelected
   onlyOrdering.value = false
 }
 
@@ -787,9 +792,10 @@ const orderingCount = computed(
 )
 
 function toggleOrderingFilter() {
+  const isSelected = onlyOrdering.value
   selectedWarningTones.value = []
   onlyOrdered.value = false
-  onlyOrdering.value = true
+  onlyOrdering.value = !isSelected
 }
 
 // 关键词筛选输入防抖，避免大表逐键全量过滤。
@@ -947,6 +953,7 @@ function toggleAllProductGroups() {
 // 只渲染视口内的行，DOM 节点数量与数据量解耦。
 const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
+const isStockingGroupExpanded = ref(false)
 const TABLE_COLUMNS = [
   // 批量补货勾选列：表头是全选（作用于当前筛选结果），品名父行勾选连带其下所有 SKU。
   { key: 'select', label: '选择', width: 44, group: '选择' },
@@ -973,20 +980,35 @@ const TABLE_COLUMNS = [
   { key: 'shortage', label: '缺口量', width: 72, group: '数据反馈' },
   { key: 'shortageRate', label: '缺口率', width: 76, group: '数据反馈' },
 ]
+const visibleTableColumns = computed(() => {
+  if (isStockingGroupExpanded.value) return TABLE_COLUMNS
+
+  let insertedStockingPlaceholder = false
+  return TABLE_COLUMNS.flatMap((column) => {
+    if (column.group !== '备货') return [column]
+    if (insertedStockingPlaceholder) return []
+    insertedStockingPlaceholder = true
+    return [{ key: 'stockingGroupPlaceholder', label: '', width: 44, group: '备货' }]
+  })
+})
 // 各列按自身宽度分配剩余空间，始终铺满可用宽度，避免右侧出现空列
-const tableGridTemplate = TABLE_COLUMNS.map(
-  (column) => `minmax(${column.width}px, ${column.width}fr)`,
-).join(' ')
-const TABLE_TOTAL_WIDTH = TABLE_COLUMNS.reduce((total, column) => total + column.width, 0)
-const tableColumnGroups = (() => {
+const tableGridTemplate = computed(() =>
+  visibleTableColumns.value
+    .map((column) => `minmax(${column.width}px, ${column.width}fr)`)
+    .join(' '),
+)
+const tableTotalWidth = computed(() =>
+  visibleTableColumns.value.reduce((total, column) => total + column.width, 0),
+)
+const tableColumnGroups = computed(() => {
   const groups = []
-  for (const column of TABLE_COLUMNS) {
+  for (const column of visibleTableColumns.value) {
     const last = groups[groups.length - 1]
     if (last && last.label === column.group) last.span += 1
     else groups.push({ label: column.group, span: 1 })
   }
   return groups
-})()
+})
 
 const tableScrollRef = ref(null)
 const tableViewportHeight = ref(600)
@@ -1703,12 +1725,11 @@ function getRowClassName({ row }) {
     .join(' ')
 }
 
-// 点击整行等同于点击该行复选框：SKU 行切换自身，SPU 汇总行切换其下全部 SKU。
+// SKU 行点击切换自身选择；SPU 汇总行点击只展开 / 收起，整组选择仅由复选框触发。
 // 已采纳锁定的行整行都不响应（悬停显示锁图标），避免误加进批量补货。
 function handleRowClick(row) {
   if (row.isProductGroup) {
-    if (selectableGroupChildren(row).length === 0) return
-    toggleGroupSelection(row, !isGroupFullySelected(row))
+    toggleProductGroup(row)
     return
   }
 
@@ -2024,7 +2045,7 @@ function downloadImportTemplate() {
       aria-label="库存明细"
       @scroll.passive="handleTableScroll"
     >
-      <div class="inventory-vtable__canvas" :style="{ width: `max(100%, ${TABLE_TOTAL_WIDTH}px)` }">
+      <div class="inventory-vtable__canvas" :style="{ width: `max(100%, ${tableTotalWidth}px)` }">
         <div class="inventory-vtable__head">
           <div
             class="inventory-vtable__row inventory-vtable__row--group"
@@ -2036,7 +2057,18 @@ function downloadImportTemplate() {
               class="inventory-vtable__head-cell inventory-vtable__head-cell--group"
               :style="{ gridColumn: `span ${group.span}` }"
             >
-              {{ group.label }}
+              <button
+                v-if="group.label === '备货'"
+                type="button"
+                class="stocking-group-toggle"
+                :aria-expanded="isStockingGroupExpanded"
+                :title="isStockingGroupExpanded ? '收起备货列' : '展开备货列'"
+                @click="isStockingGroupExpanded = !isStockingGroupExpanded"
+              >
+                <span>{{ group.label }}</span>
+                <span aria-hidden="true">{{ isStockingGroupExpanded ? '▾' : '▸' }}</span>
+              </button>
+              <template v-else>{{ group.label }}</template>
             </div>
           </div>
           <div
@@ -2044,9 +2076,10 @@ function downloadImportTemplate() {
             :style="{ gridTemplateColumns: tableGridTemplate }"
           >
             <div
-              v-for="column in TABLE_COLUMNS"
+              v-for="column in visibleTableColumns"
               :key="column.key"
               class="inventory-vtable__head-cell"
+              :aria-hidden="column.key === 'stockingGroupPlaceholder' ? 'true' : undefined"
               :class="{
                 'inventory-vtable__head-cell--deep-right':
                   column.key === 'inTransitStock' || column.key === 'warehouseStock',
@@ -2060,6 +2093,7 @@ function downloadImportTemplate() {
                 aria-label="全选当前筛选结果"
                 @change="toggleSelectAllFiltered"
               />
+              <span v-else-if="column.key === 'stockingGroupPlaceholder'" aria-hidden="true" />
               <template v-else>{{ column.label }}</template>
             </div>
           </div>
@@ -2173,9 +2207,11 @@ function downloadImportTemplate() {
                 </template>
                 <span class="product-name-text" :title="row.product">{{ row.product }}</span>
               </div>
-              <div class="inventory-vtable__cell inventory-vtable__cell--color">
+              <div class="inventory-vtable__cell inventory-vtable__cell--color"              >
                 <template v-if="!row.isProductGroup">
-                  <span class="color-name-text" :title="row.color">{{ row.color }}</span>
+                  <span class="color-name-text" :title="displayColor(row.color)">
+                    {{ displayColor(row.color) }}
+                  </span>
                   <SkuDetailTrigger :item="row" @open="openSkuDetail" />
                 </template>
               </div>
@@ -2277,13 +2313,53 @@ function downloadImportTemplate() {
                 {{ formatQuantity(row.inTransitStock) }}
               </div>
               <div
+                v-if="!isStockingGroupExpanded"
+                class="inventory-vtable__cell inventory-vtable__cell--stocking-placeholder"
+                aria-hidden="true"
+              />
+              <div
+                v-if="isStockingGroupExpanded"
                 class="inventory-vtable__cell inventory-vtable__cell--ordered"
                 :title="orderCellTitle(row)"
               >
                 <span class="ordered-value">
                   {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
                 </span>
-                <!-- 订单详情入口贴在累积下单右侧：只对有订单的 SKU 出现，父行不显示 -->
+              </div>
+              <div
+                v-if="isStockingGroupExpanded"
+                class="inventory-vtable__cell"
+                :title="orderCellTitle(row)"
+              >
+                {{
+                  row.isProductGroup && !row.pendingOrder
+                    ? '—'
+                    : formatQuantity(row.pendingOrder)
+                }}
+              </div>
+              <div
+                v-if="isStockingGroupExpanded"
+                class="inventory-vtable__cell inventory-vtable__cell--received"
+                :title="orderCellTitle(row)"
+              >
+                {{ row.isProductGroup && !row.received ? '—' : formatQuantity(row.received) }}
+              </div>
+              <div class="inventory-vtable__cell">
+                {{ formatQuantity(row.backorder) }}
+              </div>
+              <div class="inventory-vtable__cell">
+                {{ formatQuantity(row.weeklySales) }}
+              </div>
+              <div class="inventory-vtable__cell">
+                {{ formatQuantity(row.turnoverIn) }}
+              </div>
+              <div
+                class="inventory-vtable__cell inventory-vtable__cell--in-transit-ordered"
+                :title="orderCellTitle(row)"
+              >
+                <span class="in-transit-ordered-value">
+                  {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
+                </span>
                 <button
                   v-if="!row.isProductGroup && row.ordered > 0"
                   type="button"
@@ -2307,31 +2383,6 @@ function downloadImportTemplate() {
                     <path d="M8.7 2.1v3.1h3.2M5.7 8h4.4M5.7 10.4h3.2" />
                   </svg>
                 </button>
-              </div>
-              <div class="inventory-vtable__cell" :title="orderCellTitle(row)">
-                {{
-                  row.isProductGroup && !row.pendingOrder
-                    ? '—'
-                    : formatQuantity(row.pendingOrder)
-                }}
-              </div>
-              <div
-                class="inventory-vtable__cell inventory-vtable__cell--received"
-                :title="orderCellTitle(row)"
-              >
-                {{ row.isProductGroup && !row.received ? '—' : formatQuantity(row.received) }}
-              </div>
-              <div class="inventory-vtable__cell">
-                {{ formatQuantity(row.backorder) }}
-              </div>
-              <div class="inventory-vtable__cell">
-                {{ formatQuantity(row.weeklySales) }}
-              </div>
-              <div class="inventory-vtable__cell">
-                {{ formatQuantity(row.turnoverIn) }}
-              </div>
-              <div class="inventory-vtable__cell" :title="orderCellTitle(row)">
-                {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
                 {{ formatQuantity(row.warehouseKg) }}
@@ -3116,6 +3167,25 @@ function downloadImportTemplate() {
   font-weight: 600;
 }
 
+.stocking-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.stocking-group-toggle:focus-visible {
+  outline: 2px solid var(--industrial-primary);
+  outline-offset: -2px;
+}
+
 .inventory-vtable__row > :last-child {
   border-right: 0;
 }
@@ -3158,9 +3228,19 @@ function downloadImportTemplate() {
   border-right: 2px solid var(--industrial-grid);
 }
 
-/* 累积下单：数字后面紧跟「订单详情」入口，常态低调，悬停 / 聚焦才变清晰 */
-.inventory-vtable__cell--ordered {
-  gap: 3px;
+/* 在途库存：数量保持居中，订单详情入口贴右侧，常态低调 */
+.inventory-vtable__cell--in-transit-ordered {
+  justify-content: space-between;
+  gap: 2px;
+  padding: 0 3px;
+}
+
+.in-transit-ordered-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: clip;
 }
 
 .ordered-detail-button {

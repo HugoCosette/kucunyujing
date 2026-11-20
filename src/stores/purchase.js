@@ -7,6 +7,7 @@ import {
   loadSettings,
   normalizeOrders,
   orderSummaryOf,
+  quantityModeOf,
   saveOrders,
   saveSettings,
 } from '@/purchase'
@@ -20,6 +21,7 @@ function nowIso() {
 function snapshotOf(order) {
   return {
     quantity: order.quantity,
+    quantityMode: order.quantityMode,
     vatCount: order.vatCount,
     kgPerVat: order.kgPerVat,
     factoryId: order.factoryId,
@@ -133,8 +135,16 @@ export const usePurchaseStore = defineStore('purchase', () => {
       let accepted = 0
       for (const entry of source) {
         const quantity = Number(entry?.quantity)
+        const quantityMode = quantityModeOf(entry)
+        const orderQuantity = quantityMode === 'kg' ? Math.round(quantity) : quantity
+        const vatCount = Number(entry?.vatCount)
+        const kgPerVat = Number(entry?.kgPerVat)
         // 缂烘煋鍘傛垨娌℃湁鍏枻鏁帮細涓嶈兘鎴愪负璁㈠崟锛岃涓嬫潵缁欓〉闈㈡彁绀恒€?
-        if (!(quantity > 0) || !(String(entry?.factoryId ?? '').trim() || String(entry?.factoryName ?? '').trim())) {
+        if (
+          !(orderQuantity > 0) ||
+          !(String(entry?.factoryId ?? '').trim() || String(entry?.factoryName ?? '').trim()) ||
+          (quantityMode === 'vat' && (!(vatCount >= 1) || !(kgPerVat > 0)))
+        ) {
           continue
         }
         created.push({
@@ -146,9 +156,10 @@ export const usePurchaseStore = defineStore('purchase', () => {
           factoryId: String(entry.factoryId ?? '').trim(),
           factoryName: String(entry.factoryName ?? '').trim(),
           assignee: String(entry.assignee ?? '').trim(),
-          quantity,
-          vatCount: Number(entry.vatCount) >= 1 ? Math.round(Number(entry.vatCount)) : null,
-          kgPerVat: Number(entry.kgPerVat) > 0 ? Number(entry.kgPerVat) : null,
+          quantity: orderQuantity,
+          quantityMode,
+          vatCount: quantityMode === 'vat' ? Math.round(vatCount) : null,
+          kgPerVat: quantityMode === 'vat' ? kgPerVat : null,
           note: String(entry.note ?? '').trim(),
           status: ORDER_STATUS.ACTIVE,
           submittedAt: at,
