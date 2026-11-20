@@ -9,10 +9,14 @@ function createInventoryViewState() {
   return {
     productFilter: ref(''),
     colorFilter: ref(''),
+    // 预警组支持多选；预警组与采购状态组互斥。
     selectedWarningTones: ref([]),
     selectedModeLabels: ref([]),
-    // 只看有备货订单的 SKU：口径是「该 SKU 有未作废的分订单」（累积下单 > 0），与预警色无关。
+    // 采购状态组单选：全部（两者都为 false）、已下单或下单中。
+    // 已下单口径是「该 SKU 有未作废的分订单」（累积下单 > 0）。
     onlyOrdered: ref(false),
+    // 下单中 = 已采纳、等待确认下单，由主面板需安排的锁定记录判定。
+    onlyOrdering: ref(false),
     // null = 还没进过主面板（默认全部展开）；[] = 用户主动把品名都收起了。
     expandedProductKeys: ref(null),
     // 批量补货勾选：只记 SKU 标识集合。行会随虚拟滚动装卸，选择状态不能挂在行上。
@@ -21,6 +25,8 @@ function createInventoryViewState() {
     tableScrollTop: ref(0),
     // 需安排草稿（手填但还没采纳的公斤数）：切页回来还要能接着填。
     plannedDrafts: ref({}),
+    // 勾选时自动预填的草稿（id → 填入的建议值）：取消勾选时只撤回没被改过的那些。
+    selectionAutoDrafts: ref(new Map()),
   }
 }
 

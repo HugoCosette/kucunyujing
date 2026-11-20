@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "updatedAt": "2026-11-17T03:55:33.865Z",
+  "updatedAt": "2026-11-20T01:58:07.231Z",
   "dyeFactories": [
     {
       "id": "df-1",
@@ -238,12 +238,22 @@
       "minVats": 1,
       "bands": [
         {
+          "upTo": 120,
+          "action": "fixed",
+          "value": 80,
+          "sizes": []
+        },
+        {
+          "upTo": 200,
+          "action": "fixed",
+          "value": 160,
+          "sizes": []
+        },
+        {
           "upTo": null,
           "action": "ladder",
-          "value": 0,
+          "value": 240,
           "sizes": [
-            80,
-            160,
             240
           ]
         }

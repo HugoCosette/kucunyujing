@@ -11,6 +11,7 @@ import {
   planOrderQuantity,
   resolveVatBand,
   resolveVatRule,
+  vatQuantityOptions,
 } from '@/purchase'
 import { formatQuantity } from '@/utils/inventory'
 
@@ -86,6 +87,16 @@ const kgPerVat = computed(() => {
   const per = Number(suggestion.value.kgPerVat)
   return per > 0 ? per : null
 })
+// 「数量（公斤）」下拉的候选：该 SKU 缸规则里的单缸重量（1 缸 = 该缸型，见 src/purchase/vat.js）。
+// 规则判定不下单 / 未绑定规则时为空，此时仍可手输任意公斤（allow-create）。
+const quantityOptions = computed(() => vatQuantityOptions(vatRule.value))
+function matchedOption(quantity) {
+  return quantityOptions.value.find((option) => Math.abs(option.quantity - quantity) < 0.005) ?? null
+}
+// 缸规则当前判定选中的缸型，在下拉里挂一个「建议」标记。
+function isSuggestedOption(option) {
+  return Math.abs(option.kgPerVat - (Number(suggestion.value.kgPerVat) || 0)) < 0.005
+}
 const vatTotal = computed(() =>
   props.modelValue.reduce((sum, entry) => sum + (Number(entry.vatCount) || 0), 0),
 )
@@ -193,7 +204,8 @@ watch(
 // 改缸数：公斤数跟着 ＝ 缸数 × 缸型（硬换算）；改公斤数：只有正好整缸才回填缸数，否则留空只提示。
 function handleVatCountChange(index, value) {
   const vatCount = Math.max(0, Math.round(Number(value) || 0))
-  const perVat = kgPerVat.value
+  // 乘的是这一行当前的缸型（人可能刚从下拉换了缸型），没记录时退回规则建议的缸型。
+  const perVat = Number(props.modelValue[index]?.kgPerVat) || kgPerVat.value
   patchEntry(index, {
     vatCount: vatCount > 0 ? vatCount : null,
     quantity: perVat ? Math.round(vatCount * perVat * 100) / 100 : Number(props.modelValue[index]?.quantity) || 0,
@@ -204,10 +216,12 @@ function handleVatCountChange(index, value) {
 function handleQuantityChange(index, value) {
   // 公斤最多两位小数：整数就显示整数（480，不是 480.00），手输的小数也不会留一串尾数。
   const quantity = Math.round(Math.max(0, Number(value) || 0) * 100) / 100
-  const perVat = kgPerVat.value
+  // 从下拉选中的公斤数自带缸型 / 缸数；手输的公斤数按这一行当前的缸型回算，只有正好整缸才回填缸数。
+  const matched = matchedOption(quantity)
+  const perVat = matched?.kgPerVat ?? (Number(props.modelValue[index]?.kgPerVat) || kgPerVat.value)
   patchEntry(index, {
     quantity,
-    vatCount: nearestWholeVats(quantity, perVat),
+    vatCount: matched?.vatCount ?? nearestWholeVats(quantity, perVat),
     kgPerVat: perVat,
   })
 }
@@ -382,24 +396,34 @@ const ruleTitle = computed(() => {
                 :disabled="!kgPerVat"
                 :placeholder="kgPerVat ? `× ${formatQuantity(kgPerVat)}` : '无缸'"
                 size="small"
-                class="so-cell so-cell--num"
+                class="so-cell so-cell--num so-cell--vat-count"
                 :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单缸数`"
                 @update:model-value="handleVatCountChange(index, $event)"
               />
             </td>
             <td>
-              <ElInputNumber
-                :model-value="entry.quantity"
-                :min="0"
-                :step="1"
-                :controls="false"
-                size="small"
+              <ElSelect
                 class="so-cell so-cell--num"
+                :model-value="Number(entry.quantity) || 0"
+                size="small"
+                filterable
+                allow-create
+                :placeholder="quantityOptions.length ? '选缸量' : '输入公斤'"
                 :aria-label="`${item.product} ${item.color} 第 ${index + 1} 个分订单数量`"
                 @update:model-value="handleQuantityChange(index, $event)"
-              />
+              >
+                <ElOption
+                  v-for="option in quantityOptions"
+                  :key="option.quantity"
+                  :label="formatQuantity(option.quantity)"
+                  :value="option.quantity"
+                >
+                  <span class="so-opt__kg">{{ formatQuantity(option.quantity) }} 公斤</span>
+                  <span v-if="isSuggestedOption(option)" class="so-opt__tag">建议</span>
+                </ElOption>
+              </ElSelect>
               <span
-                v-if="rowHints[index]"
+                v-if="variant !== 'panel' && rowHints[index]"
                 class="so-hint"
                 :class="`so-hint--${rowHints[index].tone}`"
               >
@@ -596,6 +620,30 @@ const ruleTitle = computed(() => {
 .so-cell--num :deep(.el-input__inner) {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.so-cell--vat-count :deep(.el-input__inner) {
+  text-align: left;
+}
+
+/* 数量下拉（缸规则候选）也右对齐，跟缸数列同一列手感 */
+.so-cell--num :deep(.el-select__selection) {
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+
+.so-opt__kg {
+  font-variant-numeric: tabular-nums;
+}
+
+.so-opt__tag {
+  margin-left: 8px;
+  padding: 0 4px;
+  border: 1px solid #b9d4c6;
+  border-radius: 2px;
+  background: #eef6f1;
+  color: var(--industrial-normal);
+  font-size: 10.5px;
 }
 
 /* 数量下方的整缸提示：整缸绿、非整缸黄，不占额外列宽 */

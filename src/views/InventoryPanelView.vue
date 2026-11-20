@@ -45,7 +45,9 @@ import {
   describeSpuGradeThresholds,
   evaluateItem,
   getAutoModes,
+  normalizeDisplayFilters,
   normalizeSpuGrades,
+  resolveLowPlannedThreshold,
   resolveSpuGrade,
 } from '@/stocking'
 import { evaluateRowHealth } from '@/utils/skuHealth'
@@ -117,6 +119,13 @@ function scoreCellTitle(row) {
 // SPU 等级只按「该品名全部 SKU 的月均条数合计」判定，与备货模式 / 系数无关，改配置立刻生效。
 const spuGrades = computed(() => normalizeSpuGrades(stockingStore.config.spuGrades))
 const spuGradeThresholds = computed(() => describeSpuGradeThresholds(spuGrades.value))
+// 小额补货门槛（设置 → 备货配置 → 筛选显示规则）：紧急 / 常规两档里「建议需安排不足门槛」的 SKU 不列出来。
+// 只改筛选结果与计数，行仍在「全部」里、数据一行不动；口径与「需安排」格的占位提示一致
+// （补到正常库存即绿区中位的建议值），所以采纳前后判断不会跳。
+const displayFilters = computed(() =>
+  normalizeDisplayFilters(stockingStore.config.displayFilters),
+)
+const lowPlannedThreshold = computed(() => resolveLowPlannedThreshold(displayFilters.value))
 const inventoryItems = inventoryStore.inventoryItems
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
 // 采购下单模块：分订单以唯一标识为键；哪些 SKU 要下、下多少完全由「需安排」决定。
@@ -130,6 +139,7 @@ const {
   selectedWarningTones,
   selectedModeLabels,
   onlyOrdered,
+  onlyOrdering,
   expandedProductKeys,
   selectedSkuIds,
   selectedRowId,
@@ -138,6 +148,8 @@ const {
 const expandingProductKeys = ref(new Set())
 // 需安排草稿同样跟着 store 走：直接持有对象引用，手填的值切页回来还在（导入时统一清空）。
 const plannedDrafts = viewStore.plannedDrafts
+// 勾选预填的草稿同样放 store：切页回来再取消勾选，仍能认出「这是我自动填的」。
+const autoFilledDrafts = viewStore.selectionAutoDrafts
 // SKU 详情弹窗只保留一个实例并挂在页面层级：放在虚拟滚动行里会随行卸载，
 // 遮罩还会被列表的 transform 容器裁掉。
 const skuDetailVisible = ref(false)
@@ -236,6 +248,11 @@ function runImportToastAction() {
 // 必须主动滚到该行并短暂高亮，否则用户会以为没有加上。
 const highlightedRowId = ref(null)
 let highlightTimer = 0
+
+// 点已采纳锁定的行（整行 / 选择格 / 需安排格）时闪一下：把视线引到这一行的
+// 「需安排」与「撤销」——输入框淡一点、撤销按钮明显一点。
+const lockedHintRowId = ref(null)
+let lockedHintTimer = 0
 
 function revealSkuRow(item) {
   const productKey = `product:${item.product}`
@@ -404,7 +421,12 @@ function sinksToBottom(row) {
   return Boolean(row.excluded) && row.manualBehavior !== 'order'
 }
 
+// 「已采纳」提示的对照行缓存（键见 shadowOf）：整表重算时一起清掉，
+// 备货配置或订单改了不会读到旧口径。
+const plannedShadows = new Map()
+
 function rebuildLeafRows() {
+  plannedShadows.clear()
   const rows = inventoryItems
     .filter((item) => !isItemHidden(item))
     .map((item) => buildLeafRow(item))
@@ -508,23 +530,19 @@ const orderSignature = computed(() => {
 })
 watch(orderSignature, rebuildLeafRows)
 
-// 需安排草稿的实时预览：键入时把草稿当成「已采纳」先算一遍，
-// 右侧「预计库存 / 日库销比 / 缺口量 / 缺口率」立刻显示结果（带预览样式），
-// 采纳后才落成正式数字。只重算正在编辑的那一行，不整表重算。
-const plannedPreviews = reactive({})
+// 需安排的两个提示层（右侧「预计库存 / 日库销比 / 缺口量 / 缺口率」4 列）：
+// - 草稿（键入 / 勾选带入，还没采纳）：把草稿当成「已采纳」先算一遍，立刻显示结果，采纳后才落成正式数字；
+// - 已采纳、还没下单（需安排 > 0）：继续标出「这一单带来的变化」，直到在「采购下单」确认下单、
+//   需安排清零（数字转到累计下单）才消失 —— 只要需安排还有数字，提示就一直挂着。
+//
+// 两层都只重算用到的行，不整表重算。草稿层缓存 id → { source, quantity, preview }：
+// 读的时候顺手比对「草稿数字 + 源行」，任一边变了就重算，所以「需安排有数字」与「有提示」
+// 永远同步，不用谁记得去刷新（切页回来、导入、采纳后清草稿、撤销订单退回草稿都自动跟上）。
+const plannedPreviews = new Map()
 
-// 预览只认「填了正数」的草稿：清空输入框、填 0 都回到已采纳的口径，不显示预览。
-function hasPreviewDraft(row) {
-  if (!Reflect.has(plannedDrafts, row.id)) return false
-  const draft = Number(plannedDrafts[row.id])
-  return Number.isFinite(draft) && draft > 0
-}
-
-function buildPlannedPreview(item) {
-  const evaluated = evaluateItem(
-    { ...item, planned: Number(plannedDrafts[item.id]) || 0 },
-    stockingEvaluator.value,
-  )
+// 预览只认「填了正数」的草稿：清空输入框、填 0 都回到当前行的口径，不显示预览。
+function buildRowWithPlanned(item, planned) {
+  const evaluated = evaluateItem({ ...item, planned }, stockingEvaluator.value)
   const orders = orderSummaryOf(purchaseStore.orderIndex, evaluated.skuId)
   return calculateInventoryRow({
     ...evaluated,
@@ -533,10 +551,34 @@ function buildPlannedPreview(item) {
   })
 }
 
-function refreshPlannedPreview(item) {
-  if (!item) return
-  if (hasPreviewDraft(item)) plannedPreviews[item.id] = buildPlannedPreview(item)
-  else delete plannedPreviews[item.id]
+function previewOfLeaf(row) {
+  const quantity = draftQuantity(row.id)
+  if (!(quantity > 0)) return null
+  const cached = plannedPreviews.get(row.id)
+  if (cached && cached.source === row && cached.quantity === quantity) return cached.preview
+  const item = itemById.value.get(row.id)
+  if (!item) return null
+  const preview = buildRowWithPlanned(item, quantity)
+  plannedPreviews.set(row.id, { source: row, quantity, preview })
+  return preview
+}
+
+// 「已采纳」提示的对照行：把需安排清零再算一遍，差的这部分就是这单计划带来的变化。
+// 键里带 需安排 / 累计下单 / 到货，任何一项变了都会重算。
+function shadowOf(row) {
+  if (!row || row.isProductGroup) return null
+  const planned = Number(row.planned) || 0
+  if (!(planned > 0)) return null
+  const key = `${row.id}|${planned}|${row.ordered}|${row.received}`
+  const cached = plannedShadows.get(key)
+  if (cached) return cached
+  const item = itemById.value.get(row.id)
+  if (!item) return null
+  // 只缓存滚动过的少数组合，别让长时间浏览把内存堆起来。
+  if (plannedShadows.size > 400) plannedShadows.clear()
+  const shadow = buildRowWithPlanned(item, 0)
+  plannedShadows.set(key, shadow)
+  return shadow
 }
 
 // 品名父行的预估列是子行汇总，也要跟着预览：把草稿行换成预览行再按同一口径汇总。
@@ -544,31 +586,92 @@ const productPlannedPreviews = computed(() => {
   const previews = {}
   for (const group of inventoryRows.value) {
     if (!group.isProductGroup) continue
-    if (!group.children.some((child) => plannedPreviews[child.id])) continue
+    if (!group.children.some((child) => previewOfLeaf(child))) continue
     const aggregated = groupRowsByProduct(
-      group.children.map((child) => plannedPreviews[child.id] ?? child),
+      group.children.map((child) => previewOfLeaf(child) ?? child),
     ).find((entry) => entry.isProductGroup)
     if (aggregated) previews[group.id] = aggregated
   }
   return previews
 })
 
+// 品名父行的「已采纳」对照行同样按子行汇总：把子行的需安排清零版换进去再汇总。
+const productPlannedShadows = computed(() => {
+  const shadows = {}
+  for (const group of inventoryRows.value) {
+    if (!group.isProductGroup) continue
+    if (!group.children.some((child) => (Number(child.planned) || 0) > 0)) continue
+    const aggregated = groupRowsByProduct(
+      group.children.map((child) => shadowOf(child) ?? child),
+    ).find((entry) => entry.isProductGroup)
+    if (aggregated) shadows[group.id] = aggregated
+  }
+  return shadows
+})
+
+// 提示对：display 是要显示的「有这单计划」的行，base 是「没有这单计划」的对照行。
+// 草稿层先算，采纳后（需安排 > 0）退出草稿层、改用对照行继续提示。
+function previewPair(row) {
+  if (!row) return null
+  const draft = previewOf(row)
+  if (draft) return { kind: 'draft', display: draft, base: row }
+  const base = row.isProductGroup
+    ? productPlannedShadows.value[row.id] ?? null
+    : shadowOf(row)
+  if (!base) return null
+  return { kind: 'adopted', display: row, base }
+}
+
+// 只看草稿层的预览行：预警灯与「需安排」格的预览样式仍只认还没采纳的草稿。
 function previewOf(row) {
   if (!row) return null
   if (row.isProductGroup) return productPlannedPreviews.value[row.id] ?? null
-  return plannedPreviews[row.id] ?? null
+  return previewOfLeaf(row)
 }
 
 function getPlannedTone(row) {
   return previewOf(row)?.urgencyTone || row.urgencyTone
 }
 
-// 预警灯也跟着草稿预览：键入时红点先变绿，采纳后才算真的落定（虚线环表示「预览中」）。
+// 预警的两个态，别混：
+// - 数据态（dataStateOf / dataTone）：把需安排清零重算，只由导入数据 + 订单派生；
+// - 预计展示态（getPlannedTone）：把需安排（草稿或已采纳）算进去，只负责显示。
+// 筛选、计数、紧急补货清单只认数据态：采纳后行不会从「紧急 / 常规」里掉出去，灯变绿表示预计已补；
+// 在采购下单确认下单（需安排清零、数字转到累计下单）之后才按订单数据换档。
+function dataStateOf(row) {
+  if (!row || row.isProductGroup) return row
+  return shadowOf(row) ?? row
+}
+
+function dataTone(row) {
+  return (dataStateOf(row) ?? row).urgencyTone
+}
+
+// 灯色是「预计值」而数据态是另一档时套环：草稿虚线环（还没采纳），已采纳未下单实线环。
+function lampRingClass(row) {
+  if (row.isProductGroup) return ''
+  if (previewOf(row)) return 'urgency-indicator--preview'
+  return dataTone(row) !== row.urgencyTone ? 'urgency-indicator--projected' : ''
+}
+
+// 预警灯说明：把「数据态」与「预计」分开写，别让人把预计色当成事实读。
 function urgencyTitle(row) {
+  if (row.isProductGroup) return row.strategyIssue || ''
+  const dataText = dataStateOf(row).urgencyText
   const preview = previewOf(row)
-  if (!preview) return row.strategyIssue || row.urgencyText
-  const draft = Number(plannedDrafts[row.id]) || 0
-  return `预览（未采纳）：需安排 ${formatQuantity(draft)} 后预警变为「${preview.urgencyText}」，采纳后才生效`
+  if (preview) {
+    const shift =
+      preview.urgencyTone === dataTone(row)
+        ? `预警仍是「${preview.urgencyText}」`
+        : `预警变为「${preview.urgencyText}」`
+    return `预览（未采纳）：需安排 ${formatQuantity(draftQuantity(row.id))} 后${shift}，采纳后才生效`
+  }
+  if (dataTone(row) !== row.urgencyTone) {
+    return `预计（已采纳、还没下单）：需安排 ${formatQuantity(row.planned)} 公斤后预警变为「${
+      row.urgencyText
+    }」，数据态仍是「${dataText}」；确认下单后按订单数据重算`
+  }
+  return row.strategyIssue || row.urgencyText
 }
 
 // —— 备货：订单弹窗 ——
@@ -595,9 +698,7 @@ function handleOrderCancelled({ skuId, quantity }) {
   const item = inventoryItems.find((entry) => String(entry.skuId ?? '').trim() === skuId)
   if (!item) return
 
-  const current = Reflect.has(plannedDrafts, item.id) ? Number(plannedDrafts[item.id]) || 0 : 0
-  plannedDrafts[item.id] = current + (Number(quantity) || 0)
-  refreshPlannedPreview(item)
+  plannedDrafts[item.id] = draftQuantity(item.id) + (Number(quantity) || 0)
 }
 
 const warningFilters = [
@@ -607,31 +708,88 @@ const warningFilters = [
   { key: 'green', label: '正常' },
   { key: 'purple', label: '超库存' },
 ]
+const warningToneFilters = warningFilters.filter((filter) => filter.key !== 'all')
+// 小额补货：紧急 / 常规里建议需安排不足门槛的行，筛选时不列出来（补一点点不值得单独开单）。
+// 只作用于这两档，正常 / 超库存 / 不参与备货的 SKU 不受影响，订单货按客户报量也不受影响。
+function isLowPlanned(row) {
+  if (lowPlannedThreshold.value <= 0) return false
+  const tone = dataTone(row)
+  if (tone !== 'red' && tone !== 'yellow') return false
+  return getSuggestedPlanned(row) < lowPlannedThreshold.value
+}
+
 const warningCounts = computed(() => {
   const counts = { all: 0, red: 0, yellow: 0, green: 0, purple: 0 }
+  // 被小额门槛挡掉的数量：给筛选按钮的悬停说明用，计数对不上时能解释清。
+  const lowPlanned = { red: 0, yellow: 0 }
   for (const row of inventoryLeafRows.value) {
     counts.all += 1
-    if (row.urgencyTone in counts) counts[row.urgencyTone] += 1
+    const tone = dataTone(row)
+    if (!(tone in counts)) continue
+    if (isLowPlanned(row)) {
+      lowPlanned[tone] += 1
+      continue
+    }
+    counts[tone] += 1
   }
-  return counts
+  return { ...counts, lowPlanned }
 })
+
+// 筛选按钮的悬停说明：写明为什么紧急 / 常规的计数比预期少，以及计数按哪个态算。
+function warningFilterTitle(key) {
+  if (key === 'all') return '清除采购状态与预警筛选（保留品名、颜色和模式条件）'
+  const label = warningFilters.find((filter) => filter.key === key)?.label ?? ''
+  // 计数按数据态（把需安排清零）：采纳后行仍留在原档，灯变绿表示预计已补，确认下单后才移出。
+  const basis =
+    key === 'red' || key === 'yellow'
+      ? `只看${label}（按数据态判定：采纳后仍留在本档，灯变绿表示预计已补，确认下单后才移出）`
+      : `只看${label}（按数据态判定：还没下单的需安排不算进来）`
+  if (key !== 'red' && key !== 'yellow') return basis
+  if (lowPlannedThreshold.value <= 0) {
+    return `${basis}；小额补货门槛已在设置里关闭`
+  }
+  const hidden = warningCounts.value.lowPlanned[key] ?? 0
+  return hidden > 0
+    ? `${basis}；已排除需安排 < ${lowPlannedThreshold.value} 公斤的 ${hidden} 个 SKU（设置 → 备货配置 → 筛选显示规则）`
+    : `${basis}；小额补货门槛 ${lowPlannedThreshold.value} 公斤，当前没有可排除的行`
+}
 const hasActiveFilters = computed(
   () =>
     productFilter.value.trim() !== '' ||
     colorFilter.value.trim() !== '' ||
     onlyOrdered.value ||
+    onlyOrdering.value ||
     selectedWarningTones.value.length > 0 ||
     selectedModeLabels.value.length > 0,
 )
+const isAllFilterSelected = computed(
+  () =>
+    !onlyOrdered.value &&
+    !onlyOrdering.value &&
+    selectedWarningTones.value.length === 0,
+)
 
 // 「已下单」筛的是采购执行层：该 SKU 有未作废的分订单（累积下单 > 0）。
-// 与预警色是两个维度，所以单独计数、单独存开关，不混进 selectedWarningTones。
+// 与「下单中」互斥，属于采购状态组；两者分别计数，不与预警组叠加。
 const orderedCount = computed(
   () => inventoryLeafRows.value.filter((row) => (row.ordered ?? 0) > 0).length,
 )
 
 function toggleOrderFilter() {
-  onlyOrdered.value = !onlyOrdered.value
+  selectedWarningTones.value = []
+  onlyOrdered.value = true
+  onlyOrdering.value = false
+}
+
+// 「下单中」筛的是主面板已采纳并锁定、等待确认下单的 SKU。
+const orderingCount = computed(
+  () => inventoryLeafRows.value.filter((row) => isPlannedLocked(row)).length,
+)
+
+function toggleOrderingFilter() {
+  selectedWarningTones.value = []
+  onlyOrdered.value = false
+  onlyOrdering.value = true
 }
 
 // 关键词筛选输入防抖，避免大表逐键全量过滤。
@@ -663,7 +821,15 @@ const filteredInventoryLeafRows = computed(() => {
   const tones = selectedWarningTones.value
   const modes = selectedModeLabels.value
   const orderedOnly = onlyOrdered.value
-  if (!product && !color && tones.length === 0 && modes.length === 0 && !orderedOnly) {
+  const orderingOnly = onlyOrdering.value
+  if (
+    !product &&
+    !color &&
+    tones.length === 0 &&
+    modes.length === 0 &&
+    !orderedOnly &&
+    !orderingOnly
+  ) {
     return inventoryLeafRows.value
   }
 
@@ -673,9 +839,10 @@ const filteredInventoryLeafRows = computed(() => {
     (row) =>
       (!product || row.searchProduct.includes(product)) &&
       (!color || row.searchColor.includes(color)) &&
-      (!toneSet || toneSet.has(row.urgencyTone)) &&
+      (!toneSet || (toneSet.has(dataTone(row)) && !isLowPlanned(row))) &&
       (!modeSet || modeSet.has(row.modeLabel)) &&
-      (!orderedOnly || (row.ordered ?? 0) > 0),
+      (!orderedOnly || (row.ordered ?? 0) > 0) &&
+      (!orderingOnly || isPlannedLocked(row)),
   )
 })
 const inventoryRows = computed(() => {
@@ -693,16 +860,21 @@ function resetFilters() {
   productFilter.value = ''
   colorFilter.value = ''
   onlyOrdered.value = false
+  onlyOrdering.value = false
   selectedWarningTones.value = []
   selectedModeLabels.value = []
 }
 
 function toggleWarningFilter(key) {
   if (key === 'all') {
-    resetFilters()
+    onlyOrdered.value = false
+    onlyOrdering.value = false
+    selectedWarningTones.value = []
     return
   }
 
+  onlyOrdered.value = false
+  onlyOrdering.value = false
   const selectedTones = new Set(selectedWarningTones.value)
   if (selectedTones.has(key)) selectedTones.delete(key)
   else selectedTones.add(key)
@@ -778,7 +950,7 @@ const TABLE_OVERSCAN = 8
 const TABLE_COLUMNS = [
   // 批量补货勾选列：表头是全选（作用于当前筛选结果），品名父行勾选连带其下所有 SKU。
   { key: 'select', label: '选择', width: 44, group: '选择' },
-  { key: 'rule', label: '模式', width: 78, group: '信息' },
+  { key: 'rule', label: '模式', width: 86, group: '信息' },
   { key: 'score', label: '评分', width: 58, group: '信息' },
   { key: 'product', label: '品名', width: 150, group: '商品' },
   { key: 'color', label: '颜色', width: 132, group: '商品' },
@@ -821,7 +993,8 @@ const tableViewportHeight = ref(600)
 let tableScrollFrame = 0
 let tableResizeObserver = null
 
-// 「数据反馈」里受需安排影响的 4 列：键入草稿时按预览值展示（其余列与理论库存是事实层，不动）。
+// 「数据反馈」里受需安排影响的 4 列：键入草稿按预览值展示，采纳后继续标出这单计划带来的变化
+// （其余列与理论库存是事实层，不动）。
 const PREVIEW_COLUMNS = [
   {
     key: 'projectedStock',
@@ -833,7 +1006,9 @@ const PREVIEW_COLUMNS = [
     key: 'daysOfStock',
     label: '日库销比',
     value: (row) => row.daysOfStock,
-    format: (row) => (row.excluded ? '—' : formatRatio(row.daysOfStock)),
+    // 按量模式比的是公斤库存（与「预计库存」重复），没有天数口径，统一显示 --。
+    format: (row) =>
+      row.excluded ? '—' : row.modeKey === 'bulk' ? '--' : formatRatio(row.daysOfStock),
   },
   {
     key: 'shortage',
@@ -849,22 +1024,27 @@ const PREVIEW_COLUMNS = [
   },
 ]
 
-function previewText(row, column) {
-  const preview = previewOf(row)
-  return preview ? column.format(preview) : column.format(row)
+function previewKind(row) {
+  return previewPair(row)?.kind ?? ''
 }
 
-// 只有「显示值真的变了」的格子才进入预览态：父行的日库销比这类汇总不出的列不打底色。
+function previewText(row, column) {
+  const pair = previewPair(row)
+  return pair ? column.format(pair.display) : column.format(row)
+}
+
+// 只有「显示值真的变了」的格子才进入提示态：父行的日库销比这类汇总不出的列不打底色。
 function isPreviewCell(row, column) {
-  return previewOf(row) !== null && previewText(row, column) !== column.format(row)
+  const pair = previewPair(row)
+  return pair !== null && column.format(pair.display) !== column.format(pair.base)
 }
 
 // 变化量：只在两边都是数字且真的变了时给出（∞、缺省这类没有可比性）。
 function previewDelta(row, column) {
-  const preview = previewOf(row)
-  if (!preview) return null
-  const before = column.value(row)
-  const after = column.value(preview)
+  const pair = previewPair(row)
+  if (!pair) return null
+  const before = column.value(pair.base)
+  const after = column.value(pair.display)
   if (!Number.isFinite(before) || !Number.isFinite(after)) return null
   const diff = Math.round(after - before)
   if (diff === 0) return null
@@ -872,17 +1052,32 @@ function previewDelta(row, column) {
 }
 
 function previewTone(row) {
-  const preview = previewOf(row)
-  if (!preview) return ''
+  const pair = previewPair(row)
+  if (!pair) return ''
   // 父行没有自己的预警灯，用中性的主色提示「这是预览值」。
-  return row.isProductGroup ? 'neutral' : preview.urgencyTone || 'neutral'
+  return row.isProductGroup ? 'neutral' : pair.display.urgencyTone || 'neutral'
+}
+
+// 已采纳未下单的提示淡一档：不再弹入动画，跟键入时的预览区分开（数字已经是落定值）。
+function previewCellClass(row, column) {
+  if (!isPreviewCell(row, column)) return ''
+  return [
+    'preview-cell',
+    `preview-cell--${previewTone(row)}`,
+    previewKind(row) === 'adopted' ? 'preview-cell--adopted' : '',
+  ]
 }
 
 function previewTitle(row, column) {
-  const preview = previewOf(row)
-  if (!preview) return ''
-  const before = column.format(row)
-  const after = column.format(preview)
+  const pair = previewPair(row)
+  if (!pair) return ''
+  const before = column.format(pair.base)
+  const after = column.format(pair.display)
+  if (pair.kind === 'adopted') {
+    const scope = row.isProductGroup ? '该品名下需安排合计' : '需安排'
+    const planned = formatQuantity(row.planned)
+    return `已采纳但还没下单：${scope} ${planned} 公斤，${column.label} 从 ${before} 变成 ${after}；在「采购下单」确认下单后这条提示消失`
+  }
   if (row.isProductGroup) {
     return `预览（未采纳）：该品名下已填写的需安排合计进来后，${column.label} ${before} → ${after}`
   }
@@ -900,7 +1095,14 @@ function handleTableScroll() {
 
 // 筛选条件变化后回到顶部：列表缩短时停留在原位置只会看到末尾几行或一片空白。
 watch(
-  [appliedProductFilter, appliedColorFilter, selectedWarningTones, selectedModeLabels, onlyOrdered],
+  [
+    appliedProductFilter,
+    appliedColorFilter,
+    selectedWarningTones,
+    selectedModeLabels,
+    onlyOrdered,
+    onlyOrdering,
+  ],
   () => {
     tableScrollTop.value = 0
     if (tableScrollRef.value) tableScrollRef.value.scrollTop = 0
@@ -961,12 +1163,12 @@ function restoreTableView() {
     })
   }
 
-  // 预警预览色是按行的缓存：按草稿重算一遍。
-  for (const id of Object.keys(plannedDrafts)) {
-    refreshPlannedPreview(itemById.value.get(id))
-  }
+  // 草稿预览是按行的派生缓存（见 previewOfLeaf）：草稿在 store 里，渲染时自己会重算，
+  // 这里不用再补一遍。
   // 勾选可能来自屏蔽前的行，先剔掉已不可见的 SKU。
   pruneHiddenSelection()
+  // 勾选状态是从上一页带回来的：补一次预填（只补还没有数字的行）。
+  prefillSelectionDrafts([...selectedSkuIds.value])
 }
 
 onMounted(() => {
@@ -988,12 +1190,16 @@ onBeforeUnmount(() => {
   if (tableScrollFrame) cancelAnimationFrame(tableScrollFrame)
   if (importToastTimer) clearInterval(importToastTimer)
   if (highlightTimer) clearTimeout(highlightTimer)
+  if (lockedHintTimer) clearTimeout(lockedHintTimer)
   tableResizeObserver?.disconnect()
 })
 
+// 紧急补货清单也按小额门槛过滤：补几公斤不值得单独开单；被排除了多少个在弹窗里说明，需要时去设置里关掉门槛。
+// 成员同样按数据态判定：已采纳的紧急 SKU 仍在清单里，追加量按「补到正常库存」重算（已覆盖的推荐 0）。
 const urgentRows = computed(() =>
-    inventoryLeafRows.value.filter((row) => row.urgencyTone === 'red'),
+  inventoryLeafRows.value.filter((row) => dataTone(row) === 'red' && !isLowPlanned(row)),
 )
+const excludedUrgentCount = computed(() => warningCounts.value.lowPlanned.red ?? 0)
 const hasUrgentPlan = computed(() =>
   urgentPlanRows.value.some((row) => row.additionalPlan > 0),
 )
@@ -1028,6 +1234,12 @@ function submitUrgentPlans() {
   urgentPlanRows.value = []
 }
 
+function applyAllRecommendedPlans() {
+  urgentPlanRows.value.forEach((row) => {
+    row.additionalPlan = row.recommendedPlan
+  })
+}
+
 // 需安排的唯一写入路径：同一 SKU 只保留一条绝对值（覆盖），
 // 采购下单页直接按「需安排 > 0」列出待下单的 SKU，不再另存一份采购清单。
 // plans 里的 planned 是「需安排」的绝对值（公斤），返回真正写进去的行。
@@ -1042,7 +1254,7 @@ function writePlanned(plans) {
     plannedUndoHistory[item.id] = { previousPlanned: item.planned }
     item.planned = planned
     delete plannedDrafts[item.id]
-    delete plannedPreviews[item.id]
+    autoFilledDrafts.delete(item.id)
     changedIds.push(item.id)
     written.push(item)
   }
@@ -1053,21 +1265,16 @@ function writePlanned(plans) {
   return written
 }
 
-// 提交时的数量：需安排输入框里已填的草稿优先，空着就用占位建议值（补到正常库存的差额）；
-// 两者都没有（不缺货 / 缺系数 / 订单货没填）就是 0，不落地也不进入下单面板。
-function resolveSubmitPlanned(row) {
-  if (hasPlannedDraft(row.id)) {
-    const draft = Number(plannedDrafts[row.id])
-    return Number.isFinite(draft) && draft > 0 ? Math.round(draft) : 0
-  }
-  if (hasPlannedUndo(row.id)) return Number(row.planned) || 0
-  return getSuggestedPlanned(row)
+// —— 需安排 ——
+// 一个 SKU 的「需安排」只有三个数，所有按钮 / 勾选 / 预览都从这里派生：
+//   草稿（plannedDrafts，可编辑未采纳）→ 已采纳（item.planned，锁定，下单时清零）→ 建议值（补到正常库存）。
+function draftQuantityFrom(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0
 }
 
-function applyAllRecommendedPlans() {
-  urgentPlanRows.value.forEach((row) => {
-    row.additionalPlan = row.recommendedPlan
-  })
+function draftQuantity(id) {
+  return draftQuantityFrom(plannedDrafts[id])
 }
 
 function hasPlannedDraft(id) {
@@ -1078,17 +1285,21 @@ function hasPlannedUndo(id) {
   return Object.prototype.hasOwnProperty.call(plannedUndoHistory, id)
 }
 
+// 「采纳」按下时真正写入的数量：正数草稿 > 建议值（清空 / 从没填过都按建议值兜底）。
+function plannedToAdopt(row) {
+  return draftQuantity(row.id) || getSuggestedPlanned(row)
+}
+
 function getPlannedDraft(row) {
   // 先空读一下草稿表：hasOwnProperty 不走 Vue 的 get 陷阱，不读这一次的话
   // 新增 / 删除草稿不会让读它的地方（表格那一格、SKU 弹窗的需安排）失效。
   void plannedDrafts[row.id]
   if (hasPlannedDraft(row.id)) return plannedDrafts[row.id]
   // 0 与缺省都当作「还没填」：否则下单清零留下的一个 0 会把占位建议值挡住，看不出还差多少。
-  if (hasPlannedUndo(row.id)) return row.planned
-  return row.planned > 0 ? row.planned : null
+  return Number(row.planned) > 0 ? row.planned : null
 }
 
-// 需安排建议值：补到绿色带中位（正常库存）的差额，基于理论库存；批量补货的默认数量与单行占位同一口径。
+// 需安排建议值：补到绿色带中位（正常库存）的差额，基于理论库存（占位提示与勾选预填同一口径）。
 // 这里只给精准到个位的公斤数，缸数换算留到采购下单页（下单时才建议缸数）。
 function getPlannedPlaceholder(row) {
   // 订单货没有建议值：这一格就是客户电话报的量，提示人工填写。
@@ -1114,16 +1325,21 @@ function getPlannedPlaceholderTitle(row) {
 }
 
 function updatePlannedDraft(id, value) {
-  if (Reflect.has(plannedUndoHistory, id)) return
+  if (hasPlannedUndo(id)) return
 
-  plannedDrafts[id] = value
-  refreshPlannedPreview(itemById.value.get(id))
+  const quantity = draftQuantityFrom(value)
+  // 草稿统一存 Number | null（ElInputNumber 只认这两种）：空 / 0 存 null，
+  // 但键还留着 —— 显示以草稿为准，底层旧 planned 不会冒回输入框。
+  plannedDrafts[id] = quantity > 0 ? quantity : null
+  // 联动：填了正数自动勾选，清空 / 0 自动取消勾选，多选里始终只留有数量的行。
+  if (quantity > 0) addSkuToSelection(id)
+  else removeSkuFromSelection(id)
 }
 
-// 「采纳」：把草稿（或占位建议值）落成锁定的需安排。
+// 「采纳」：把草稿（或建议值）落成锁定的需安排。
 // 采纳后不跳转，留在主面板继续处理下一行（要去拆单时自己点顶部「采购下单」）。
 function acceptPlannedDraft(row) {
-  const planned = resolveSubmitPlanned(row)
+  const planned = plannedToAdopt(row)
   if (!(planned > 0)) {
     ElMessage.warning(
       row.manualBehavior === 'order'
@@ -1135,13 +1351,14 @@ function acceptPlannedDraft(row) {
 
   const written = writePlanned([{ id: row.id, planned }])
   if (written.length === 0) return
+  // 锁定后不能再参与多选：还勾着就顺手摘掉，避免底部「确认补货」再带它一次。
+  removeSkuFromSelection(row.id)
   ElMessage.success(`已采纳 ${formatQuantity(planned)} 公斤，已写入需安排（去「采购下单」拆单）`)
 }
 
-// 「采纳」在没有草稿时用占位建议值兜底，所以既没填数量、建议值又是 0 的行没什么可采纳的（按钮置灰）。
+// 有可写入的数量（草稿 / 建议值）或已采纳（按钮变「撤销」）时可点。
 function canAdoptPlanned(row) {
-  if (hasPlannedDraft(row.id) || hasPlannedUndo(row.id)) return true
-  return getSuggestedPlanned(row) > 0
+  return hasPlannedUndo(row.id) || plannedToAdopt(row) > 0
 }
 
 function handlePlannedAction(row) {
@@ -1195,7 +1412,6 @@ function undoPlannedAcceptance(row) {
     purchaseStore.clearOrderEntries(item.skuId)
   }
   delete plannedDrafts[row.id]
-  delete plannedPreviews[row.id]
   delete plannedUndoHistory[row.id]
   refreshLeafRow(row.id)
   schedulePlanPersist(inventoryStore)
@@ -1203,24 +1419,116 @@ function undoPlannedAcceptance(row) {
 
 // —— 批量补货 ——
 // 勾选只认 SKU 标识：父行（品名）按子行全选 / 半选推导，不单独存状态。
+// 三条联动规则：
+//   1. 勾选 → 没数字的行自动带入建议值（autoFilledDrafts 记着，取消勾选撤回未改过的）；
+//   2. 需安排填 / 清数字 → 自动勾选 / 取消勾选（见 updatePlannedDraft）；
+//   3. 已采纳锁定的行不可勾选，确认下单清零需安排后自动解锁。
 function isSkuSelected(id) {
   return selectedSkuIds.value.has(id)
 }
 
-function toggleSkuSelection(id, checked) {
+function isPlannedLocked(row) {
+  return Boolean(row) && !row.isProductGroup && hasPlannedUndo(row.id)
+}
+
+// 只闪回执，不改状态：先摘掉再挂上，连点同一行也能重播动画。
+function flashLockedHint(id) {
+  lockedHintRowId.value = null
+  nextTick(() => {
+    lockedHintRowId.value = id
+  })
+  if (lockedHintTimer) clearTimeout(lockedHintTimer)
+  lockedHintTimer = window.setTimeout(() => {
+    lockedHintTimer = 0
+    lockedHintRowId.value = null
+  }, 1200)
+}
+
+// 锁定行上不给操作的地方（整行、选择格、需安排格）统一走这里：只有锁定的行才闪。
+function flashHintIfLocked(row) {
+  if (isPlannedLocked(row)) flashLockedHint(row.id)
+}
+
+function selectableGroupChildren(row) {
+  return (row.children ?? []).filter((child) => !isPlannedLocked(child))
+}
+
+function calculatedRowById(id) {
+  const index = leafRowIndexById.get(id)
+  return index === undefined ? null : inventoryLeafRows.value[index]
+}
+
+// 取消勾选时撤回「勾选自动代入」的草稿，只撤没被改过的数字。
+function revertAutoFilledDrafts(ids) {
+  for (const id of ids) {
+    const filled = autoFilledDrafts.get(id)
+    if (filled === undefined) continue
+    autoFilledDrafts.delete(id)
+    if (!hasPlannedDraft(id) || draftQuantity(id) !== filled) continue
+    delete plannedDrafts[id]
+  }
+}
+
+// 新勾选的行：还没有数字、也没采纳过的，把建议值填进输入框（只是草稿，不替代「采纳」）。
+function prefillSelectionDrafts(ids) {
+  for (const id of ids) {
+    if (draftQuantity(id) > 0) continue
+    const row = calculatedRowById(id)
+    // 订单货没有建议值；缺系数 / 不参与备货的行也补不出数。
+    if (!row || row.manualBehavior === 'order' || !row.strategyAvailable) continue
+    // 已经有需安排的行不动：预填只服务还没填的 SKU。
+    if (Number(row.planned) > 0) continue
+    const suggestion = getSuggestedPlanned(row)
+    if (!(suggestion > 0)) continue
+    plannedDrafts[id] = suggestion
+    autoFilledDrafts.set(id, suggestion)
+  }
+}
+
+// 所有勾选变更都走这里：锁定行不进选择，新增行补建议值，取消行撤回自动填入。
+function applySkuSelection(next) {
+  const previous = selectedSkuIds.value
+  const accepted = new Set()
+  for (const id of next) {
+    if (hasPlannedUndo(id)) continue
+    accepted.add(id)
+  }
+  const added = [...accepted].filter((id) => !previous.has(id))
+  const removed = [...previous].filter((id) => !accepted.has(id))
+  selectedSkuIds.value = accepted
+  revertAutoFilledDrafts(removed)
+  prefillSelectionDrafts(added)
+}
+
+function updateSelectionIds(mutate) {
   const next = new Set(selectedSkuIds.value)
-  if (checked) next.add(id)
-  else next.delete(id)
-  selectedSkuIds.value = next
+  mutate(next)
+  applySkuSelection(next)
+}
+
+function addSkuToSelection(id) {
+  if (selectedSkuIds.value.has(id)) return
+  updateSelectionIds((next) => next.add(id))
+}
+
+function removeSkuFromSelection(id) {
+  if (!selectedSkuIds.value.has(id)) return
+  updateSelectionIds((next) => next.delete(id))
+}
+
+function toggleSkuSelection(id, checked) {
+  if (checked) addSkuToSelection(id)
+  else removeSkuFromSelection(id)
 }
 
 function isGroupFullySelected(row) {
-  const children = row.children ?? []
+  // 锁定 SKU 不可选；父行全选态只按可选子行计算，避免它们让父行永远停在半选。
+  const children = selectableGroupChildren(row)
   return children.length > 0 && children.every((child) => selectedSkuIds.value.has(child.id))
 }
 
 function isGroupPartiallySelected(row) {
-  const children = row.children ?? []
+  const children = selectableGroupChildren(row)
   let selected = 0
   for (const child of children) {
     if (selectedSkuIds.value.has(child.id)) selected += 1
@@ -1229,12 +1537,15 @@ function isGroupPartiallySelected(row) {
 }
 
 function toggleGroupSelection(row, checked) {
-  const next = new Set(selectedSkuIds.value)
-  for (const child of row.children ?? []) {
-    if (checked) next.add(child.id)
-    else next.delete(child.id)
-  }
-  selectedSkuIds.value = next
+  const children = selectableGroupChildren(row)
+  if (children.length === 0) return
+
+  updateSelectionIds((next) => {
+    for (const child of children) {
+      if (checked) next.add(child.id)
+      else next.delete(child.id)
+    }
+  })
 }
 
 // 表头全选取当前筛选结果（含未展开品名下的 SKU），筛选之外的选择保持不变。
@@ -1254,16 +1565,16 @@ const someFilteredSkuSelected = computed(
 )
 
 function toggleSelectAllFiltered(checked) {
-  const next = new Set(selectedSkuIds.value)
-  for (const row of filteredInventoryLeafRows.value) {
-    if (checked) next.add(row.id)
-    else next.delete(row.id)
-  }
-  selectedSkuIds.value = next
+  updateSelectionIds((next) => {
+    for (const row of filteredInventoryLeafRows.value) {
+      if (checked) next.add(row.id)
+      else next.delete(row.id)
+    }
+  })
 }
 
 function clearSkuSelection() {
-  selectedSkuIds.value = new Set()
+  applySkuSelection(new Set())
 }
 
 // 屏蔽（删除）后清掉已不在表里的勾选，避免批量条统计到看不见的 SKU。
@@ -1274,7 +1585,7 @@ function pruneHiddenSelection() {
     const item = itemById.value.get(id)
     if (item && !isItemHidden(item)) next.add(id)
   }
-  if (next.size !== selectedSkuIds.value.size) selectedSkuIds.value = next
+  if (next.size !== selectedSkuIds.value.size) applySkuSelection(next)
 }
 
 // —— 屏蔽（看似删除）——
@@ -1349,20 +1660,23 @@ watch(
     for (const id of selectedSkuIds.value) {
       if (itemById.value.has(id)) next.add(id)
     }
-    if (next.size !== selectedSkuIds.value.size) selectedSkuIds.value = next
+    if (next.size !== selectedSkuIds.value.size) applySkuSelection(next)
   },
 )
 
-// 底部「确认补货」：把勾选行落成需安排（草稿优先、其次占位建议值），然后直接进采购下单面板。
+// 底部「确认补货」：只把勾选行「需安排」里填着的数字落成需安排，然后直接进采购下单面板。
+// 勾选会自动带出建议值，所以这里不再回头取建议值兜底；没有数字的行跳过。
 function confirmRestock() {
   const selected = inventoryLeafRows.value.filter((row) => selectedSkuIds.value.has(row.id))
   if (selected.length === 0) return
 
-  const written = writePlanned(
-    selected.map((row) => ({ id: row.id, planned: resolveSubmitPlanned(row) })),
-  )
+  const plans = selected
+    .map((row) => ({ id: row.id, planned: draftQuantity(row.id) }))
+    .filter((plan) => plan.planned > 0)
+
+  const written = writePlanned(plans)
   if (written.length === 0) {
-    ElMessage.warning('选中的 SKU 都没有可补货的数量：请先在「需安排」填写，或缺货量已为 0')
+    ElMessage.warning('选中的 SKU 在「需安排」里都没有数字：先填数量（勾选会自动带出建议值）')
     return
   }
 
@@ -1382,18 +1696,26 @@ function getRowClassName({ row }) {
       : '',
     !row.isProductGroup && row.id === selectedRowId.value ? 'inventory-row-selected' : '',
     !row.isProductGroup && row.id === highlightedRowId.value ? 'inventory-row-highlight' : '',
+    // 已采纳锁定：整行不响应勾选，悬停显示锁图标。
+    isPlannedLocked(row) ? 'inventory-vtable__row--locked' : '',
   ]
     .filter(Boolean)
     .join(' ')
 }
 
 // 点击整行等同于点击该行复选框：SKU 行切换自身，SPU 汇总行切换其下全部 SKU。
+// 已采纳锁定的行整行都不响应（悬停显示锁图标），避免误加进批量补货。
 function handleRowClick(row) {
   if (row.isProductGroup) {
+    if (selectableGroupChildren(row).length === 0) return
     toggleGroupSelection(row, !isGroupFullySelected(row))
     return
   }
 
+  if (isPlannedLocked(row)) {
+    flashLockedHint(row.id)
+    return
+  }
   toggleSkuSelection(row.id, !isSkuSelected(row.id))
   selectedRowId.value = row.id
 }
@@ -1401,6 +1723,11 @@ function handleRowClick(row) {
 function handleProductCellClick(row) {
   if (row.isProductGroup) {
     toggleProductGroup(row)
+    return
+  }
+
+  if (isPlannedLocked(row)) {
+    flashLockedHint(row.id)
     return
   }
 
@@ -1439,7 +1766,8 @@ function createExcelCell(value, reference, styleIndex = 0) {
 // 导入成功后清空需安排草稿并重建表格；总表与销售表的写入已在 useSourceImport 内完成。
 function handleSourcesImported(summary) {
   for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
-  for (const key of Object.keys(plannedPreviews)) delete plannedPreviews[key]
+  plannedPreviews.clear()
+  autoFilledDrafts.clear()
 
   rebuildLeafRows()
   selectedRowId.value = null
@@ -1618,30 +1946,60 @@ function downloadImportTemplate() {
         >
           <ElOption v-for="name in modeOptions" :key="name" :label="name" :value="name" />
         </ElSelect>
-        <div class="warning-filters" role="group" aria-label="按预警状态筛选">
+        <div class="warning-filters" role="group" aria-label="采购状态筛选">
           <button
-            v-for="filter in warningFilters"
+            type="button"
+            class="warning-filter warning-filter--all"
+            :class="{ 'warning-filter--active': isAllFilterSelected }"
+            :aria-pressed="isAllFilterSelected"
+            :title="warningFilterTitle('all')"
+            @click="toggleWarningFilter('all')"
+          >
+            全部
+            <span class="warning-filter-count">{{ warningCounts.all }}</span>
+          </button>
+          <button
+            type="button"
+            class="warning-filter warning-filter--ordering"
+            :class="{ 'warning-filter--active': onlyOrdering }"
+            :aria-pressed="onlyOrdering"
+            :title="`只看下单中（已锁定、等待确认下单）的 SKU，共 ${orderingCount} 个`"
+            @click="toggleOrderingFilter"
+          >
+            下单中
+            <span class="warning-filter-count">{{ orderingCount }}</span>
+          </button>
+          <button
+            type="button"
+            class="warning-filter warning-filter--order"
+            :class="{ 'warning-filter--active': onlyOrdered }"
+            :aria-pressed="onlyOrdered"
+            :title="`只看已下单（有备货订单）的 SKU，共 ${orderedCount} 个`"
+            @click="toggleOrderFilter"
+          >
+            已下单
+            <span class="warning-filter-count">{{ orderedCount }}</span>
+          </button>
+        </div>
+        <div
+          class="warning-filters warning-filters--tones"
+          role="group"
+          aria-label="预警状态筛选"
+        >
+          <button
+            v-for="filter in warningToneFilters"
             :key="filter.key"
             type="button"
             class="warning-filter"
             :class="[
               `warning-filter--${filter.key}`,
-              {
-                'warning-filter--active':
-                  filter.key === 'all'
-                    ? !hasActiveFilters
-                    : selectedWarningTones.includes(filter.key),
-              },
+              { 'warning-filter--active': selectedWarningTones.includes(filter.key) },
             ]"
-            :aria-pressed="
-              filter.key === 'all'
-                ? !hasActiveFilters
-                : selectedWarningTones.includes(filter.key)
-            "
+            :aria-pressed="selectedWarningTones.includes(filter.key)"
+            :title="warningFilterTitle(filter.key)"
             @click="toggleWarningFilter(filter.key)"
           >
             <span
-              v-if="filter.key !== 'all'"
               class="warning-filter-indicator"
               :class="`urgency-indicator--${filter.key}`"
               aria-hidden="true"
@@ -1650,18 +2008,6 @@ function downloadImportTemplate() {
             <span class="warning-filter-count">{{ warningCounts[filter.key] }}</span>
           </button>
         </div>
-        <!-- 已下单：只看有备货订单（未作废分订单）的 SKU，与预警色是两个维度 -->
-        <button
-          type="button"
-          class="warning-filter warning-filter--order"
-          :class="{ 'warning-filter--active': onlyOrdered }"
-          :aria-pressed="onlyOrdered"
-          :title="`只看已下单（有备货订单）的 SKU，共 ${orderedCount} 个`"
-          @click="toggleOrderFilter"
-        >
-          已下单
-          <span class="warning-filter-count">{{ orderedCount }}</span>
-        </button>
         <span class="meta inventory-filters__count">{{ filteredSkuCount }} 个 SKU</span>
         <div class="toolbar__end">
           <ElButton class="toggle-groups-button" size="small" @click="toggleAllProductGroups">
@@ -1735,11 +2081,31 @@ function downloadImportTemplate() {
               }"
               @click="handleRowClick(row)"
             >
-              <div class="inventory-vtable__cell inventory-vtable__cell--select" @click.stop>
+              <div
+                class="inventory-vtable__cell inventory-vtable__cell--select"
+                @click.stop="flashHintIfLocked(row)"
+              >
+                <span
+                  v-if="!row.isProductGroup && isPlannedLocked(row)"
+                  class="row-lock-hint"
+                  title="已采纳锁定：订单提交前不可多选（提交订单后自动解锁）"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="M4.5 6V4.75a3.5 3.5 0 0 1 7 0V6m-8 0h9a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm4.5 3v2"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="1.5"
+                    />
+                  </svg>
+                </span>
                 <ElCheckbox
-                  v-if="row.isProductGroup"
+                  v-else-if="row.isProductGroup"
                   :model-value="isGroupFullySelected(row)"
                   :indeterminate="isGroupPartiallySelected(row)"
+                  :disabled="selectableGroupChildren(row).length === 0"
                   :aria-label="`选择 ${row.product} 下的全部 SKU`"
                   @change="toggleGroupSelection(row, $event)"
                 />
@@ -1820,10 +2186,7 @@ function downloadImportTemplate() {
                 <span
                   v-if="!row.isProductGroup"
                   class="urgency-indicator"
-                  :class="[
-                    `urgency-indicator--${getPlannedTone(row)}`,
-                    { 'urgency-indicator--preview': previewOf(row) },
-                  ]"
+                  :class="[`urgency-indicator--${getPlannedTone(row)}`, lampRingClass(row)]"
                   :title="urgencyTitle(row)"
                   :aria-label="`紧急状态：${urgencyTitle(row)}`"
                 />
@@ -1848,8 +2211,11 @@ function downloadImportTemplate() {
                 <div v-else class="planned-entry">
                   <div
                     class="planned-input-shell"
-                    :class="{ 'planned-input-shell--locked': hasPlannedUndo(row.id) }"
-                    @click.stop
+                    :class="{
+                      'planned-input-shell--locked': hasPlannedUndo(row.id),
+                      'planned-input-shell--hint': lockedHintRowId === row.id,
+                    }"
+                    @click.stop="flashHintIfLocked(row)"
                     @keydown.enter.prevent="handlePlannedEnter(row, $event)"
                   >
                     <ElInputNumber
@@ -1888,6 +2254,7 @@ function downloadImportTemplate() {
                   </div>
                   <ElButton
                     class="planned-accept-button"
+                    :class="{ 'planned-accept-button--hint': lockedHintRowId === row.id }"
                     size="small"
                     :disabled="!canAdoptPlanned(row)"
                     :title="
@@ -1972,16 +2339,12 @@ function downloadImportTemplate() {
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.theoreticalStock) }}
               </div>
-              <!-- 需安排草稿的实时预览：这 4 列在采纳前先按草稿算一版 -->
+              <!-- 需安排的两个提示层：键入时按草稿预览，采纳后继续标出这单计划带来的变化 -->
               <div
                 v-for="column in PREVIEW_COLUMNS"
                 :key="column.key"
                 class="inventory-vtable__cell"
-                :class="[
-                  isPreviewCell(row, column)
-                    ? `preview-cell preview-cell--${previewTone(row)}`
-                    : '',
-                ]"
+                :class="previewCellClass(row, column)"
                 :title="isPreviewCell(row, column) ? previewTitle(row, column) : ''"
               >
                 <template v-if="isPreviewCell(row, column)">
@@ -2057,7 +2420,10 @@ function downloadImportTemplate() {
       align-center
     >
       <p class="urgent-plan-hint">
-        填写新增计划数量，提交后将累加到主表“需安排”。推荐计划数按补至绿色带中位（正常库存）的数量计算。
+        填写新增计划数量，提交后将累加到主表“需安排”。推荐计划数按补至绿色带中位（正常库存）的数量计算。<template
+          v-if="excludedUrgentCount > 0"
+        >
+          已按小额补货门槛排除需安排低于 {{ lowPlannedThreshold }} 公斤的 {{ excludedUrgentCount }} 个紧急 SKU（可在设置 → 备货配置 → 筛选显示规则里调整）。</template>
       </p>
       <div class="urgent-plan-table" role="table" aria-label="紧急补货计划">
         <VirtualList
@@ -2392,9 +2758,11 @@ function downloadImportTemplate() {
   outline-offset: 2px;
 }
 
-/* 「已下单」不是预警色，是另一个维度：和前面那组隔开一点，避免被读成第五个预警态 */
-.warning-filter--order {
-  margin-left: 4px;
+/* 采购状态筛选不是预警色，与前面那组隔开，避免被读成预警态 */
+.warning-filters--tones {
+  padding-left: 8px;
+  margin-left: 2px;
+  border-left: 1px solid var(--industrial-grid);
 }
 
 .warning-filter-indicator {
@@ -2850,7 +3218,73 @@ function downloadImportTemplate() {
 }
 
 .inventory-vtable__cell--select {
+  position: relative;
   padding: 0;
+}
+
+/* 已采纳锁定的行：整行不可点（锁形光标），选择列常驻显示锁图标，直到订单提交解锁。 */
+.row-lock-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #496777;
+  pointer-events: none;
+}
+
+.row-lock-hint svg {
+  width: 14px;
+  height: 14px;
+}
+
+.inventory-vtable__row--body.inventory-vtable__row--locked,
+.inventory-vtable__row--body.inventory-vtable__row--locked .inventory-vtable__cell {
+  cursor: not-allowed;
+}
+
+/* 例外：行内可点的入口（采纳 / 撤销、SKU 弹窗、订单弹窗）保持正常的可点击光标。 */
+.inventory-vtable__row--locked :deep(.planned-accept-button),
+.inventory-vtable__row--locked :deep(.sku-detail-trigger),
+.inventory-vtable__row--locked :deep(.ordered-detail-button) {
+  cursor: pointer;
+}
+
+/* 点锁定行的回执：需安排输入框淡闪一圈，撤销按钮亮得更明显（连点会重播）。 */
+.planned-input-shell--hint::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  pointer-events: none;
+  animation: locked-hint-soft 1s ease-out;
+}
+
+@keyframes locked-hint-soft {
+  0% {
+    box-shadow: 0 0 0 0 rgba(64, 158, 255, 0);
+  }
+  30% {
+    box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.28);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(64, 158, 255, 0);
+  }
+}
+
+.inventory-vtable :deep(.planned-accept-button--hint) {
+  animation: locked-hint-strong 1.1s ease-out;
+}
+
+@keyframes locked-hint-strong {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(230, 145, 56, 0);
+  }
+  30% {
+    box-shadow: 0 0 0 3px rgba(230, 145, 56, 0.55), 0 0 12px rgba(230, 145, 56, 0.65);
+  }
 }
 
 .stocking-text {
@@ -2994,8 +3428,9 @@ function downloadImportTemplate() {
   text-align: center;
 }
 
-/* 需安排草稿的实时预览：这几格在采纳前先按草稿算一版，
-   浅色底 + 虚线下划线 + 变化量标出「这是未落定的预览值」，采纳后才变成正式数字。 */
+/* 需安排的两种提示（这 4 列）：
+   键入未采纳 = 实心变化量 + 弹入动画；已采纳未下单 = 同一块淡底与变化量，但不再弹入
+   （数字已经落定，只是这单还没下，等「采购下单」确认后需安排清零才消失）。 */
 .inventory-vtable__cell.preview-cell {
   gap: 3px;
   background-color: rgba(63, 113, 141, 0.12);
@@ -3092,6 +3527,12 @@ function downloadImportTemplate() {
 .preview-cell--unavailable .preview-delta {
   color: #fff;
   background-color: #8b98a0;
+}
+
+/* 已采纳但还没下单：底色与变化量照旧，只去掉弹入动画，避免滚动时反复闪动。 */
+.preview-cell--adopted .preview-number,
+.preview-cell--adopted .preview-delta {
+  animation: none;
 }
 
 @keyframes preview-number-pop {
@@ -3283,6 +3724,11 @@ function downloadImportTemplate() {
   -webkit-text-fill-color: #263d49 !important;
 }
 
+/* 锁定后输入框已不可操作：让点击穿透到外层壳，点这一格也能触发上面那下回执。 */
+.planned-input-shell--locked :deep(.el-input__wrapper) {
+  pointer-events: none;
+}
+
 .planned-lock-icon {
   position: absolute;
   top: 50%;
@@ -3361,6 +3807,12 @@ function downloadImportTemplate() {
 /* 预警灯的草稿预览：灯色已经是「补完之后的颜色」，虚线环提醒还没采纳。 */
 .inventory-vtable :deep(.urgency-indicator--preview) {
   outline: 1px dashed rgba(47, 59, 67, 0.45);
+  outline-offset: 2px;
+}
+
+/* 已采纳但还没下单：灯色同样是「补完之后的颜色」，改用实线环与草稿的虚线环区分。 */
+.inventory-vtable :deep(.urgency-indicator--projected) {
+  outline: 1px solid rgba(47, 59, 67, 0.4);
   outline-offset: 2px;
 }
 

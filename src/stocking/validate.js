@@ -20,6 +20,7 @@ import {
 } from './defaults.js'
 import { normalizeScoring, validateScoring, normalizeBulkScoring, validateBulkScoring } from './scoring.js'
 import { normalizeSpuGrades, validateSpuGrades } from './spuGrades.js'
+import { normalizeDisplayFilters, validateDisplayFilters } from './displayFilters.js'
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -219,6 +220,7 @@ export function normalizeConfig(config) {
     salesWindow: { weights: normalizeSalesWeights(config.salesWindow?.weights) },
     scoring: normalizeScoring(config.scoring),
     spuGrades: normalizeSpuGrades(config.spuGrades),
+    displayFilters: normalizeDisplayFilters(config.displayFilters),
     strategies: [
       normalizeStrategy(autoSource, BUILTIN_STRATEGIES[0], normalizeAutoModes),
       normalizeStrategy(manualSource, BUILTIN_STRATEGIES[1], normalizeManualModes),
@@ -403,6 +405,7 @@ export function validateConfig(config) {
 
   errors.push(...validateScoring(normalized.scoring))
   errors.push(...validateSpuGrades(normalized.spuGrades))
+  errors.push(...validateDisplayFilters(normalized.displayFilters))
 
   const manualNames = new Set()
   manualModes.forEach((mode) => {

@@ -82,6 +82,14 @@ export {
 } from './spuGrades.js'
 
 export {
+  LOW_PLANNED_DEFAULT_KG,
+  createDefaultDisplayFilters,
+  normalizeDisplayFilters,
+  resolveLowPlannedThreshold,
+  validateDisplayFilters,
+} from './displayFilters.js'
+
+export {
   CONFIG_FILE_NAME,
   CONFIG_SAVE_ENDPOINT,
   CONFIG_STORAGE_KEY,

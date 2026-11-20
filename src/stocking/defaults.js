@@ -5,6 +5,7 @@ import {
 } from './constants.js'
 import { createDefaultScoring, BULK_SCORING_DEFAULTS } from './scoring.js'
 import { createDefaultSpuGrades } from './spuGrades.js'
+import { createDefaultDisplayFilters } from './displayFilters.js'
 
 export const CONFIG_VERSION = 4
 export const PROFILE_FILE_VERSION = 4
@@ -165,6 +166,7 @@ export function createDefaultConfig() {
     salesWindow: { weights: createDefaultSalesWeights() },
     scoring: createDefaultScoring(),
     spuGrades: createDefaultSpuGrades(),
+    displayFilters: createDefaultDisplayFilters(),
     strategies: [
       { ...BUILTIN_STRATEGIES[0], modes: createDefaultAutoModes() },
       {

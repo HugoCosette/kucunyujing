@@ -80,6 +80,9 @@
             { "key": "z", "label": "Z", "minMonthlyAvg": null }
           ]
         },
+        "displayFilters": {
+          "lowPlanned": { "enabled": true, "minKg": 30 }
+        },
         "strategies": [
           {
             "id": "auto",

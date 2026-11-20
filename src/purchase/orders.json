@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updatedAt": "2026-11-19T04:01:36.034Z",
+  "updatedAt": "2026-11-20T03:44:55.948Z",
   "drafts": {
     "DEMO-087": [
       {
@@ -38,9 +38,9 @@
         "note": ""
       }
     ],
-    "40D涤安|87#玫红-无软（固色）": [
+    "40D涤安|648#藏青（固色）S": [
       {
-        "id": "so-mwlzrs4f-1",
+        "id": "so-mwnbips0-1",
         "factoryId": "df-1",
         "factoryName": "连江东禾晟",
         "assignee": "阿婷",
@@ -50,9 +50,9 @@
         "note": ""
       }
     ],
-    "40D涤安|50#桃粉": [
+    "40D涤安|618#酒红（固色）S": [
       {
-        "id": "so-mwn0wrki-1",
+        "id": "so-mwobsjxd-1",
         "factoryId": "df-1",
         "factoryName": "连江东禾晟",
         "assignee": "阿婷",
@@ -690,14 +690,14 @@
       "vatCount": 2,
       "kgPerVat": 240,
       "note": "",
-      "status": "active",
+      "status": "cancelled",
       "submittedAt": "2026-11-17T06:30:51.946Z",
-      "updatedAt": "2026-11-17T06:30:51.946Z",
+      "updatedAt": "2026-11-20T03:35:42.405Z",
       "month": "2026-11",
       "receivedQty": 0,
       "receipts": [],
       "revisions": [],
-      "cancelledAt": null
+      "cancelledAt": "2026-11-20T03:35:42.405Z"
     },
     {
       "id": "so-mwkbd0yy-2",

@@ -89,7 +89,7 @@ function evaluateManual(item, mode, override, weights, baselineMonth) {
   return createResult({
     modeKey: mode.id,
     modeName: mode.name,
-    modeLabel: `手动·${mode.name}`,
+    modeLabel: mode.name,
     // 手动自定系数模式按库存条数比较（与按量模式同一口径）；订单货不参与备货策略。
     metric: behavior === 'custom' ? 'stock' : 'none',
     participates: behavior === 'custom' && Boolean(coefficients),

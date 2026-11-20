@@ -30,6 +30,15 @@ const PURCHASE_ORDERS_FILE = path.resolve(
   'src/purchase/orders.json',
 )
 
+// 清洗缓存：出码率 / 产品资料字典，开发态由导入流程写回（生产构建只读）。
+const CLEANING_CACHE_DIR = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  'tools/cleaning/cache',
+)
+const CLEANING_CACHE_RATES_FILE = path.join(CLEANING_CACHE_DIR, 'rates.json')
+const CLEANING_CACHE_PRODUCT_FILE = path.join(CLEANING_CACHE_DIR, 'productMaster.json')
+const CLEANING_CACHE_META_FILE = path.join(CLEANING_CACHE_DIR, 'meta.json')
+
 // 清单类 JSON：保存后不触发 HMR，避免编辑下单数据把已导入的库存整页刷掉。
 const WATCHED_CONFIG_FILES = [
   STOCKING_CONFIG_FILE,
@@ -37,6 +46,9 @@ const WATCHED_CONFIG_FILES = [
   HIDDEN_SKUS_FILE,
   PURCHASE_SETTINGS_FILE,
   PURCHASE_ORDERS_FILE,
+  CLEANING_CACHE_RATES_FILE,
+  CLEANING_CACHE_PRODUCT_FILE,
+  CLEANING_CACHE_META_FILE,
 ]
 
 // 把 src/stocking/*.json 当成可写配置：开发态由页面直接落盘；
@@ -77,6 +89,54 @@ function stockingConfigFilePlugin() {
       registerSaveRoute('/__stocking-hidden/save', HIDDEN_SKUS_FILE)
       registerSaveRoute('/__purchase-settings/save', PURCHASE_SETTINGS_FILE)
       registerSaveRoute('/__purchase-orders/save', PURCHASE_ORDERS_FILE)
+
+      // 清洗缓存一次写三份（出码率 / 产品资料 / 元信息），所以单独处理而不是复用上面的单文件路由。
+      server.middlewares.use('/__cleaning-cache/save', (request, response, next) => {
+        if (request.method !== 'POST') {
+          next()
+          return
+        }
+
+        const chunks = []
+        request.on('data', (chunk) => chunks.push(chunk))
+        request.on('end', () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+            fs.mkdirSync(CLEANING_CACHE_DIR, { recursive: true })
+            if (Array.isArray(body.rates)) {
+              fs.writeFileSync(
+                CLEANING_CACHE_RATES_FILE,
+                `${JSON.stringify(body.rates, null, 0)}\n`,
+                'utf8',
+              )
+            }
+            if (Array.isArray(body.productMaster)) {
+              fs.writeFileSync(
+                CLEANING_CACHE_PRODUCT_FILE,
+                `${JSON.stringify(body.productMaster, null, 0)}\n`,
+                'utf8',
+              )
+            }
+            const meta = {
+              updatedAt: body.updatedAt ?? new Date().toISOString().slice(0, 10),
+              rates: Array.isArray(body.rates) ? body.rates.length : 0,
+              productMaster: Array.isArray(body.productMaster)
+                ? body.productMaster.length
+                : 0,
+            }
+            fs.writeFileSync(
+              CLEANING_CACHE_META_FILE,
+              `${JSON.stringify(meta, null, 2)}\n`,
+              'utf8',
+            )
+            response.statusCode = 204
+            response.end()
+          } catch (error) {
+            response.statusCode = 400
+            response.end(error instanceof Error ? error.message : 'invalid json')
+          }
+        })
+      })
     },
     handleHotUpdate(context) {
       if (WATCHED_CONFIG_FILES.includes(context.file)) return []

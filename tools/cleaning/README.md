@@ -16,6 +16,10 @@ tools/cleaning/
 ├─ clean-merge.js        命令行入口（定位 data/ 文件 → SheetJS 读表 → 写 output/）
 ├─ package.json
 ├─ 清洗提示词.txt         清洗 / 合并业务规则
+├─ cache/                稳定字典（随代码走，网页与脚本共用）
+│  ├─ productMaster.json  产品资料：只保留能换算成公斤的 SKU（品名/颜色/单位/树形分类）
+│  ├─ rates.json          出码率：品名 → 码/公斤
+│  └─ meta.json           更新时间与条数
 ├─ data/                 原始表放这里（内容 .gitignore，只留本地；目录由 .gitkeep 保留）
 │  ├─ 产品资料20261021.xlsx                    基准（SKU 全集）
 │  ├─ 出入库明细（销售+加工）20261021.xlsx      出库/订单/月份指标
@@ -49,7 +53,12 @@ npm run clean    # 读取 data\，输出 output\总表_清洗结果.xlsx 和 out
 ```
 
 文件名只要包含 `产品资料` / `出入库明细` / `库存结存表` / `欠货` / `Scheduling` 即会被自动匹配；同关键字命中多个文件时取最新修改的那个。
+**产品资料与出码率可以不放进 `data/`**：找不到文件时自动用 `cache/` 下的字典（网页导入同理），其余 4 张分表必须提供。
 `data/`、`output/` 不存在会自动创建。
+
+```powershell
+npm run clean -- --update-cache   # 清洗后把产品资料 / 出码率写回 cache/（与网页开发态写回同一口径）
+```
 
 每次运行输出 **两张表**（同一份合并结果按列拆分，行数一致）：
 

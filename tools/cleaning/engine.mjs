@@ -675,10 +675,16 @@ function createAggregator(source, base) {
   const divideFields = [
     ...new Set(source.columns.filter((column) => column.divideBy).map((column) => column.divideBy.field)),
   ]
-  const states = new Map()
+  // 按月列与普通列分开累积：月份列按「年份」分桶，读完一遍再取最新年份，
+  // 这样不必为了确定年份先把整表再扫一遍（出入库明细约 38 万行，省掉一半解析）。
+  const plainColumns = stateColumns.filter((column) => column.month === undefined)
+  const monthlyColumns = stateColumns.filter((column) => column.month !== undefined)
+  const states = new Map() // key → 普通列状态
+  const monthlyStates = new Map() // key → Map(年份 → 按月列状态)
   const contexts = new Map() // key → { 换算依据列名: 值 }，供 divideBy 使用
   const monthlyDateField = source.monthlyColumns?.dateField ?? null
-  let monthlyYear = source.monthlyColumns?.year ?? null
+  const fixedMonthlyYear = source.monthlyColumns?.year ?? null
+  const seenYears = new Set()
   let incompleteRows = 0
 
   const add = (row) => {
@@ -693,25 +699,44 @@ function createAggregator(source, base) {
     const rawKey = parts.join('|')
     const key = resolver.resolve(rawKey) || rawKey // 已对上基准的用基准标识归集
 
-    let current = states.get(key)
-    if (!current) {
-      current = stateColumns.map((column) => initState(column))
-      states.set(key, current)
-    }
-
-    let month = null // 按月列只统计该月份的记录
-    if (monthlyDateField) {
-      const parsed = toYearMonth(row[monthlyDateField])
-      month = parsed && (monthlyYear === null || parsed.year === monthlyYear) ? parsed.month : null
-    }
-
-    stateColumns.forEach((column, i) => {
-      if (column.month !== undefined && column.month !== month) return
-      if (column.onlyUnits && !column.onlyUnits.include.includes(textValue(row[column.onlyUnits.field]))) {
-        return
+    if (plainColumns.length) {
+      let current = states.get(key)
+      if (!current) {
+        current = plainColumns.map((column) => initState(column))
+        states.set(key, current)
       }
-      current[i] = updateState(column, current[i], row)
-    })
+      plainColumns.forEach((column, i) => {
+        if (column.onlyUnits && !column.onlyUnits.include.includes(textValue(row[column.onlyUnits.field]))) {
+          return
+        }
+        current[i] = updateState(column, current[i], row)
+      })
+    }
+
+    // 按月列：只累计目标年份（未指定年份时按记录自身的年份分桶）
+    if (monthlyDateField && monthlyColumns.length) {
+      const parsed = toYearMonth(row[monthlyDateField])
+      if (parsed && (fixedMonthlyYear === null || parsed.year === fixedMonthlyYear)) {
+        seenYears.add(parsed.year)
+        let perYear = monthlyStates.get(key)
+        if (!perYear) {
+          perYear = new Map()
+          monthlyStates.set(key, perYear)
+        }
+        let current = perYear.get(parsed.year)
+        if (!current) {
+          current = monthlyColumns.map((column) => initState(column))
+          perYear.set(parsed.year, current)
+        }
+        monthlyColumns.forEach((column, i) => {
+          if (column.month !== parsed.month) return
+          if (column.onlyUnits && !column.onlyUnits.include.includes(textValue(row[column.onlyUnits.field]))) {
+            return
+          }
+          current[i] = updateState(column, current[i], row)
+        })
+      }
+    }
 
     if (divideFields.length) {
       let context = contexts.get(key)
@@ -725,13 +750,42 @@ function createAggregator(source, base) {
     }
   }
 
+  // 实际采用的统计年份：配置里写死就用它，否则取数据里出现过的最新一年
+  const resolveMonthlyYear = () => {
+    if (!monthlyDateField) return null
+    if (fixedMonthlyYear !== null) return fixedMonthlyYear
+    let latest = null
+    for (const year of seenYears) {
+      if (latest === null || year > latest) latest = year
+    }
+    return latest
+  }
+
   const finish = () => {
+    const monthlyYear = resolveMonthlyYear()
     const summary = new Map()
-    for (const [key, current] of states) {
+    const keys = new Set(states.keys())
+    for (const key of monthlyStates.keys()) keys.add(key)
+    for (const key of keys) {
       const values = {}
-      stateColumns.forEach((column, i) => {
-        values[column.as] = finalizeState(column, current[i], contexts.get(key))
+      const plain = states.get(key)
+      plainColumns.forEach((column, i) => {
+        values[column.as] = finalizeState(
+          column,
+          plain ? plain[i] : initState(column),
+          contexts.get(key),
+        )
       })
+      if (monthlyColumns.length) {
+        const monthly = monthlyStates.get(key)?.get(monthlyYear)
+        monthlyColumns.forEach((column, i) => {
+          values[column.as] = finalizeState(
+            column,
+            monthly ? monthly[i] : initState(column),
+            contexts.get(key),
+          )
+        })
+      }
       // 由同表其它列换算出来的列（如 周消耗 = 月均条数 ÷ 4，月均条数 = 累积条数 ÷ 动销月份）
       for (const column of source.columns) {
         if (!column.divideFrom) continue
@@ -742,17 +796,10 @@ function createAggregator(source, base) {
       }
       summary.set(key, values)
     }
-    return { summary, incompleteRows }
+    return { summary, incompleteRows, monthlyYear }
   }
 
-  return {
-    add,
-    finish,
-    needsYear: () => Boolean(monthlyDateField) && monthlyYear === null,
-    setMonthlyYear: (year) => {
-      monthlyYear = year
-    },
-  }
+  return { add, finish }
 }
 
 /** 以基准表为全集左连接所有分表；未匹配且 appendUnmatched 的分表 SKU 追加为最后的新行 */
@@ -912,34 +959,17 @@ export async function runCleaning({ readRecords, onProgress } = {}) {
   const base = baseBuilder.finish()
   step += 1
 
-  // 2. 分表：逐张按唯一标识汇总
+  // 2. 分表：逐张按唯一标识汇总（单次读取；按月列的统计年份在汇总完成时取最新一年）
   const joins = []
   const joinStats = []
   for (const source of joinSourcesList) {
     const aggregator = createAggregator(source, base)
-    const prescan = aggregator.needsYear()
-    const startRatio = prescan ? 0.45 : 0
-    let monthlyYear = null
-
-    if (prescan) {
-      const dateField = source.monthlyColumns.dateField
-      await readWithRate(
-        source,
-        [dateField],
-        (row) => {
-          const parsed = toYearMonth(row[dateField])
-          if (parsed && (monthlyYear === null || parsed.year > monthlyYear)) monthlyYear = parsed.year
-        },
-        (ratio) => report(source, ratio * startRatio, `识别 ${source.label} 的统计年份`),
-      )
-      aggregator.setMonthlyYear(monthlyYear)
-    }
 
     await readWithRate(
       source,
       sourceFields(source),
       aggregator.add,
-      (ratio) => report(source, startRatio + ratio * (1 - startRatio), `汇总 ${source.label}`),
+      (ratio) => report(source, ratio, `汇总 ${source.label}`),
     )
     const result = aggregator.finish()
     let unmatchedKeys = 0
@@ -952,7 +982,7 @@ export async function runCleaning({ readRecords, onProgress } = {}) {
       keyCount: result.summary.size,
       incompleteRows: result.incompleteRows,
       unmatchedKeys,
-      monthlyYear: source.monthlyColumns ? monthlyYear : null,
+      monthlyYear: result.monthlyYear,
     })
     step += 1
   }

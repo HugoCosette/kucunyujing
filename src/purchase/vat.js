@@ -415,6 +415,28 @@ export function planOrderQuantity(need, rule, context = {}) {
   }
 }
 
+// 规则里出现过的缸型（公斤）：各分档的「固定量 / 每缸量 / 缸型列表」去重升序。
+// skip 档不下单，没有缸型，不参与。
+function ruleVatSizes(rule) {
+  const sizes = []
+  for (const band of Array.isArray(rule?.bands) ? rule.bands : []) {
+    if (band?.action === 'ladder') {
+      for (const size of normalizeVatSizes(band.sizes)) sizes.push(size)
+    } else if (['fixed', 'vat', 'round'].includes(band?.action)) {
+      const size = roundKg(toNumber(band.value, 0) ?? 0)
+      if (size > 0) sizes.push(size)
+    }
+  }
+  return normalizeVatSizes(sizes)
+}
+
+// 数量（公斤）下拉的候选：只列规则里出现过的单缸重量（1 缸 = 该缸型），
+// 让人在同一张规则允许的缸型之间直接换（换缸型 = 换一次下拉），缸数仍到「缸数」列里乘。
+// 没有可用缸型（未绑定 / 判定不下单）时返回空，由界面退回手填。
+export function vatQuantityOptions(rule) {
+  return ruleVatSizes(rule).map((size) => ({ quantity: size, vatCount: 1, kgPerVat: size }))
+}
+
 function actionText(band) {
   if (band.action === 'skip') return '不下单（0 公斤）'
   if (band.action === 'ladder') {

@@ -13,6 +13,7 @@
  *   node clean-merge.js                                 # 读取 data/，输出到 output/
  *   node clean-merge.js --dir <目录> [--out-dir <目录>] [--out <文件名>]  # 指定源目录 / 输出目录 / 输出文件
  *   node clean-merge.js --list                          # 只打印匹配到的文件，不做处理
+ *   node clean-merge.js --update-cache                  # 清洗后把产品资料 / 出码率写回 cache/
  *   node clean-merge.js --file <源id>=<路径> ...        # 临时覆盖某张表的路径
  *   node clean-merge.js <产品资料> <出入库明细> <库存结存表> [输出]   # 按配置顺序显式指定
  *
@@ -37,6 +38,11 @@ const PATHS = {
   outputDir: path.join(__dirname, "output"), // 清洗结果目录
   outputFile: "总表_清洗结果.xlsx", // 第一个输出文件名（可用 --out 覆盖）
 };
+
+// 稳定字典缓存：产品资料 / 出码率没放 data/ 时自动用这里的 JSON（网页导入也用同一份）。
+const CACHE_DIR = path.join(__dirname, "cache");
+const CACHE_FILES = { base: "productMaster.json", lookup: "rates.json" };
+const CACHE_META_FILE = path.join(CACHE_DIR, "meta.json");
 
 // 清洗引擎就是本目录的 engine.mjs —— 全项目唯一一份口径（网页通过 src/cleaning/engine.js 转发引用它）。
 // 用 .mjs 后缀：本目录 package.json 是 CommonJS（本文件用 require），.mjs 让 Node 直接按 ESM 加载。
@@ -113,6 +119,14 @@ function locateSources(sources, dir, files = {}) {
       .sort((a, b) => b.mtime - a.mtime);
 
     if (candidates.length === 0) {
+      // 产品资料 / 出码率可以由 cache/ 下的稳定字典兜底，其余分表必须提供文件。
+      const cacheName = CACHE_FILES[source.role];
+      const cacheFile = cacheName ? path.join(CACHE_DIR, cacheName) : "";
+      if (cacheFile && fs.existsSync(cacheFile)) {
+        console.log(`[${source.label}] 未找到表格，改用缓存：${path.basename(cacheFile)}`);
+        entries.push({ source, paths: [], cacheFile });
+        continue;
+      }
       if (source.optional) {
         console.warn(`[${source.label}] 未找到匹配文件，已按可选处理（相关列填默认值）`);
         entries.push({ source, paths: [], skipped: true });
@@ -197,6 +211,24 @@ function createRecordReader(entries, engine) {
   return async function readRecords(source, fields, handle) {
     const entry = entryById.get(source.id);
     if (!entry) throw new Error(`[${source.label}] 未定位到文件`);
+    if (entry.cacheFile) {
+      const rows = JSON.parse(fs.readFileSync(entry.cacheFile, "utf8"));
+      let valid = 0;
+      for (const row of rows) {
+        const record = {};
+        let hasValue = false;
+        for (const field of fields) {
+          const value = row[field] ?? null;
+          record[field] = value;
+          if (!hasValue && engine.cellText(value) !== "") hasValue = true;
+        }
+        if (!hasValue) continue;
+        valid += 1;
+        handle(record);
+      }
+      console.log(`读取缓存 ${path.basename(entry.cacheFile)}：${rows.length} 行 → 有效 ${valid} 行`);
+      return {};
+    }
     if (entry.skipped || entry.paths.length === 0) return {}; // 可选表缺失：按空汇总处理
 
     for (const filePath of entry.paths) {
@@ -277,6 +309,60 @@ function writeOutputs(tables, outputs, outputDir, firstFileName = PATHS.outputFi
   console.log(`输出完成：${written.join("、")}`);
 }
 
+/**
+ * 从总表反推稳定字典缓存（与网页导入写回同一口径）：
+ * 产品资料 = 能换算成公斤的 SKU 全集；出码率 = 品名 → 码/公斤。
+ */
+function writeCacheFromTables(table) {
+  const header = table.columns;
+  const at = (name) => header.indexOf(name);
+  const iProduct = at("品名");
+  const iColor = at("颜色");
+  const iTree = at("树形分类");
+  const iRate = at("出码率");
+  const iFactor = at("公斤系数");
+
+  const productMaster = [];
+  const rates = new Map();
+  for (const row of table.rows) {
+    const product = String(row[iProduct] ?? "").trim();
+    const color = String(row[iColor] ?? "").trim();
+    const rate = Number(row[iRate]) || 0;
+    const factor = row[iFactor];
+    if (!product || !color) continue;
+    if (factor === "" || factor === null || factor === undefined) continue;
+    if (rate > 0 && !rates.has(product)) rates.set(product, rate);
+    productMaster.push({
+      品名: product,
+      颜色: color,
+      单位: rate > 0 ? "码" : "公斤",
+      树形分类: String(row[iTree] ?? "").trim(),
+    });
+  }
+
+  const rateRows = [...rates.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], "zh-CN"))
+    .map(([品名, 出码率]) => ({ 品名, 出码率 }));
+
+  ensureDir(CACHE_DIR);
+  fs.writeFileSync(path.join(CACHE_DIR, "rates.json"), `${JSON.stringify(rateRows, null, 0)}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(CACHE_DIR, "productMaster.json"),
+    `${JSON.stringify(productMaster, null, 0)}\n`,
+    "utf8",
+  );
+  fs.writeFileSync(
+    CACHE_META_FILE,
+    `${JSON.stringify(
+      { updatedAt: new Date().toISOString().slice(0, 10), rates: rateRows.length, productMaster: productMaster.length },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  console.log(`已更新清洗缓存：rates.json ${rateRows.length} 条、productMaster.json ${productMaster.length} 行`);
+}
+
 /* ================================================================
  * 六、日志
  * ================================================================ */
@@ -286,9 +372,11 @@ function printConfig(entries) {
   console.log("数据源配置：");
   entries.forEach((entry, i) => {
     const { source } = entry;
-    const fileText = entry.paths.length
-      ? entry.paths.map((p) => path.basename(p)).join("、")
-      : "（缺失，填默认值）";
+    const fileText = entry.cacheFile
+      ? `缓存 ${path.basename(entry.cacheFile)}`
+      : entry.paths.length
+        ? entry.paths.map((p) => path.basename(p)).join("、")
+        : "（缺失，填默认值）";
     const colText = source.columns
       .filter((c) => c.month === undefined)
       .map((c) => {
@@ -358,6 +446,7 @@ function printStats(stats) {
  * @param {string} [options.outputFile] 输出文件名；传 null 不写文件；相对路径基于 outputDir
  * @param {object} [options.files]      按源 id 覆盖文件路径，如 { 库存结存表: "D:/x.xlsx" }
  * @param {boolean} [options.listOnly]  只打印匹配结果，不读取数据
+ * @param {boolean} [options.updateCache] 用本次结果覆盖 cache/ 下的产品资料与出码率字典
  * @returns {Promise<Array<Array>>} 总表数据行（不含表头）
  */
 async function cleanMerge(options = {}) {
@@ -367,6 +456,7 @@ async function cleanMerge(options = {}) {
     outputFile = PATHS.outputFile,
     files = {},
     listOnly = false,
+    updateCache = false,
   } = options;
 
   const engine = await loadEngine();
@@ -394,6 +484,7 @@ async function cleanMerge(options = {}) {
   });
   printStats(stats);
 
+  if (updateCache) writeCacheFromTables(tables["总表"]);
   if (outputFile) writeOutputs(tables, engine.OUTPUTS, outputDir, outputFile);
   return tables["总表"].rows;
 }
@@ -434,6 +525,7 @@ function parseArgs(argv, sources = []) {
       if (!id || rest.length === 0) throw new Error(`--file 参数格式应为 <源id>=<路径>，收到：${pair}`);
       options.files[id] = rest.join("=");
     } else if (arg === "--list") options.listOnly = true;
+    else if (arg === "--update-cache") options.updateCache = true;
     else positional.push(arg);
   }
 
@@ -468,6 +560,7 @@ if (require.main === module) main();
 
 module.exports = {
   PATHS,
+  CACHE_DIR,
   ENGINE_PATH,
   loadEngine,
   cleanMerge,
@@ -481,6 +574,7 @@ module.exports = {
   parseArgs,
   writeOutput,
   writeOutputs,
+  writeCacheFromTables,
   printConfig,
   printColumnPlan,
   printStats,

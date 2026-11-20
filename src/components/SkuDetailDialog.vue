@@ -141,9 +141,12 @@ function syncStrategyDraft() {
     const entry = savedEntry.value
     if (!entry) {
       strategyDraft.value = 'auto'
-      const fallback = manualModes.value.find((mode) => mode.behavior === 'custom') ?? manualModes.value[0]
+      // 手动策略下默认落在「订单货模式」（按客户订单填量最常见），自定系数模式作为次选。
+      const fallback =
+        manualModes.value.find((mode) => mode.behavior === 'order') ?? manualModes.value[0]
       manualModeDraft.value = fallback?.id ?? ''
-      writeCoefficients(fallback?.defaultCoefficients)
+      const customMode = manualModes.value.find((mode) => mode.behavior === 'custom')
+      writeCoefficients(fallback?.defaultCoefficients ?? customMode?.defaultCoefficients)
       return
     }
 
@@ -289,7 +292,7 @@ const countData = computed(() =>
   months.value.map((month) => salesOfSku.value?.counts?.[month - 1] ?? null),
 )
 // —— 需安排 + 采纳（弹窗里直接补货）——
-// 建议值与主面板「需安排」占位同一口径：补到正常库存 80% 下限的差额（公斤，精准到个位）。
+// 建议值与主面板「需安排」占位同一口径：补到正常库存（绿区中位）的差额（公斤，精准到个位）。
 const suggestedPlanned = computed(() =>
   calculatedRow.value ? getSuggestedPlanned(calculatedRow.value) : 0,
 )

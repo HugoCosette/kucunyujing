@@ -20,6 +20,7 @@ import PurchaseSettingsPanel from '@/components/PurchaseSettingsPanel.vue'
 import DataStoragePanel from '@/components/DataStoragePanel.vue'
 import ScoringSettings from '@/components/ScoringSettings.vue'
 import SpuGradeSettings from '@/components/SpuGradeSettings.vue'
+import DisplayFilterSettings from '@/components/DisplayFilterSettings.vue'
 import {
   CATEGORIES,
   COEFFICIENT_KEYS,
@@ -34,6 +35,7 @@ import {
   findDanglingSkuIds,
   importConfigFile,
   normalizeConfig,
+  normalizeDisplayFilters,
   normalizeScoring,
   normalizeSpuGrades,
   summarizeEvaluation,
@@ -126,6 +128,15 @@ function applySpuGrades(next) {
   beforeStructuralChange()
   configDraft.value.spuGrades = normalizeSpuGrades(next)
   ElMessage.success('SPU 分级已更新，点「确定」后写入配置')
+}
+
+// —— 筛选显示规则 ——
+// 小额补货门槛挂在 config.displayFilters 上：只影响主面板「紧急 / 常规」筛选，不参与备货计算。
+const displayFilters = computed(() => normalizeDisplayFilters(configDraft.value.displayFilters))
+
+function applyDisplayFilters(next) {
+  configDraft.value.displayFilters = normalizeDisplayFilters(next)
+  ElMessage.success('筛选显示规则已更新，点「确定」后写入配置')
 }
 
 // 每个品名的月均条数合计：只用于卡片里预览各等级命中多少个 SPU。
@@ -641,7 +652,7 @@ function handleFileCommand(command) {
 const activePanel = ref('strategy')
 
 // 设置页一个壳两个域：左侧分区决定顶部工具条用哪一套。
-const STOCKING_PANELS = ['strategy', 'weights', 'scoring', 'spu']
+const STOCKING_PANELS = ['strategy', 'weights', 'scoring', 'spu', 'display']
 const isStockingPanel = computed(() => STOCKING_PANELS.includes(activePanel.value))
 // 数据存储分区独立成域：它不编辑配置草稿，工具条不显示保存 / 放弃。
 const isDataPanel = computed(() => activePanel.value === 'data')
@@ -682,6 +693,9 @@ const dirtySections = computed(() => ({
   scoring:
     JSON.stringify(configDraft.value.scoring) !== JSON.stringify(savedConfig.value.scoring),
   spu: JSON.stringify(configDraft.value.spuGrades) !== JSON.stringify(savedConfig.value.spuGrades),
+  display:
+    JSON.stringify(configDraft.value.displayFilters) !==
+    JSON.stringify(savedConfig.value.displayFilters),
 }))
 
 const scoringDimensionCount = computed(() => Object.keys(scoring.value.dimensions ?? {}).length)
@@ -1206,6 +1220,21 @@ function handleProfileMenu(command) {
             <span class="rail__title">SPU 分级</span>
             <span class="rail__meta">{{ spuGrades.tiers.length }} 档</span>
           </button>
+          <button
+            type="button"
+            class="rail__item"
+            :class="{ 'is-active': activePanel === 'display', 'is-dirty': dirtySections.display }"
+            @click="activePanel = 'display'"
+          >
+            <span class="rail__title">筛选显示规则</span>
+            <span class="rail__meta">
+              {{
+                displayFilters.lowPlanned.enabled
+                  ? `≥ ${displayFilters.lowPlanned.minKg} 公斤`
+                  : '小额门槛已关闭'
+              }}
+            </span>
+          </button>
         </div>
 
         <div class="rail__group">
@@ -1661,6 +1690,13 @@ function handleProfileMenu(command) {
             :grades="spuGrades"
             :totals="spuMonthlyTotals"
             @apply="applySpuGrades"
+          />
+
+          <!-- 筛选显示规则：主面板小额补货门槛 -->
+          <DisplayFilterSettings
+            v-show="activePanel === 'display'"
+            :filters="displayFilters"
+            @apply="applyDisplayFilters"
           />
 
           <!-- 下单配置：内容与旧「下单设置」一致，只换了外壳 -->

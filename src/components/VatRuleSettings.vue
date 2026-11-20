@@ -135,7 +135,7 @@ const ruleMenuOptions = computed(() => [
   ...rules.value.map((rule) => ({
     id: rule.id,
     name: rule.name,
-    note: rule.id === defaultRuleId.value ? '默认' : '',
+    note: '',
   })),
   { id: VAT_RULE_NONE, name: '不取整', note: '' },
 ])
@@ -420,15 +420,6 @@ const trialTone = computed(() => {
   return ''
 })
 
-// 末行没有上限，超过它的量按它的缸型一缸一缸往上补，提示里把这句写清楚。
-const lastBandHint = computed(() => {
-  const bands = draft.value.bands
-  const target = bandTarget(bands[bands.length - 1])
-  if (target > 0) {
-    return `最后一段没有上限：超过 ${formatNumber(target)} 公斤时按 ${formatNumber(target)} 公斤一缸一缸往上补。`
-  }
-  return '每段的「从」会自动接上上一段的「到」，不用重复填。'
-})
 
 // 编辑弹窗打开时把老配置摊成「一行一段」：
 // 缸型阶梯（80/160/240）按相邻中点拆成区间（→ 120 / 200 两个断点），末段留成开口的单缸型；
@@ -812,9 +803,7 @@ function saveRule() {
         <ElButton size="small" @click="addBand">＋ 添加范围</ElButton>
         <span class="vat-settings__hint">{{ lastBandHint }}</span>
       </div>
-      <p class="vat-bands__hint">
-        行内「插入」会把这一段从中间一分为二，只有这一段变化，后面的范围不用重调；插入后两张卡的「补到」一致，改左边那张即可。
-      </p>
+ 
 
       <div class="vat-dialog-trial">
         <span class="vat-dialog-trial__label">试算</span>

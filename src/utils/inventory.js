@@ -140,12 +140,12 @@ export function calculateInventoryRow(item) {
   }
 }
 
-// 建议需安排（公斤）：补到「正常库存 80% 下限」的差额，基于理论库存；
+// 建议需安排（公斤）：补到「正常库存」（绿区中位）的差额，基于理论库存；
 // 累计下单（含已到货）算作即将到货，先扣掉，避免同一缺口重复补两次。
 export function getSuggestedPlanned(row) {
   if (!row?.strategyAvailable) return 0
   const incoming = Number(row.ordered) > 0 ? Number(row.ordered) : 0
-  return Math.max(0, Math.ceil(row.normalStock * 0.8 - row.theoreticalStock - incoming))
+  return Math.max(0, Math.ceil(row.normalStock - row.theoreticalStock - incoming))
 }
 
 // 表格展示口径：数量一律取整到整数（不出现小数），缺省与无穷大保留文字。

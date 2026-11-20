@@ -1,4 +1,5 @@
 import { assertSourceHeader, cellText, runCleaning } from '@/cleaning/engine'
+import { CLEANING_CACHE_ROLE_IDS, loadCleaningCache } from './cleaningCache'
 import { streamSheetRows } from './xlsxStream'
 
 // 浏览器侧的清洗入口：只负责“怎么把用户选的文件读成记录”，口径全部在 tools/cleaning/engine.mjs。
@@ -41,20 +42,50 @@ async function readSourceRecords(file, source, fields, handle, onProgress) {
   })
 }
 
+// 缓存兜底：产品资料 / 出码率没选文件时，把缓存 JSON 当成记录流喂给引擎（字段名与源表一致）。
+function feedCachedRows(rows, fields, handle) {
+  for (const row of rows) {
+    const record = {}
+    let hasValue = false
+    for (const field of fields) {
+      const value = row[field] ?? null
+      record[field] = value
+      if (!hasValue && value !== null && cellText(value) !== '') hasValue = true
+    }
+    if (hasValue) handle(record)
+  }
+}
+
 /**
  * 执行一次分表清洗，返回总表与销售表（含表头的数据行）。
+ * 产品资料 / 出码率不选文件时自动使用 tools/cleaning/cache/ 下的缓存。
  * @param {object} options
  * @param {Record<string, File|Blob>} options.files 按数据源 label 传入的分表文件
  * @param {(progress: {percent: number, sourceId: string, sourcePercent: number, message: string}) => void} [options.onProgress]
  * @returns {Promise<{tables: Record<string, {columns: string[], rows: Array<Array>}>, stats: object}>}
  */
-export function cleanSplitTables({ files, onProgress } = {}) {
+export async function cleanSplitTables({ files, onProgress } = {}) {
+  const needsCache = CLEANING_CACHE_ROLE_IDS.some((roleId) => !files?.[roleId])
+  const cache = needsCache ? await loadCleaningCache() : null
+
   return runCleaning({
     onProgress,
     readRecords: (source, fields, handle, onProgressOfSource) => {
       const file = files?.[source.id]
-      if (!file) throw new Error(`缺少「${source.label}」分表文件`)
-      return readSourceRecords(file, source, fields, handle, onProgressOfSource)
+      if (file) return readSourceRecords(file, source, fields, handle, onProgressOfSource)
+
+      const cachedRows =
+        source.role === 'base'
+          ? cache?.productMaster
+          : source.role === 'lookup'
+            ? cache?.rates
+            : null
+      if (cachedRows?.length) {
+        feedCachedRows(cachedRows, fields, handle)
+        onProgressOfSource?.(1)
+        return
+      }
+      throw new Error(`缺少「${source.label}」分表文件`)
     },
   })
 }
