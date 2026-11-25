@@ -10,6 +10,7 @@ import {
   ElMessageBox,
 } from 'element-plus'
 import { usePurchaseStore } from '@/stores/purchase'
+import { QUANTITY_MAX } from '@/utils/quantityInput'
 
 // 订单弹窗：左列是分订单（本次到货填完点「登记到货」），右列是到货记录（每条都能撤回 / 删除）。
 // 累积下单 / 已到货只统计 active 订单；已到货由 receipts 求和派生，撤回或删除一条就自动退回待收。
@@ -277,6 +278,7 @@ async function handleEditQuantity(order) {
         inputValidator: (value) => {
           const amount = Number(value)
           if (!Number.isFinite(amount) || amount <= 0) return '请填写大于 0 的公斤数'
+          if (amount > QUANTITY_MAX) return `最多输入 ${QUANTITY_MAX} 公斤（6 位数）`
           if (amount < received) return `不能少于已到货的 ${formatNumber(received)} 公斤`
           return true
         },

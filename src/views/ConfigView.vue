@@ -1256,8 +1256,7 @@ function handleProfileMenu(command) {
           >
             <span class="rail__title">染厂管理</span>
             <span class="rail__meta">
-              {{ purchaseMeta.factories }} 家 · {{ purchaseMeta.enabledFactories }} 家启用 ·
-              {{ purchaseMeta.skus }} 个 SKU 有约束
+              {{ purchaseMeta.factories }} 家 · {{ purchaseMeta.enabledFactories }} 家启用
             </span>
           </button>
           <button

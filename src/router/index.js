@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, createWebHistory } from 'vue-router'
 import InventoryPanelView from '../views/InventoryPanelView.vue'
 import SalesPanelView from '../views/SalesPanelView.vue'
 import ConfigView from '../views/ConfigView.vue'
@@ -7,7 +7,12 @@ import HiddenSkusView from '../views/HiddenSkusView.vue'
 import { MAIN_PANEL } from '@/data/panels'
 
 const router = createRouter({
-  history: createWebHistory(import.meta.env.BASE_URL),
+  // 桌面离线版跑在 app:// 自定义协议下：hash 路由不依赖服务端回退；
+  // 线上构建仍是 history 模式，深链刷新靠 dist/404.html，两者互不影响。
+  history:
+    import.meta.env.MODE === 'desktop'
+      ? createWebHashHistory()
+      : createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
       path: MAIN_PANEL.path,
@@ -25,7 +30,7 @@ const router = createRouter({
       component: PurchaseOrderView,
     },
     {
-      // 采购下单的子面板：下单历史（只读流水），与下单面板共用同一个视图，靠标签页切换。
+      // 采购下单的子面板：下单历史（查询 / 删除流水），与下单面板共用同一个视图，靠标签页切换。
       path: MAIN_PANEL.purchaseHistoryPath,
       name: MAIN_PANEL.purchaseHistoryRouteName,
       component: PurchaseOrderView,

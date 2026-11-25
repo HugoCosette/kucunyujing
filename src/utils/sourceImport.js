@@ -17,7 +17,8 @@ const INVENTORY_HEADERS = new Set([
   '公斤系数',
   ...QUANTITY_FIELDS.map((entry) => entry.label),
 ])
-const MONTH_COLUMN_PATTERN = /^(\d{1,2})月(销量|条数|重量|订单数)$/
+const MONTH_COLUMN_PATTERN =
+  /^(\d{1,2})月(销量|累计销量|条数|累计条数|重量|订单数|累计订单数|客户数|累计客户数|客户CR5率)$/
 const HEADER_SCAN_ROWS = 10
 
 function normalizeHeader(value) {
@@ -55,7 +56,7 @@ export function describeMissingColumns(roles) {
   }
   if (!roles.hasSkuId) return `缺少“${SKU_ID_LABEL}”列，总表与销售表都必须提供`
   if (!roles.hasInventoryColumns && !roles.hasSalesColumns) {
-    return '无法识别：总表需要库存列，销售表需要“N月条数”等月份列或动销指标列'
+    return '无法识别：总表需要库存列，销售表需要“N月条数”“N月客户数”等月份列或动销指标列'
   }
   return ''
 }

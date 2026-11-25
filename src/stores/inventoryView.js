@@ -12,6 +12,8 @@ function createInventoryViewState() {
     // 预警组支持多选；预警组与采购状态组互斥。
     selectedWarningTones: ref([]),
     selectedModeLabels: ref([]),
+    // SPU 等级筛选：存档位 key（配置里改名不影响），'ungraded' 表示月均缺失、父行显示「—」的品名。
+    selectedSpuGradeKeys: ref([]),
     // 采购状态组单选：全部（两者都为 false）、已下单或下单中。
     // 已下单口径是「该 SKU 有未作废的分订单」（累积下单 > 0）。
     onlyOrdered: ref(false),

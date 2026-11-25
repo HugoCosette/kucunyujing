@@ -3,6 +3,10 @@
 // 生产中取生产排单的「进仓重量」，本来就是公斤；需安排由人工按公斤填写。
 // 热销 / 常规按「够卖多少天」比较（日库销比），按量按库存公斤数直接比较。
 
+export function composeProductColorSkuId(product, color) {
+  return `${String(product ?? '').trim()}|${String(color ?? '').trim()}`
+}
+
 function resolveIssue(item, kgFactor) {
   if (item.excluded) {
     // 订单货只是「不做预测」，数量和预警都不算，但照常进采购下单面板。

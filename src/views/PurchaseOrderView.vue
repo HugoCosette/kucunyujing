@@ -2,11 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
+  ElDialog,
   ElDropdown,
   ElDropdownItem,
   ElDropdownMenu,
   ElMessage,
   ElMessageBox,
+  ElOption,
+  ElSelect,
   ElTooltip,
 } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
@@ -16,6 +19,8 @@ import { useInventoryStore } from '@/stores/inventory'
 import { usePurchaseStore } from '@/stores/purchase'
 import { schedulePlanPersist } from '@/data/persistence'
 import { MAIN_PANEL } from '@/data/panels'
+import { buildOrderHistory, filterHistory } from '@/purchase/history'
+import { exportOrderWorkbook } from '@/purchase/historyExport'
 import {
   categoryForSku,
   FILL_LOW_RATIO,
@@ -26,7 +31,7 @@ import {
 } from '@/purchase'
 import { saveWorkbook } from '@/utils/xlsxWrite'
 
-// 采购下单页 = 两个子面板：下单面板（拆单 + 确认）与下单历史（只读流水）。
+// 采购下单页 = 两个子面板：下单面板（拆单 + 确认）与下单历史（查询 / 删除流水）。
 // 列表直接由主面板的「需安排 > 0」派生：需安排就是"哪些 SKU 要下、下多少"的唯一来源。
 // 分订单以唯一标识为键，重新导入后自动保留。
 const inventoryStore = useInventoryStore()
@@ -40,6 +45,19 @@ const activePanel = computed(() =>
 const keyword = ref('')
 const onlyUnordered = ref(false)
 const selectedKey = ref(null)
+
+// 已确认订单导出：数据一律取自订单流水，不依赖左侧待下单列表——
+// 单张确认后该 SKU 就从列表移走，从列表取数必然漏单。
+// lastBatch 只记「这一次点确认」生成的批次，用于导出本次确认批次。
+const lastBatch = ref(null)
+const rangeExportVisible = ref(false)
+const rangeExportStart = ref('')
+const rangeExportEnd = ref('')
+const rangeExportStatus = ref('active')
+
+function todayKey() {
+  return new Date().toLocaleDateString('sv-SE')
+}
 
 // 公斤数统一带千分位：一屏里出现多个五位数时更容易对齐着读。
 const kgFormat = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })
@@ -274,6 +292,11 @@ function submitRows(targets) {
   for (const skuId of submitted) clearPlannedFor(skuId)
   schedulePlanPersist(inventoryStore)
   void purchaseStore.flushOrders()
+  lastBatch.value = {
+    batchId: result.batchId,
+    at: result.at,
+    count: result.items.length,
+  }
   return result
 }
 
@@ -285,7 +308,7 @@ async function confirmSelectedRow() {
     ElMessage.warning('先补齐染厂和下单量；按缸方式还需选择缸型并填写缸数')
     return
   }
-  ElMessage.success(`已下单：${label}`)
+  ElMessage.success(`已下单：${label}（可用「导出订单 → 本次确认批次」导出）`)
   selectedKey.value = null
 }
 
@@ -311,7 +334,9 @@ async function confirmAllDrafts() {
     ElMessage.warning('没有可提交的分订单（请补齐染厂、下单量，以及按缸方式的缸型和缸数）')
     return
   }
-  ElMessage.success(`已确认下单：${result.items.length} 张分订单`)
+  ElMessage.success(
+    `已确认下单：${result.items.length} 张分订单（可用「导出订单 → 本次确认批次」导出）`,
+  )
 }
 
 // 待下单清单导出（原来挂主面板「本次采购清单」弹窗，清单删掉后搬到这里）：
@@ -381,6 +406,71 @@ function exportPurchaseRows() {
     console.error('Failed to export purchase rows', error)
     ElMessage.error(`导出失败：${error instanceof Error ? error.message : '未知错误'}`)
   }
+}
+
+// 已确认订单导出（三档：本次确认批次 / 今日 / 自定义日期范围）。
+// 取数与筛选都和下单历史页同一份（history + historyExport），导出的表格结构完全一致。
+function exportConfirmedOrders({ from = '', to = '', status = 'active', batchId = '', scopeLabel = '' } = {}) {
+  const history = buildOrderHistory(purchaseStore.orders?.orders ?? [])
+  const { batches } = filterHistory(history, { from, to, status, batchId })
+  if (!batches.length) {
+    ElMessage.warning('这个范围里没有可导出的已确认订单')
+    return null
+  }
+  try {
+    const result = exportOrderWorkbook(batches, { baseName: '已确认订单', scopeLabel })
+    ElMessage.success(`已导出 ${result.batchCount} 个批次 / ${result.orderCount} 张分订单`)
+    return result
+  } catch (error) {
+    console.error('Failed to export confirmed orders', error)
+    ElMessage.error(`导出失败：${error instanceof Error ? error.message : '未知错误'}`)
+    return null
+  }
+}
+
+// 「本次」= 最后一次点「确认下单 / 下单全部已填」生成的那个批次，不含此前或之后确认的单。
+function exportLastBatch() {
+  if (!lastBatch.value) {
+    ElMessage.warning('本次会话还没有确认过订单')
+    return
+  }
+  exportConfirmedOrders({
+    batchId: lastBatch.value.batchId,
+    status: 'all',
+    scopeLabel: '本次确认',
+  })
+}
+
+function exportTodayOrders() {
+  const day = todayKey()
+  exportConfirmedOrders({ from: day, to: day, scopeLabel: day })
+}
+
+function openRangeExport() {
+  if (!rangeExportStart.value) {
+    const now = new Date()
+    rangeExportStart.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+  }
+  if (!rangeExportEnd.value) rangeExportEnd.value = todayKey()
+  rangeExportVisible.value = true
+}
+
+function confirmRangeExport() {
+  const from = String(rangeExportStart.value ?? '').trim()
+  const to = String(rangeExportEnd.value ?? '').trim()
+  if (from && to && from > to) {
+    ElMessage.warning('开始日期不能晚于结束日期')
+    return
+  }
+  const label = from && to && from === to ? from : `${from || '最早'}_${to || '最新'}`
+  const result = exportConfirmedOrders({ from, to, status: rangeExportStatus.value, scopeLabel: label })
+  if (result) rangeExportVisible.value = false
+}
+
+function handleExportCommand(command) {
+  if (command === 'last') exportLastBatch()
+  else if (command === 'today') exportTodayOrders()
+  else if (command === 'range') openRangeExport()
 }
 
 function selectRow(row) {
@@ -517,28 +607,55 @@ const progressTitle = computed(() => {
     <PanelNavigation />
 
     <!-- 页面标题「采购下单」不再单独占一行（顶部导航已经有入口），子面板 tab 直接接在导航下 -->
-    <!-- 子面板切换：下单面板（拆单 + 确认）/ 下单历史（只读流水） -->
-    <nav class="purchase-tabs" aria-label="采购下单子面板">
-      <RouterLink
-        class="purchase-tabs__item"
-        :class="{ 'is-active': activePanel === 'order' }"
-        :to="{ name: MAIN_PANEL.purchaseRouteName }"
-      >
-        {{ MAIN_PANEL.purchaseOrderTabLabel }}
-      </RouterLink>
-      <RouterLink
-        class="purchase-tabs__item"
-        :class="{ 'is-active': activePanel === 'history' }"
-        :to="{ name: MAIN_PANEL.purchaseHistoryRouteName }"
-      >
-        {{ MAIN_PANEL.purchaseHistoryTabLabel }}
-      </RouterLink>
-    </nav>
+    <!-- 子面板切换：下单面板（拆单 + 确认）/ 下单历史（查询 / 删除流水） -->
+    <div class="purchase-head">
+      <nav class="purchase-tabs" aria-label="采购下单子面板">
+        <RouterLink
+          class="purchase-tabs__item"
+          :class="{ 'is-active': activePanel === 'order' }"
+          :to="{ name: MAIN_PANEL.purchaseRouteName }"
+        >
+          {{ MAIN_PANEL.purchaseOrderTabLabel }}
+        </RouterLink>
+        <RouterLink
+          class="purchase-tabs__item"
+          :class="{ 'is-active': activePanel === 'history' }"
+          :to="{ name: MAIN_PANEL.purchaseHistoryRouteName }"
+        >
+          {{ MAIN_PANEL.purchaseHistoryTabLabel }}
+        </RouterLink>
+      </nav>
+      <!-- 已确认订单的导出入口放在页头：确认完的单会从左列表消失，列表空了也要能导出 -->
+      <div v-if="activePanel === 'order'" class="purchase-head__actions">
+        <ElDropdown trigger="click" placement="bottom-end" @command="handleExportCommand">
+          <button
+            type="button"
+            class="btn btn--sm"
+            title="导出已确认订单（本次确认批次 / 今日 / 自定义日期范围）"
+          >
+            导出订单
+          </button>
+          <template #dropdown>
+            <ElDropdownMenu>
+              <ElDropdownItem command="last" :disabled="!lastBatch">
+                {{
+                  lastBatch
+                    ? `本次确认批次（${lastBatch.count} 张）`
+                    : '本次确认批次（本次会话还没有）'
+                }}
+              </ElDropdownItem>
+              <ElDropdownItem command="today">今日已确认订单</ElDropdownItem>
+              <ElDropdownItem command="range">选择日期范围…</ElDropdownItem>
+            </ElDropdownMenu>
+          </template>
+        </ElDropdown>
+      </div>
+    </div>
 
     <template v-if="activePanel === 'order'">
       <div v-if="rows.length === 0" class="purchase-empty">
         <p>还没有待下单的 SKU。</p>
-        <p>回到需求表勾选 SKU 点「确认补货」，或在行内填好「需安排」后点「采纳」，就会直接到这里下单。</p>
+        <p>回到需求表勾选 SKU 点「采纳」或者多选SKU后点「确认补货」</p>
         <RouterLink class="purchase-empty__link" to="/">返回需求表</RouterLink>
       </div>
 
@@ -603,7 +720,7 @@ const progressTitle = computed(() => {
               title="导出待下单清单（需安排 / 缸数建议 + 已填分单明细）"
               @click="exportPurchaseRows"
             >
-              导出 Excel
+              导出待下单
             </button>
           </div>
           <div class="po-list__scroll" @scroll="syncPoLink">
@@ -796,6 +913,43 @@ const progressTitle = computed(() => {
           <p v-else class="po-empty">左侧选择一个 SKU 开始下单</p>
         </section>
       </div>
+
+      <!-- 已确认订单按日期范围导出：取订单流水，和下单历史同一套筛选与表结构 -->
+      <ElDialog
+        v-model="rangeExportVisible"
+        title="导出已确认订单"
+        width="min(420px, calc(100vw - 32px))"
+        append-to-body
+        align-center
+      >
+        <div class="po-export-dialog">
+          <label class="po-export-dialog__row">
+            <span>开始日期</span>
+            <input v-model="rangeExportStart" class="input" type="date" />
+          </label>
+          <label class="po-export-dialog__row">
+            <span>结束日期</span>
+            <input v-model="rangeExportEnd" class="input" type="date" />
+          </label>
+          <label class="po-export-dialog__row">
+            <span>订单状态</span>
+            <ElSelect v-model="rangeExportStatus" size="small" class="po-export-dialog__select">
+              <ElOption label="有效单" value="active" />
+              <ElOption label="已作废" value="cancelled" />
+              <ElOption label="全部状态" value="all" />
+            </ElSelect>
+          </label>
+          <p class="po-export-dialog__hint">
+            按确认时间（本地日期，含起止两天）导出；确认后已从左侧列表移走的订单也会包含在内。
+          </p>
+        </div>
+        <template #footer>
+          <button type="button" class="btn btn--sm" @click="rangeExportVisible = false">取消</button>
+          <button type="button" class="btn btn--sm btn--primary" @click="confirmRangeExport">
+            导出
+          </button>
+        </template>
+      </ElDialog>
     </template>
 
     <OrderHistoryPanel v-else />
@@ -871,6 +1025,29 @@ const progressTitle = computed(() => {
 }
 
 /* 子面板标签：比顶部导航轻一级，只在本页内切换 */
+.purchase-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--industrial-grid);
+}
+
+.purchase-head .purchase-tabs {
+  margin-bottom: -1px;
+  border-bottom: 0;
+}
+
+.purchase-head__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-right: 2px;
+  margin-bottom: 4px;
+  margin-left: auto;
+}
+
 .purchase-tabs {
   display: flex;
   gap: 2px;
@@ -1122,6 +1299,41 @@ const progressTitle = computed(() => {
 .po-export:hover {
   border-color: var(--industrial-primary);
   color: var(--industrial-primary);
+}
+
+/* ---------- 「导出已确认订单」日期范围弹窗 ---------- */
+.po-export-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.po-export-dialog__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--industrial-muted);
+  font-size: 12px;
+}
+
+.po-export-dialog__row > span {
+  flex: none;
+  width: 56px;
+}
+
+.po-export-dialog__row .input {
+  width: 150px;
+}
+
+.po-export-dialog__select {
+  width: 132px;
+}
+
+.po-export-dialog__hint {
+  margin: 2px 0 0;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .po-list__scroll {

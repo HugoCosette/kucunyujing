@@ -60,16 +60,27 @@ export {
   SCORING_TIER_TONES,
   computeGrowthRate,
   createDefaultScoring,
+  describeBulkRule,
   describeScoringBand,
   describeScoringRanges,
   evaluateBulkScoring,
   evaluateScoring,
+  matchScoringTier,
   normalizeBulkScoring,
   normalizeScoring,
+  resolveBulkTier,
   resolveGrowthMonths,
   validateBulkScoring,
   validateScoring,
 } from './scoring.js'
+
+export {
+  REPLENISH_RISK_LEVELS,
+  REPLENISH_RISK_RULE_TEXT,
+  REPLENISH_RISK_THRESHOLDS,
+  REPLENISH_TIER_DEVIATION,
+  evaluateReplenishRisk,
+} from './replenishRisk.js'
 
 export {
   SPU_GRADE_TIERS,

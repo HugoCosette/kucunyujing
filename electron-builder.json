@@ -1,0 +1,35 @@
+{
+  "appId": "com.kucunyujing.stocking",
+  "productName": "备货决策系统",
+  "directories": {
+    "output": "release"
+  },
+  "files": ["electron/main.cjs", "package.json", "!node_modules/**/*"],
+  "extraResources": [
+    {
+      "from": "dist-desktop",
+      "to": "web"
+    }
+  ],
+  "asar": true,
+  "npmRebuild": false,
+  "electronLanguages": ["zh-CN", "en-US"],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "kucunyujing-${version}-setup.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": true,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": "always",
+    "shortcutName": "备货决策系统",
+    "uninstallDisplayName": "备货决策系统"
+  }
+}

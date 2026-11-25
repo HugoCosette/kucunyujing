@@ -7,23 +7,6 @@ import {
 import { CATEGORIES, LEGACY_METRIC_LABELS } from '@/stocking/constants'
 import { normalizeProductName, normalizeSkuId } from './inventory.js'
 
-// 总表模板列：SKU 关联键 + 基本面信息 + 备货计算所需的全部数量列。
-// 「出码率 / 公斤系数」把库存（码或公斤）换算成公斤，缺失时该行不参与计算。
-export const IMPORT_TEMPLATE_COLUMNS = [
-  SKU_ID_LABEL,
-  '色彩',
-  '品名',
-  '颜色',
-  ...QUANTITY_FIELDS.map((entry) => entry.label),
-  '出码率',
-  '公斤系数',
-]
-
-export const IMPORT_TEMPLATE_SAMPLE_ROWS = [
-  ['NO-0001', '黑白', '挪威网', '1#黑色', 280, 940, 0, 3443, 3217, 12000, 34, 0.029412],
-  ['NO-0002', '彩色', '挪威网', '193#浅咖', 260, 1160, 0, 1735, 2871, 8600, 34, 0.029412],
-]
-
 const HEADER_ALIASES = new Map([
   [SKU_ID_LABEL, SKU_ID_FIELD],
   ['唯一编码', SKU_ID_FIELD],

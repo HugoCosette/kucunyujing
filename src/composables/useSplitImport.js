@@ -2,8 +2,8 @@ import { computed, onBeforeUnmount, reactive, ref, shallowRef } from 'vue'
 import { ElMessage } from 'element-plus'
 import { SPLIT_TABLE_ROLES, matchSplitTableFiles } from '@/utils/splitTableImport'
 
-// 导入分表：先选 5 张分表做清洗（得到总表 + 销售表），再走已有的导入流程确认写入。
-// sourceImport 由主面板传入同一个实例，清洗结果直接进它的预览弹窗与确认逻辑。
+// 导入分表：选 5 张分表做清洗（得到总表 + 销售表），清洗完成即写入，不再二次确认。
+// sourceImport 由主面板传入同一个实例，清洗结果直接交给它落库。
 export function useSplitImport({ sourceImport }) {
   const dialogVisible = ref(false)
   const pickedFiles = shallowRef([])
@@ -102,7 +102,7 @@ export function useSplitImport({ sourceImport }) {
       if (data.type === 'done') {
         finish()
         dialogVisible.value = false
-        sourceImport.openSummary(data.summary)
+        sourceImport.applySummary(data.summary)
       }
     }
     worker.onerror = (event) => {

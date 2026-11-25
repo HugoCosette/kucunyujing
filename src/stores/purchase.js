@@ -196,6 +196,33 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return { order: cancelled, quantity: cancelled.quantity }
   }
 
+  // 下单历史的物理删除：整张订单连同 receipts / revisions 一起移除。
+  function removeOrder(orderId) {
+    const target = orders.value.orders.find((order) => order.id === orderId)
+    if (!target) return null
+    commitOrders({
+      ...orders.value,
+      orders: orders.value.orders.filter((order) => order.id !== orderId),
+    })
+    return target
+  }
+
+  // 批次删除按 batchId 删除全部分订单，不受历史页当前筛选结果影响。
+  function removeBatchOrders(batchId) {
+    const key = String(batchId ?? '').trim()
+    if (!key) return []
+    const removed = orders.value.orders.filter(
+      (order) => (String(order.batchId ?? '').trim() || String(order.id ?? '').trim()) === key,
+    )
+    if (!removed.length) return []
+    const removedIds = new Set(removed.map((order) => order.id))
+    commitOrders({
+      ...orders.value,
+      orders: orders.value.orders.filter((order) => !removedIds.has(order.id)),
+    })
+    return removed
+  }
+
   // 鍒拌揣鏄拷鍔犱竴鏉″疄鏀惰褰曪紝涓嶈鐩?receivedQty锛況eceivedQty 鐢?receipts 姹傚拰娲剧敓銆?
   function receiveOrder(orderId, qty, by = '') {
     const amount = Number(qty)
@@ -337,6 +364,8 @@ export const usePurchaseStore = defineStore('purchase', () => {
     clearOrderEntries,
     submitOrders,
     cancelOrder,
+    removeOrder,
+    removeBatchOrders,
     receiveOrder,
     voidReceipt,
     restoreReceipt,

@@ -10,7 +10,9 @@ import {
   normalizeSettings,
   validateVatRules,
 } from '@/purchase'
+import { composeProductColorSkuId } from '@/utils/inventory'
 import { readWorkbookRows } from '@/utils/xlsxStream'
+import { saveWorkbook } from '@/utils/xlsxWrite'
 
 // 下单设置：染厂清单、分单人员表、树形分类、SKU 可选染厂、缸规则，全部落盘到 src/purchase/settings.json。
 // 页面用草稿编辑，点「确定」才写回；导入 Excel 只负责补齐名单，不动已有的启用状态与分配。
@@ -148,7 +150,6 @@ const configuredSkus = computed(() =>
 )
 
 const factoryOptions = computed(() => draft.value.dyeFactories)
-const categoryOptions = computed(() => draft.value.treeCategories.map((entry) => entry.name))
 const searchedFactories = computed(() => {
   const text = factoryKeyword.value.trim().toLowerCase()
   if (!text) return draft.value.dyeFactories
@@ -170,29 +171,21 @@ const currentFactorySkus = computed(() => {
         ids,
         product: item?.product ?? skuId.split('|')[0] ?? skuId,
         color: item?.color ?? skuId.split('|')[1] ?? '',
-        treeCategory: draft.value.skuCategoryOverrides[skuId] ?? item?.treeCategory ?? '',
       }
     })
     .filter((row) => {
       if (!text) return true
-      return [row.skuId, row.product, row.color, row.treeCategory]
-        .join(' ')
-        .toLowerCase()
-        .includes(text)
+      return [row.skuId, row.product, row.color].join(' ').toLowerCase().includes(text)
     })
     .sort((a, b) => a.product.localeCompare(b.product, 'zh-CN') || a.color.localeCompare(b.color, 'zh-CN'))
 })
 const factorySkuCounts = computed(() => {
   const counts = new Map(draft.value.dyeFactories.map((factory) => [factory.id, 0]))
-  for (const item of inventoryStore.inventoryItems) {
-    const skuId = String(item.skuId ?? '').trim()
-    if (!skuId) continue
-    const picked = draft.value.skuFactories[skuId]
-    for (const factory of draft.value.dyeFactories) {
-      const allowed = picked
-        ? picked.includes(factory.id)
-        : factory.enabled !== false
-      if (allowed) counts.set(factory.id, (counts.get(factory.id) ?? 0) + 1)
+  for (const factoryIds of Object.values(draft.value.skuFactories)) {
+    for (const factoryId of new Set(factoryIds)) {
+      if (counts.has(factoryId)) {
+        counts.set(factoryId, counts.get(factoryId) + 1)
+      }
     }
   }
   return counts
@@ -375,12 +368,6 @@ function removeFactoryRelation(row) {
   }
 }
 
-function setSkuCategory(skuId, category) {
-  const value = String(category ?? '').trim()
-  if (value) draft.value.skuCategoryOverrides[skuId] = value
-  else delete draft.value.skuCategoryOverrides[skuId]
-}
-
 // 从 Excel 读一列：前 10 行里定位表头，之后逐行取该列的非空文本。
 async function readColumnValues(file, headerName) {
   const data = await file.arrayBuffer()
@@ -411,11 +398,15 @@ async function readColumnValues(file, headerName) {
   return values
 }
 
+// 关联导入认两种写法：直给的「SKU唯一标识」，或「产品名」+「颜色」（按总表口径拼成 品名|颜色）。
+// 「染厂色号」「备注」只是模板里的参考列，导入不落库。
 async function readSkuFactoryRelations(file) {
   const { rows } = readWorkbookRows(await file.arrayBuffer())
   let headerRowNumber = null
   let factoryColumn = -1
   let skuColumn = -1
+  let productColumn = -1
+  let colorColumn = -1
 
   for (const row of rows.slice(0, 10)) {
     const headers = row.cells.map((cell) => String(cell ?? '').trim())
@@ -423,22 +414,35 @@ async function readSkuFactoryRelations(file) {
     skuColumn = headers.findIndex((header) =>
       ['SKU唯一标识', '唯一标识', 'skuId'].includes(header),
     )
-    if (factoryColumn >= 0 && skuColumn >= 0) {
+    productColumn = headers.findIndex((header) => header === '产品名' || header === '品名')
+    colorColumn = headers.findIndex((header) => header === '颜色')
+    const hasSku = skuColumn >= 0 || (productColumn >= 0 && colorColumn >= 0)
+    if (factoryColumn >= 0 && hasSku) {
       headerRowNumber = row.rowNumber
       break
     }
   }
   if (headerRowNumber === null) {
-    throw new Error('需要「染厂名称」和「SKU唯一标识」（或「唯一标识」）两列')
+    throw new Error('需要「染厂名称」列，以及「SKU唯一标识」（或「产品名」+「颜色」）列')
   }
 
   return rows
     .filter((row) => row.rowNumber > headerRowNumber)
-    .map((row) => ({
-      rowNumber: row.rowNumber,
-      factoryName: String(row.cells[factoryColumn] ?? '').trim(),
-      skuId: String(row.cells[skuColumn] ?? '').trim(),
-    }))
+    .map((row) => {
+      const product = String(row.cells[productColumn] ?? '').trim()
+      const color = String(row.cells[colorColumn] ?? '').trim()
+      const skuId =
+        skuColumn >= 0
+          ? String(row.cells[skuColumn] ?? '').trim()
+          : product && color
+            ? composeProductColorSkuId(product, color)
+            : ''
+      return {
+        rowNumber: row.rowNumber,
+        factoryName: String(row.cells[factoryColumn] ?? '').trim(),
+        skuId,
+      }
+    })
     .filter((row) => row.factoryName || row.skuId)
 }
 
@@ -449,6 +453,23 @@ function pickImportFile(mode) {
 
 function pickRelationImport() {
   pickImportFile('sku-factories')
+}
+
+// 模板与导入同源：表头就是导入认的列名，用户填完直接走「Excel 导入」。
+const RELATION_TEMPLATE_HEADERS = ['染厂名称', '产品名', '颜色', '染厂色号', '备注']
+
+function exportRelationTemplate() {
+  saveWorkbook(
+    [
+      {
+        name: '染厂可生产SKU',
+        rows: [RELATION_TEMPLATE_HEADERS],
+        widths: [18, 22, 22, 20, 26],
+      },
+    ],
+    '染厂可生产SKU-模板.xlsx',
+  )
+  ElMessage.success('模板已导出')
 }
 
 async function handleImportFile(event) {
@@ -723,7 +744,7 @@ function saveCategoryDraft() {
 const skuDialogVisible = ref(false)
 const skuEditingId = ref('')
 const skuUnrestricted = ref(false)
-const skuDraft = reactive({ category: '', factoryIds: [] })
+const skuDraft = reactive({ factoryIds: [] })
 const skuEditingRow = computed(() => {
   const skuId = skuEditingId.value
   const item = itemBySkuId.value.get(skuId)
@@ -738,7 +759,6 @@ const skuEditingRow = computed(() => {
 
 function openEditSku(row) {
   skuEditingId.value = row.skuId
-  skuDraft.category = draft.value.skuCategoryOverrides[row.skuId] ?? ''
   skuUnrestricted.value = isUnrestrictedSku(row.skuId)
   skuDraft.factoryIds = skuUnrestricted.value
     ? draft.value.dyeFactories
@@ -753,7 +773,6 @@ function saveSkuDraft() {
     ElMessage.warning('至少选择一家染厂，或启用「全部启用染厂可选」')
     return
   }
-  setSkuCategory(skuEditingId.value, skuDraft.category)
   if (skuUnrestricted.value) delete draft.value.skuFactories[skuEditingId.value]
   else draft.value.skuFactories[skuEditingId.value] = [...skuDraft.factoryIds]
   skuDialogVisible.value = false
@@ -943,30 +962,27 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
 
           <!-- SKU 可选染厂 -->
           <section v-show="['factories', 'sku-factories'].includes(activePanel)" class="panel">
-            <div class="panel__head">
-              <h2 class="panel__title">染厂与 SKU 关联</h2>
+            <div class="panel__head relation-panel-head">
+              <h2 class="panel__title">染厂可生产的SKU</h2>
+              <div class="relation-manager__actions">
+                <button type="button" class="btn btn--text btn--sm" @click="exportRelationTemplate">
+                  导出模板
+                </button>
+                <button type="button" class="btn btn--text btn--sm" @click="pickRelationImport">
+                  Excel 导入
+                </button>
+                <button
+                  type="button"
+                  class="btn btn--primary btn--sm"
+                  :disabled="!selectedFactory"
+                  @click="beginAddRelation"
+                >
+                  ＋ 添加 SKU
+                </button>
+              </div>
             </div>
             <div class="panel__body">
               <div class="relation-manager">
-                <div class="relation-manager__intro">
-                  <p>
-                    未限制的 SKU 默认可由所有启用染厂生产；只为确有特殊要求的 SKU 设置限制。
-                  </p>
-                  <div class="relation-manager__actions">
-                    <button type="button" class="btn btn--text btn--sm" @click="pickRelationImport">
-                      Excel 导入关联
-                    </button>
-                    <button
-                      type="button"
-                      class="btn btn--primary btn--sm"
-                      :disabled="!selectedFactory"
-                      @click="beginAddRelation"
-                    >
-                      ＋ 添加 SKU
-                    </button>
-                  </div>
-                </div>
-
                 <div class="relation-manager__layout">
                   <aside class="relation-factories">
                     <div class="relation-factories__head">
@@ -995,7 +1011,7 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
                       >
                         <span class="relation-factory__name">{{ factory.name }}</span>
                         <span class="relation-factory__meta">
-                          {{ factory.enabled === false ? '停用' : `${factorySkuCounts.get(factory.id) ?? 0} 个 SKU` }}
+                          {{ factory.enabled === false ? '停用' : `关联 ${factorySkuCounts.get(factory.id) ?? 0}` }}
                         </span>
                       </button>
                       <p v-if="searchedFactories.length === 0" class="relation-empty">
@@ -1007,7 +1023,6 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
                   <div v-if="selectedFactory" class="relation-detail">
                     <div class="relation-detail__head">
                       <div>
-                        <div class="relation-detail__eyebrow">当前染厂</div>
                         <h3>{{ selectedFactory.name }}</h3>
                       </div>
                       <span
@@ -1023,30 +1038,25 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
                         v-model="relationSkuKeyword"
                         size="small"
                         clearable
-                        placeholder="筛选已限制的 SKU"
-                        aria-label="筛选当前染厂 SKU"
+                        placeholder="搜索已关联的 SKU"
+                        aria-label="搜索当前染厂已关联 SKU"
                       />
-                      <span>{{ currentFactorySkus.length }} 个明确关联</span>
+                      <span>已限制 {{ currentFactorySkus.length }} 个 SKU</span>
                     </div>
 
                     <div v-if="currentFactorySkus.length" class="relation-sku-table-wrap">
                       <table class="score-table relation-sku-table">
                         <thead>
                           <tr>
-                            <th>SKU</th>
-                            <th>唯一标识</th>
-                            <th>树形分类</th>
+                            <th>品名</th>
+                            <th>颜色</th>
                             <th class="is-actions">操作</th>
                           </tr>
                         </thead>
                         <tbody>
                           <tr v-for="row in currentFactorySkus" :key="row.skuId">
-                            <td>
-                              <strong>{{ row.product }}</strong>
-                              <span class="relation-sku-table__color">{{ row.color || '—' }}</span>
-                            </td>
-                            <td class="score-table__mono">{{ row.skuId }}</td>
-                            <td>{{ row.treeCategory || '—' }}</td>
+                            <td>{{ row.product }}</td>
+                            <td>{{ row.color || '—' }}</td>
                             <td class="is-actions">
                               <span class="row-acts">
                                 <button
@@ -1070,20 +1080,11 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
                       </table>
                     </div>
                     <div v-else class="relation-empty relation-empty--detail">
-                      <strong>暂无单独限制的 SKU</strong>
-                      <span>未限制的 SKU 仍可由所有启用染厂生产，不会出现在此列表中。</span>
-                      <button
-                        type="button"
-                        class="btn btn--sm"
-                        :disabled="!selectedFactory"
-                        @click="beginAddRelation"
-                      >
-                        添加 SKU 限制
-                      </button>
+                      <strong>暂无关联 SKU</strong>
                     </div>
                   </div>
                   <div v-else class="relation-empty relation-empty--detail">
-                    还没有染厂，请先添加染厂或导入清单。
+                    <strong>暂无染厂</strong>
                   </div>
                 </div>
               </div>
@@ -1442,7 +1443,7 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
     >
       <div class="relation-import">
         <p class="relation-add__hint">
-          仅应用有效的新关联。未匹配、重复、已存在的行会保留在预览中但不会写入。
+          仅应用有效的新关联。未匹配、重复、已存在的行会保留在预览中但不会写入。文件需含「染厂名称」列，以及「SKU唯一标识」（或「产品名」+「颜色」）列；「染厂色号」「备注」仅作参考，不写入设置。
         </p>
         <div class="relation-import__stats">
           <span><strong>{{ relationImportRecords.length }}</strong> 条数据行</span>
@@ -1458,10 +1459,7 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
         >
           <ElCheckbox v-model="relationImportLimitUnrestricted" />
           <span>
-            确认将文件中未限制的 SKU 收窄为文件列出的染厂
-            <small>
-              当前未限制 SKU 默认可选所有启用染厂；勾选后，只允许文件中列出的染厂。
-            </small>
+            将未限制 SKU 改为仅允许文件中的染厂
           </span>
         </label>
         <div class="relation-import__table-wrap">
@@ -1532,23 +1530,6 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
           </div>
         </div>
         <div class="form__row">
-          <span class="form__row-label">树形分类</span>
-          <div class="form__row-ctrl">
-            <ElSelect
-              v-model="skuDraft.category"
-              size="small"
-              filterable
-              allow-create
-              clearable
-              placeholder="沿用导入值"
-              aria-label="树形分类覆盖"
-            >
-              <ElOption v-for="name in categoryOptions" :key="name" :label="name" :value="name" />
-            </ElSelect>
-            <span class="form__row-hint">留空表示沿用产品资料里的分类。</span>
-          </div>
-        </div>
-        <div class="form__row">
           <span class="form__row-label">可选染厂</span>
           <div class="form__row-ctrl">
             <label class="relation-unrestricted">
@@ -1574,9 +1555,7 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
                 :disabled="factory.enabled === false"
               />
             </ElSelect>
-            <span class="form__row-hint">
-              不限时删除单独限制；否则至少选择一家启用染厂。
-            </span>
+            <span class="form__row-hint">指定染厂时至少选择一家。</span>
           </div>
         </div>
       </div>
@@ -1910,23 +1889,21 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
   }
 }
 
+.relation-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
 .relation-manager {
   display: grid;
-  gap: 14px;
 }
 
-.relation-manager__intro {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
-  border: 1px solid #dce5eb;
-  border-radius: 4px;
-  background: #f6f9fb;
+.relation-panel-head .relation-manager__actions {
+  margin-left: auto;
 }
 
-.relation-manager__intro p,
 .relation-add__hint {
   margin: 0;
   color: var(--industrial-muted);
@@ -2034,12 +2011,6 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
   border-bottom: 1px solid #edf1f4;
 }
 
-.relation-detail__eyebrow {
-  margin-bottom: 4px;
-  color: var(--industrial-muted);
-  font-size: 10px;
-}
-
 .relation-detail__head h3 {
   margin: 0;
   color: var(--industrial-text);
@@ -2068,17 +2039,18 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
 }
 
 .relation-sku-table {
-  min-width: 620px;
+  min-width: 440px;
 }
 
-.relation-sku-table__color {
-  display: block;
-  margin-top: 3px;
-  color: var(--industrial-muted);
-  font-size: 11px;
+.score-table.relation-sku-table th,
+.score-table.relation-sku-table td,
+.score-table.relation-sku-table th.is-actions,
+.score-table.relation-sku-table td.is-actions {
+  text-align: left;
 }
 
-.relation-sku-table .row-acts {
+.score-table.relation-sku-table td.is-actions .row-acts {
+  justify-content: flex-start;
   gap: 4px;
 }
 
@@ -2091,7 +2063,7 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
 
 .relation-empty--detail {
   display: flex;
-  min-height: 220px;
+  min-height: 160px;
   align-items: center;
   justify-content: center;
   flex-direction: column;
@@ -2101,11 +2073,6 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
 .relation-empty--detail strong {
   color: var(--industrial-text);
   font-size: 13px;
-}
-
-.relation-empty--detail span {
-  max-width: 380px;
-  line-height: 1.6;
 }
 
 .relation-add {
@@ -2220,9 +2187,13 @@ defineExpose({ dirty, meta, discard, confirm, pickSettingsFile, exportSettings }
 }
 
 @media (max-width: 760px) {
-  .relation-manager__intro {
+  .relation-panel-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .relation-panel-head .relation-manager__actions {
+    margin-left: 0;
   }
 
   .relation-manager__layout {

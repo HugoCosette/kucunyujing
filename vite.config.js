@@ -146,12 +146,16 @@ function stockingConfigFilePlugin() {
 }
 
 // https://vite.dev/config/
-export default defineConfig(({ command }) => ({
+export default defineConfig(({ command, mode }) => ({
+  // 桌面离线版（--mode desktop）走相对路径 + 独立产物目录，线上 GitHub Pages 构建保持原样。
   // GitHub Pages 项目站点部署在 https://<user>.github.io/<repo>/ 子路径下，
   // 打包产物必须带该前缀；本地 dev / preview 仍走根路径，避免影响日常开发。
   // 若之后改用自定义域名（部署在根路径），把这里改成 '/'。
-  base: command === 'build' ? '/kucunyujing/' : '/',
+  base: command === 'build' ? (mode === 'desktop' ? './' : '/kucunyujing/') : '/',
   plugins: [vue(), stockingConfigFilePlugin()],
+  build: {
+    outDir: mode === 'desktop' ? 'dist-desktop' : 'dist',
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

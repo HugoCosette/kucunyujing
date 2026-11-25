@@ -1,28 +1,88 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { ElMessage, ElOption, ElSelect } from 'element-plus'
+import { ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { usePurchaseStore } from '@/stores/purchase'
-import { buildOrderHistory, filterHistory } from '@/purchase/history'
-import { saveWorkbook } from '@/utils/xlsxWrite'
+import {
+  buildOrderHistory,
+  filterHistory,
+  formatHistoryKg,
+  formatHistoryMoment,
+  percentText,
+  vatTextOf,
+} from '@/purchase/history'
+import { exportOrderWorkbook } from '@/purchase/historyExport'
 
-// 下单历史（只读）：标准订单列表的形制——单一表头 + 批次分组带 + 分订单行。
+// 下单历史：标准订单列表的形制——单一表头 + 批次分组带 + 分订单行。
 // 分组带是一整条横带（不重复表头），点它整组收放；子行只有一套列，不再套第二张表。
-// 所有数字由订单流水派生；到货 / 改单 / 作废只在主面板的订单弹窗里做，这一页不提供写入口。
+// 所有数字由订单流水派生；物理删除会同步移除该单的到货 / 改单记录。
 // 它是「采购下单」页的子面板（`/purchase/history`），外壳与标签页由 PurchaseOrderView 提供。
-const COLUMN_COUNT = 12
+const COLUMN_COUNT = 13
 
 const purchaseStore = usePurchaseStore()
 
 const keyword = ref('')
+const dateScope = ref('all')
 const monthFilter = ref('all')
+const dayFilter = ref('')
+const rangeStart = ref('')
+const rangeEnd = ref('')
 const statusFilter = ref('active')
 const expandedKeys = ref(new Set())
 
 const history = computed(() => buildOrderHistory(purchaseStore.orders?.orders ?? []))
+
+function todayKey() {
+  return new Date().toLocaleDateString('sv-SE')
+}
+
+// 日期筛选只认本地日：界面上的「确认时间」也是本地时间，两边必须是同一个口径。
+function monthBounds(month) {
+  const value = String(month ?? '').trim()
+  if (!/^\d{4}-\d{2}$/.test(value)) return { from: '', to: '' }
+  const [year, monthIndex] = value.split('-').map(Number)
+  const lastDay = new Date(year, monthIndex, 0).getDate()
+  return { from: `${value}-01`, to: `${value}-${String(lastDay).padStart(2, '0')}` }
+}
+
+const dateWindow = computed(() => {
+  if (dateScope.value === 'month') return monthBounds(monthFilter.value)
+  if (dateScope.value === 'day') {
+    const day = String(dayFilter.value ?? '').trim()
+    return { from: day, to: day }
+  }
+  if (dateScope.value === 'range') {
+    return {
+      from: String(rangeStart.value ?? '').trim(),
+      to: String(rangeEnd.value ?? '').trim(),
+    }
+  }
+  return { from: '', to: '' }
+})
+
+const dateLabel = computed(() => {
+  const { from, to } = dateWindow.value
+  if (!from && !to) return '全部日期'
+  if (from && to && from === to) return from
+  return `${from || '最早'}~${to || '最新'}`
+})
+
+watch(dateScope, (scope) => {
+  if (scope === 'month' && monthFilter.value === 'all') {
+    monthFilter.value = history.value.months[0] ?? 'all'
+  }
+  if (scope === 'day' && !dayFilter.value) dayFilter.value = todayKey()
+  if (scope === 'range' && !rangeStart.value) {
+    const now = new Date()
+    rangeStart.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+    rangeEnd.value = todayKey()
+  }
+})
+
 const filtered = computed(() =>
   filterHistory(history.value, {
     keyword: keyword.value,
-    month: monthFilter.value,
+    from: dateWindow.value.from,
+    to: dateWindow.value.to,
     status: statusFilter.value,
   }),
 )
@@ -59,39 +119,6 @@ function toggleAll() {
   expandedKeys.value = allExpanded.value ? new Set() : new Set(batches.value.map((b) => b.key))
 }
 
-function pad(value) {
-  return String(value).padStart(2, '0')
-}
-
-function formatMoment(value) {
-  const stamp = Date.parse(value ?? '')
-  if (!Number.isFinite(stamp)) return '—'
-  const date = new Date(stamp)
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}`
-}
-
-function formatNumber(value) {
-  const amount = Number(value)
-  if (!Number.isFinite(amount)) return '—'
-  return amount.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
-}
-
-function percentOf(progress) {
-  return `${Math.round(Math.min(1, Math.max(0, Number(progress) || 0)) * 100)}%`
-}
-
-function vatText(row) {
-  if (row.quantityMode === 'kg') return '按公斤'
-  if (row.quantityMode === 'vat') {
-    if (row.vatCount && row.kgPerVat) return `${row.vatCount} 缸 × ${row.kgPerVat} 公斤/缸`
-    return '按缸（缸规未完整）'
-  }
-  if (row.vatCount && row.kgPerVat) return `按缸 · ${row.vatCount} × ${row.kgPerVat}`
-  return '—'
-}
-
 // 状态一律用「圆点 + 文字」：满屏彩块会让人找不到重点。
 function stateTone(entry) {
   if (entry.cancelled) return 'cancelled'
@@ -99,72 +126,94 @@ function stateTone(entry) {
   return entry.receiveState
 }
 
+function ordersForBatch(batchId) {
+  const key = String(batchId ?? '').trim()
+  return (purchaseStore.orders?.orders ?? []).filter(
+    (order) => (String(order.batchId ?? '').trim() || String(order.id ?? '').trim()) === key,
+  )
+}
+
+function deletionImpact(orders) {
+  const activeOrders = orders.filter((order) => order.status !== 'cancelled')
+  const received = activeOrders.reduce((sum, order) => sum + (Number(order.receivedQty) || 0), 0)
+  const receiptCount = orders.reduce(
+    (sum, order) => sum + (Array.isArray(order.receipts) ? order.receipts.length : 0),
+    0,
+  )
+  const revisionCount = orders.reduce(
+    (sum, order) => sum + (Array.isArray(order.revisions) ? order.revisions.length : 0),
+    0,
+  )
+  const relatedRecords =
+    receiptCount || revisionCount
+      ? `关联的 ${receiptCount} 条到货记录和 ${revisionCount} 条改单记录也会一并永久删除。`
+      : ''
+  const stockEffect = activeOrders.length
+    ? '删除后会从下单统计中移除。'
+    : '这些订单已作废，删除历史记录不会再次回补需安排。'
+  const receivedEffect =
+    received > 0
+      ? `其中已登记到货 ${formatHistoryKg(received)} 公斤；删除后订单到货统计会减少，导入的在仓库存数据不会改动。`
+      : ''
+  return [stockEffect, receivedEffect, relatedRecords].filter(Boolean).join('\n')
+}
+
+async function handleDeleteOrder(row) {
+  const order = (purchaseStore.orders?.orders ?? []).find((entry) => entry.id === row.id)
+  if (!order) return
+  try {
+    await ElMessageBox.confirm(
+      `确定永久删除「${row.product || row.skuId} ${row.color} · ${row.factoryName}」？\n${deletionImpact([order])}`,
+      '删除分订单',
+      { type: 'warning', confirmButtonText: '永久删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const removed = purchaseStore.removeOrder(row.id)
+  if (!removed) {
+    ElMessage.warning('该分订单已不存在')
+    return
+  }
+  void purchaseStore.flushOrders()
+  ElMessage.success('分订单及关联数据已删除')
+}
+
+async function handleDeleteBatch(batch) {
+  const orders = ordersForBatch(batch.batchId)
+  if (!orders.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确定永久删除批次「${batch.code}」及其全部 ${orders.length} 张分订单？\n${deletionImpact(orders)}\n同日剩余批次号会按现有流水重新顺排。`,
+      '删除总订单',
+      { type: 'warning', confirmButtonText: '永久删除整批', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const removed = purchaseStore.removeBatchOrders(batch.batchId)
+  if (!removed.length) {
+    ElMessage.warning('该批次已不存在')
+    return
+  }
+  void purchaseStore.flushOrders()
+  ElMessage.success(`已删除批次及 ${removed.length} 张分订单`)
+}
+
 function handleExport() {
   if (!batches.value.length) return
 
-  const batchRows = [
-    ['批次号', '确认时间', '月份', 'SKU 数', '分订单', '作废单', '下单（kg）', '已到货（kg）', '待收（kg）', '到货进度', '状态'],
-    ...batches.value.map((batch) => [
-      batch.code,
-      formatMoment(batch.submittedAt),
-      batch.month,
-      batch.skuCount,
-      batch.orderCount,
-      batch.cancelledCount,
-      batch.quantity,
-      batch.received,
-      batch.pending,
-      percentOf(batch.progress),
-      batch.stateLabel,
-    ]),
-  ]
-
-  const orderRows = [
-    ['批次号', '确认时间', '品名', '颜色', '唯一标识', '染厂', '分单人员', '下单方式 / 缸型', '下单（kg）', '已到货（kg）', '待收（kg）', '状态', '到货记录', '撤回记录', '改单次数', '备注'],
-  ]
-  for (const batch of batches.value) {
-    for (const row of batch.orders) {
-      orderRows.push([
-        batch.code,
-        formatMoment(row.submittedAt),
-        row.product,
-        row.color,
-        row.skuId,
-        row.factoryName,
-        row.assignee,
-        vatText(row),
-        row.quantity,
-        row.received,
-        row.pending,
-        row.stateLabel,
-        row.receiptCount,
-        row.voidedReceiptCount,
-        row.revisionCount,
-        row.note,
-      ])
-    }
-  }
-
   try {
-    const timestamp = new Date().toLocaleString('sv-SE').replace(/[: ]/g, '-')
-    saveWorkbook(
-      [
-        { name: '批次汇总', rows: batchRows, widths: [18, 18, 10, 8, 9, 9, 12, 12, 12, 10, 16] },
-        {
-          name: '分订单明细',
-          rows: orderRows,
-          widths: [18, 18, 22, 16, 20, 16, 12, 20, 12, 12, 12, 14, 10, 10, 10, 24],
-        },
-      ],
-      `下单历史-${timestamp}.xlsx`,
-    )
-    ElMessage.success(`已导出 ${batches.value.length} 个批次 / ${totals.value.orderCount} 张分订单`)
+    const { batchCount, orderCount } = exportOrderWorkbook(batches.value, {
+      baseName: '下单历史',
+      scopeLabel: dateLabel.value === '全部日期' ? '' : dateLabel.value.replace('~', '_'),
+    })
+    ElMessage.success(`已导出 ${batchCount} 个批次 / ${orderCount} 张分订单`)
   } catch (error) {
     console.error('Failed to export order history', error)
     ElMessage.error(`导出失败：${error instanceof Error ? error.message : '未知错误'}`)
   }
-}
-</script>
+}</script>
 
 <template>
   <section class="history-panel">
@@ -177,10 +226,28 @@ function handleExport() {
           placeholder="搜索批次号 / 品名 / 颜色 / 染厂"
         />
       </label>
-      <ElSelect v-model="monthFilter" size="small" class="history-select">
+      <ElSelect v-model="dateScope" size="small" class="history-select history-select--scope">
+        <ElOption label="全部日期" value="all" />
+        <ElOption label="按月" value="month" />
+        <ElOption label="按日" value="day" />
+        <ElOption label="自定义范围" value="range" />
+      </ElSelect>
+      <ElSelect v-if="dateScope === 'month'" v-model="monthFilter" size="small" class="history-select">
         <ElOption label="全部月份" value="all" />
         <ElOption v-for="month in history.months" :key="month" :label="month" :value="month" />
       </ElSelect>
+      <input
+        v-else-if="dateScope === 'day'"
+        v-model="dayFilter"
+        class="input history-date"
+        type="date"
+        aria-label="按日筛选"
+      />
+      <span v-else-if="dateScope === 'range'" class="history-range">
+        <input v-model="rangeStart" class="input history-date" type="date" aria-label="开始日期" />
+        <span class="history-range__dash">至</span>
+        <input v-model="rangeEnd" class="input history-date" type="date" aria-label="结束日期" />
+      </span>
       <ElSelect v-model="statusFilter" size="small" class="history-select">
         <ElOption label="有效单" value="active" />
         <ElOption label="已作废" value="cancelled" />
@@ -194,6 +261,7 @@ function handleExport() {
           type="button"
           class="btn btn--sm btn--primary"
           :disabled="!batches.length"
+          :title="`导出「${dateLabel}」的下单记录（批次汇总 + 分订单明细）`"
           @click="handleExport"
         >
           导出 Excel
@@ -216,6 +284,7 @@ function handleExport() {
           <col style="width: 84px" />
           <col style="width: 104px" />
           <col />
+          <col style="width: 84px" />
         </colgroup>
         <thead>
           <tr>
@@ -231,6 +300,7 @@ function handleExport() {
             <th>状态</th>
             <th class="is-num">到货 / 改动</th>
             <th>备注</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -241,21 +311,21 @@ function handleExport() {
                   <span class="group-caret" aria-hidden="true">▶</span>
                   <b class="group-code">{{ batch.code }}</b>
                   <span class="group-meta">
-                    {{ formatMoment(batch.submittedAt) }} · {{ batch.skuCount }} SKU ·
+                    {{ formatHistoryMoment(batch.submittedAt) }} · {{ batch.skuCount }} SKU ·
                     {{ batch.orderCount }} 单
                     <template v-if="batch.cancelledCount"> · 作废 {{ batch.cancelledCount }}</template>
                   </span>
                 </div>
               </td>
-              <td class="is-num">{{ formatNumber(batch.quantity) }}</td>
+              <td class="is-num">{{ formatHistoryKg(batch.quantity) }}</td>
               <td class="is-num" :class="{ 'cell-dim': !(batch.received > 0) }">
-                {{ formatNumber(batch.received) }}
+                {{ formatHistoryKg(batch.received) }}
               </td>
               <td class="is-num" :class="{ 'cell-dim': !(batch.pending > 0) }">
-                {{ formatNumber(batch.pending) }}
+                {{ formatHistoryKg(batch.pending) }}
               </td>
               <td>
-                <span class="progress-value">{{ percentOf(batch.progress) }}</span>
+                <span class="progress-value">{{ percentText(batch.progress) }}</span>
               </td>
               <td>
                 <span class="state" :class="`state--${stateTone(batch)}`">
@@ -270,6 +340,16 @@ function handleExport() {
                 </div>
               </td>
               <td />
+              <td class="history-action-cell">
+                <button
+                  type="button"
+                  class="btn btn--text btn--sm history-delete"
+                  aria-label="删除整个批次"
+                  @click.stop="handleDeleteBatch(batch)"
+                >
+                  删批次
+                </button>
+              </td>
             </tr>
 
             <template v-if="isExpanded(batch.key)">
@@ -285,16 +365,16 @@ function handleExport() {
                 <td class="cell-text" :title="row.color">{{ row.color || '—' }}</td>
                 <td class="cell-text">{{ row.factoryName }}</td>
                 <td class="cell-text">{{ row.assignee || '—' }}</td>
-                <td class="cell-text cell-dim">{{ vatText(row) }}</td>
-                <td class="is-num">{{ formatNumber(row.quantity) }}</td>
+                <td class="cell-text cell-dim">{{ vatTextOf(row) }}</td>
+                <td class="is-num">{{ formatHistoryKg(row.quantity) }}</td>
                 <td class="is-num" :class="{ 'cell-dim': !(row.received > 0) }">
-                  {{ formatNumber(row.received) }}
+                  {{ formatHistoryKg(row.received) }}
                 </td>
                 <td class="is-num" :class="{ 'cell-dim': !(row.pending > 0) }">
-                  {{ row.cancelled ? '—' : formatNumber(row.pending) }}
+                  {{ row.cancelled ? '—' : formatHistoryKg(row.pending) }}
                 </td>
                 <td>
-                  <span class="progress-value">{{ row.cancelled ? '—' : percentOf(row.progress) }}</span>
+                  <span class="progress-value">{{ row.cancelled ? '—' : percentText(row.progress) }}</span>
                 </td>
                 <td>
                   <span class="state" :class="`state--${stateTone(row)}`">
@@ -309,6 +389,16 @@ function handleExport() {
                   </div>
                 </td>
                 <td class="cell-note" :title="row.note">{{ row.note }}</td>
+                <td class="history-action-cell">
+                  <button
+                    type="button"
+                    class="btn btn--text btn--sm history-delete"
+                    :aria-label="`删除 ${row.product || row.skuId} 的分订单`"
+                    @click="handleDeleteOrder(row)"
+                  >
+                    删除
+                  </button>
+                </td>
               </tr>
             </template>
           </template>
@@ -316,17 +406,17 @@ function handleExport() {
           <tr v-if="!batches.length">
             <td :colspan="COLUMN_COUNT" class="history-empty">
               <b>没有符合条件的下单记录</b>
-              <span>换个关键词，或把状态切到「全部状态」看已作废的单</span>
+              <span>换个关键词或日期范围，或把状态切到「全部状态」看已作废的单</span>
             </td>
           </tr>
         </tbody>
         <tfoot v-if="batches.length">
           <tr>
             <td :colspan="5">合计 · {{ totals.batchCount }} 个批次 / {{ totals.orderCount }} 张分订单</td>
-            <td class="is-num">{{ formatNumber(totals.quantity) }}</td>
-            <td class="is-num">{{ formatNumber(totals.received) }}</td>
-            <td class="is-num">{{ formatNumber(totals.pending) }}</td>
-            <td :colspan="4" />
+            <td class="is-num">{{ formatHistoryKg(totals.quantity) }}</td>
+            <td class="is-num">{{ formatHistoryKg(totals.received) }}</td>
+            <td class="is-num">{{ formatHistoryKg(totals.pending) }}</td>
+            <td :colspan="5" />
           </tr>
         </tfoot>
       </table>
@@ -353,11 +443,40 @@ function handleExport() {
   width: 112px;
 }
 
+.history-select--scope {
+  width: 118px;
+}
+
+/* 日期用原生 input[type=date]：与这一页其它 input 同一套 .input 样式，不多引组件样式 */
+.history-date {
+  width: 142px;
+}
+
+.history-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-range__dash {
+  color: var(--industrial-muted);
+  font-size: 11.5px;
+}
+
 .history-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   white-space: nowrap;
+}
+
+.history-action-cell {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.history-delete {
+  color: var(--industrial-danger, #b5473c);
 }
 
 .history-scroll {

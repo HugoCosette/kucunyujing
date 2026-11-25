@@ -140,8 +140,41 @@ const JOINS = [
         },
         // 月销量（公斤）：码 → 出库码数 ÷ 出码率；公斤 → 原值
         { field: '出库数量', as: '{月}月销量', toKilogram: true, digits: 2 },
+        // 截至该月的累积销量（公斤，含往年）：跨年按月份累加，由聚合器在 finish 时派生
+        {
+          field: '出库数量',
+          as: '{月}月累计销量',
+          toKilogram: true,
+          digits: 2,
+          cumulativeSales: true,
+        },
+        // 截至该月的累积条数（含往年）：与「累积条数」同口径，按单位换算系数累加，由聚合器在 finish 时派生
+        {
+          field: '出库数量',
+          as: '{月}月累计条数',
+          divideBy: { field: '单位', map: { 码: 100, 公斤: 20 } },
+          digits: 0,
+          cumulativeCount: true,
+        },
         // 该月订单数 = 该月有效行数（1 行 = 1 单，与订单总数同口径）
         { as: '{月}月订单数', agg: 'rows' },
+        // 截至该月的累计订单数（含往年）：与「订单总数」同口径，由聚合器在 finish 时派生
+        { as: '{月}月累计订单数', agg: 'rows', digits: 0, cumulativeOrders: true },
+        // 该月去重客户数：明细没有「客户」列时整列 0
+        { field: '客户', as: '{月}月客户数', agg: 'distinct', optional: true },
+        // 截至该月的去重客户数（含往年客户）：跨月看首见月，由聚合器在 finish 时派生
+        { field: '客户', as: '{月}月累计客户数', cumulativeCustomers: true, optional: true },
+        // 该月销量前 5 客户占比（0~1）；当月没有销量时留空，避免折线掉到 0
+        {
+          field: '出库数量',
+          as: '{月}月客户CR5率',
+          agg: 'topShare',
+          top: 5,
+          customerField: '客户',
+          digits: 4,
+          default: null,
+          optional: true,
+        },
       ],
     },
   },
@@ -668,10 +701,41 @@ function createBaseBuilder(source) {
   return { add, finish }
 }
 
+/** 按月累计列：累计销量（公斤）/ 累计条数 / 累计订单，值由 cumulativeRowValue 决定 */
+function isCumulativeValueColumn(column) {
+  return Boolean(column.cumulativeSales || column.cumulativeCount || column.cumulativeOrders)
+}
+
+/** 按月累计的口径：同口径的 12 个月共用一个累加器 */
+function cumulativeKind(column) {
+  if (column.cumulativeSales) return 'sales'
+  if (column.cumulativeCount) return 'count'
+  if (column.cumulativeOrders) return 'orders'
+  return ''
+}
+
+/** 一行给累计列贡献多少：销量按公斤、条数按原始出库数量、订单按 1 单 */
+function cumulativeRowValue(column, row) {
+  if (column.cumulativeOrders) return 1
+  if (column.cumulativeCount) return toNumber(row[column.field])
+  return toKilogram(row, column)
+}
+
 /** 分表：按唯一标识分组汇总 */
 function createAggregator(source, base) {
   const resolver = createKeyResolver(base, source)
-  const stateColumns = source.columns.filter((column) => !column.divideFrom)
+  // 累计客户按月列要跨月看客户首见月，finish 时再派生
+  const cumulativeCustomerColumns = source.columns.filter((column) => column.cumulativeCustomers)
+  // 其余按月累计列（销量 / 条数 / 订单）同理：跨年攒值，finish 时扣掉「本月之后」再换算
+  const cumulativeColumns = source.columns.filter(isCumulativeValueColumn)
+  const cumulativeKinds = [...new Set(cumulativeColumns.map(cumulativeKind))]
+  const cumulativeSample = new Map(
+    cumulativeColumns.map((column) => [cumulativeKind(column), column]),
+  )
+  const stateColumns = source.columns.filter(
+    (column) =>
+      !column.divideFrom && !column.cumulativeCustomers && !isCumulativeValueColumn(column),
+  )
   const divideFields = [
     ...new Set(source.columns.filter((column) => column.divideBy).map((column) => column.divideBy.field)),
   ]
@@ -681,6 +745,9 @@ function createAggregator(source, base) {
   const monthlyColumns = stateColumns.filter((column) => column.month !== undefined)
   const states = new Map() // key → 普通列状态
   const monthlyStates = new Map() // key → Map(年份 → 按月列状态)
+  const customerFirstMonths = new Map() // key → Map(客户 → 首见月索引 年*12+月)
+  const cumulativeTotals = new Map() // `${口径}|${key}` → 全历史值（逐行累加，末月与卡片同值）
+  const cumulativeByMonth = new Map() // `${口径}|${key}` → Map(月索引 年*12+月 → 值)
   const contexts = new Map() // key → { 换算依据列名: 值 }，供 divideBy 使用
   const monthlyDateField = source.monthlyColumns?.dateField ?? null
   const fixedMonthlyYear = source.monthlyColumns?.year ?? null
@@ -713,29 +780,61 @@ function createAggregator(source, base) {
       })
     }
 
+    const parsedMonth = monthlyDateField ? toYearMonth(row[monthlyDateField]) : null
+
     // 按月列：只累计目标年份（未指定年份时按记录自身的年份分桶）
-    if (monthlyDateField && monthlyColumns.length) {
-      const parsed = toYearMonth(row[monthlyDateField])
-      if (parsed && (fixedMonthlyYear === null || parsed.year === fixedMonthlyYear)) {
-        seenYears.add(parsed.year)
+    if (parsedMonth && (monthlyColumns.length || cumulativeCustomerColumns.length)) {
+      if (fixedMonthlyYear === null || parsedMonth.year === fixedMonthlyYear) {
+        seenYears.add(parsedMonth.year)
         let perYear = monthlyStates.get(key)
         if (!perYear) {
           perYear = new Map()
           monthlyStates.set(key, perYear)
         }
-        let current = perYear.get(parsed.year)
+        let current = perYear.get(parsedMonth.year)
         if (!current) {
           current = monthlyColumns.map((column) => initState(column))
-          perYear.set(parsed.year, current)
+          perYear.set(parsedMonth.year, current)
         }
         monthlyColumns.forEach((column, i) => {
-          if (column.month !== parsed.month) return
+          if (column.month !== parsedMonth.month) return
           if (column.onlyUnits && !column.onlyUnits.include.includes(textValue(row[column.onlyUnits.field]))) {
             return
           }
           current[i] = updateState(column, current[i], row)
         })
       }
+    }
+
+    // 客户首见月要跨年看（累计客户数含往年客户），所以不受上面「只统计最新一年」的限制
+    if (cumulativeCustomerColumns.length && parsedMonth) {
+      const customer = textValue(row[cumulativeCustomerColumns[0].field])
+      if (customer) {
+        let firstMonths = customerFirstMonths.get(key)
+        if (!firstMonths) {
+          firstMonths = new Map()
+          customerFirstMonths.set(key, firstMonths)
+        }
+        const monthIndex = parsedMonth.year * 12 + parsedMonth.month
+        const seen = firstMonths.get(customer)
+        if (seen === undefined || monthIndex < seen) firstMonths.set(customer, monthIndex)
+      }
+    }
+
+    // 累计销量 / 条数 / 订单都要含往年：按行顺序攒全历史总量（与卡片同一次累加），
+    // 再按月攒一份，finish 时用「全历史 − 本月之后」得出截至当月，末月必然等于卡片值
+    for (const kind of cumulativeKinds) {
+      const value = cumulativeRowValue(cumulativeSample.get(kind), row)
+      const id = `${kind}|${key}`
+      cumulativeTotals.set(id, (cumulativeTotals.get(id) || 0) + value)
+      if (!parsedMonth || value === 0) continue
+      let byMonth = cumulativeByMonth.get(id)
+      if (!byMonth) {
+        byMonth = new Map()
+        cumulativeByMonth.set(id, byMonth)
+      }
+      const monthIndex = parsedMonth.year * 12 + parsedMonth.month
+      byMonth.set(monthIndex, (byMonth.get(monthIndex) || 0) + value)
     }
 
     if (divideFields.length) {
@@ -785,6 +884,42 @@ function createAggregator(source, base) {
             contexts.get(key),
           )
         })
+      }
+      // 累计客户数：首见月 ≤ 当月即计入；往年客户在 1 月就已算进来，末月与「累计客户」一致
+      if (cumulativeCustomerColumns.length) {
+        const firstMonths = customerFirstMonths.get(key)
+        for (const column of cumulativeCustomerColumns) {
+          let count = 0
+          if (firstMonths && Number.isFinite(monthlyYear)) {
+            const monthIndex = monthlyYear * 12 + column.month
+            for (const seen of firstMonths.values()) {
+              if (seen <= monthIndex) count += 1
+            }
+          }
+          values[column.as] = count
+        }
+      }
+      // 累计销量 / 条数 / 订单：全历史总量扣掉「本月之后」的月份，再按各自口径换算；
+      // 末月扣不到任何月份，与卡片的全历史值（累积销量 / 累积条数 / 订单总数）必定一致
+      if (cumulativeColumns.length) {
+        for (const column of cumulativeColumns) {
+          const id = `${cumulativeKind(column)}|${key}`
+          const byMonth = cumulativeByMonth.get(id)
+          let future = 0
+          if (byMonth && Number.isFinite(monthlyYear)) {
+            const limit = monthlyYear * 12 + column.month
+            for (const [monthIndex, value] of byMonth) {
+              if (monthIndex > limit) future += value
+            }
+          }
+          // 没有可解析的月份时（整表日期异常）沿用旧口径：按月列一律 0
+          const total = Number.isFinite(monthlyYear) ? (cumulativeTotals.get(id) ?? 0) : 0
+          const divisor = column.divideBy
+            ? resolveDivisor(column.divideBy, contexts.get(key))
+            : 1
+          values[column.as] =
+            divisor === null ? 0 : round((total - future) / divisor, column.digits ?? 2)
+        }
       }
       // 由同表其它列换算出来的列（如 周消耗 = 月均条数 ÷ 4，月均条数 = 累积条数 ÷ 动销月份）
       for (const column of source.columns) {

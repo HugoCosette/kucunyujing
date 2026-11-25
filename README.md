@@ -59,3 +59,16 @@ npm run build
 - 工作流会把 `dist/index.html` 复制成 `dist/404.html`，让 `/kucunyujing/config` 这类深链接刷新后仍能正常打开。
 - 配置文件只在开发态写回 `src/stocking/config.json`；线上环境保存只写入浏览器 localStorage，
   每个访问者的配置/导入数据互相独立，不会影响他人。
+
+## Windows 离线桌面版
+
+需要内网 / 无网络单机使用时，可用 Electron 打成本地程序，数据仍只存本机：
+
+```sh
+npm run desktop:dev    # 桌面开发（改代码热更新）
+npm run pack:win       # 生成安装包 release/kucunyujing-<版本>-setup.exe
+npm run web-update     # 生成前端更新包，覆盖 resources/web 即更新，不重装不丢数据
+```
+
+线上构建（`npm run build` → `dist/`，`base` 为 `/kucunyujing/`）不受影响，两套构建互相隔离。
+命令细节、数据位置、常见坑与手验清单见 [离线打包说明.md](./docs/功能说明/离线打包说明.md)。

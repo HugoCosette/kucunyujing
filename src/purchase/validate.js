@@ -216,7 +216,7 @@ function normalizeReceipt(receipt, index) {
   }
 }
 
-// 一张分订单 = SKU × 染厂的一行流水，只追加、不物理删除。
+// 一张分订单 = SKU × 染厂的一行流水；日常追加 / 修改留痕，历史页支持显式物理删除。
 // receivedQty 一律由 receipts 求和派生，不信任外部传入的旧值。
 function normalizeOrder(order, index) {
   if (!order || typeof order !== 'object') return null

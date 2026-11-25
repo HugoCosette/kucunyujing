@@ -1,6 +1,7 @@
 import fileSettings from './settings.json'
 import fileOrders from './orders.json'
 import { normalizeOrders, normalizeSettings } from './validate.js'
+import { defaultSkuAliases } from '@/data/inventoryItems'
 import { DOC_KEY_ORDERS, writeDocument } from '@/data/repo.js'
 
 // 与 src/stocking 同一套持久化策略：JSON 源文件是默认值，开发态设置写回磁盘，
@@ -19,6 +20,32 @@ const ORDERS_CACHE_LIMIT = 1024 * 1024
 
 let currentSettings = null
 let currentOrders = null
+
+function normalizePurchaseOrders(value, options) {
+  if (!value || typeof value !== 'object') return normalizeOrders(value, options)
+
+  const drafts = Object.fromEntries(
+    Object.entries(value.drafts ?? {}).map(([skuId, entries]) => [
+      defaultSkuAliases.get(skuId)?.skuId ?? skuId,
+      entries,
+    ]),
+  )
+  const orders = Array.isArray(value.orders)
+    ? value.orders.map((order) => {
+        const details = defaultSkuAliases.get(order?.skuId)
+        return details
+          ? {
+              ...order,
+              skuId: details.skuId,
+              product: order.product || details.product,
+              color: order.color || details.color,
+            }
+          : order
+      })
+    : value.orders
+
+  return normalizeOrders({ ...value, drafts, orders }, options)
+}
 
 function readCache(storageKey, normalize) {
   try {
@@ -99,8 +126,8 @@ export function setSettingsRuntime(settings) {
 export function loadOrders() {
   if (currentOrders) return currentOrders
 
-  const fileSnapshot = normalizeOrders(fileOrders)
-  const cached = readCache(ORDERS_STORAGE_KEY, normalizeOrders)
+  const fileSnapshot = normalizePurchaseOrders(fileOrders)
+  const cached = readCache(ORDERS_STORAGE_KEY, normalizePurchaseOrders)
   currentOrders = cached && stampOf(cached) > stampOf(fileSnapshot) ? cached : fileSnapshot
   return currentOrders
 }
@@ -110,7 +137,7 @@ export function getOrders() {
 }
 
 export function setOrdersRuntime(orders) {
-  currentOrders = normalizeOrders(orders)
+  currentOrders = normalizePurchaseOrders(orders)
   return currentOrders
 }
 
@@ -126,7 +153,7 @@ export async function saveSettings(settings) {
 // 保存：先更新运行时，再落 IndexedDB（唯一真相），开发态顺手写回 src/purchase/orders.json。
 // persisted=false 表示本机数据没存住（例如隐私模式禁用 IndexedDB），调用方要提示用户。
 export async function saveOrders(orders) {
-  const next = normalizeOrders({ ...orders, updatedAt: new Date().toISOString() })
+  const next = normalizePurchaseOrders({ ...orders, updatedAt: new Date().toISOString() })
   currentOrders = next
   writeCache(ORDERS_STORAGE_KEY, next, { limit: ORDERS_CACHE_LIMIT })
   const persisted = await persistOrdersDocument(next)
@@ -153,5 +180,5 @@ export function importSettingsFile(textContent) {
 }
 
 export function exportOrdersFile(orders) {
-  downloadJson(ORDERS_FILE_NAME, normalizeOrders(orders))
+  downloadJson(ORDERS_FILE_NAME, normalizePurchaseOrders(orders))
 }

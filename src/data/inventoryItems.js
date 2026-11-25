@@ -1,3 +1,5 @@
+import { composeProductColorSkuId } from '@/utils/inventory'
+
 const demoSeedItems = [
   { id: 1, category: '黑白', product: '挪威网', color: '1#黑色', planned: null, producing: 37, inTransitStock: 37, backorder: 0, weeklyUsage: 17.25, warehouseStock: 56, turnoverIn: 0 },
   { id: 2, category: '黑白', product: '挪威网', color: '2#本白', planned: null, producing: 7, inTransitStock: 7, backorder: 0, weeklyUsage: 6.13, warehouseStock: 10, turnoverIn: 0 },
@@ -159,3 +161,14 @@ for (const items of demoItemsByProduct.values()) {
 }
 
 export const initialInventoryItems = expandedDemoItems
+
+export const defaultSkuAliases = new Map()
+for (const item of initialInventoryItems) {
+  const details = {
+    skuId: composeProductColorSkuId(item.product, item.color),
+    product: item.product,
+    color: item.color,
+  }
+  defaultSkuAliases.set(details.skuId, details)
+  defaultSkuAliases.set(`DEMO-${String(item.id).padStart(3, '0')}`, details)
+}

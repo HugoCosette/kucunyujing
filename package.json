@@ -2,11 +2,19 @@
   "name": "kucunyujingdemo",
   "version": "0.0.0",
   "private": true,
+  "description": "布料备货决策系统（Vue 3 + Element Plus），支持网页部署与 Windows 离线桌面版",
+  "author": "kucunyujing",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --open",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "desktop:dev": "node electron/dev.mjs",
+    "build:desktop": "vite build --mode desktop",
+    "web-update": "npm run build:desktop && node electron/make-update.mjs",
+    "pack:win": "npm run build:desktop && electron-builder --win nsis",
+    "pack:win:dir": "npm run build:desktop && electron-builder --win dir"
   },
   "dependencies": {
     "echarts": "^6.1.0",
@@ -18,6 +26,8 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.8",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "vite": "^8.2.2"
   },
   "engines": {

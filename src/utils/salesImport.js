@@ -25,6 +25,16 @@ const MONTH_SALES_PATTERN = /^(\d{1,2})月销量$/
 const MONTH_COUNT_PATTERN = /^(\d{1,2})月条数$/
 const MONTH_WEIGHT_PATTERN = /^(\d{1,2})月重量$/
 const MONTH_ORDER_PATTERN = /^(\d{1,2})月订单数$/
+// 客户维度按月列：当月客户数 / 截至当月累计客户数 / 当月客户CR5率
+const MONTH_CUSTOMER_PATTERN = /^(\d{1,2})月客户数$/
+const MONTH_CUMULATIVE_CUSTOMER_PATTERN = /^(\d{1,2})月累计客户数$/
+const MONTH_CR5_PATTERN = /^(\d{1,2})月客户CR5率$/
+// 销量维度按月列：截至当月累计销量（公斤，含往年）
+const MONTH_CUMULATIVE_SALES_PATTERN = /^(\d{1,2})月累计销量$/
+// 条数维度按月列：截至当月累计条数（含往年）
+const MONTH_CUMULATIVE_COUNT_PATTERN = /^(\d{1,2})月累计条数$/
+// 订单维度按月列：截至当月累计订单数（含往年）
+const MONTH_CUMULATIVE_ORDER_PATTERN = /^(\d{1,2})月累计订单数$/
 const EMPTY_QUANTITY_TOKENS = new Set(['', '--', '-', '—', '缺省', 'null'])
 const HEADER_SCAN_ROWS = 10
 
@@ -48,6 +58,12 @@ function locateHeader(rows) {
     const weightIndexes = new Map()
     const salesIndexes = new Map()
     const orderIndexes = new Map()
+    const customerIndexes = new Map()
+    const cumulativeCustomerIndexes = new Map()
+    const cr5MonthIndexes = new Map()
+    const cumulativeSalesMonthIndexes = new Map()
+    const cumulativeCountMonthIndexes = new Map()
+    const cumulativeOrderMonthIndexes = new Map()
     const metricIndexes = new Map()
     let cr5Index = -1
     let cumulativeSalesIndex = -1
@@ -92,6 +108,24 @@ function locateHeader(rows) {
         return
       }
 
+      const cumulativeSalesMatch = MONTH_CUMULATIVE_SALES_PATTERN.exec(label)
+      if (cumulativeSalesMatch) {
+        const month = Number(cumulativeSalesMatch[1])
+        if (month >= 1 && month <= 12 && !cumulativeSalesMonthIndexes.has(month)) {
+          cumulativeSalesMonthIndexes.set(month, cellIndex)
+        }
+        return
+      }
+
+      const cumulativeCountMatch = MONTH_CUMULATIVE_COUNT_PATTERN.exec(label)
+      if (cumulativeCountMatch) {
+        const month = Number(cumulativeCountMatch[1])
+        if (month >= 1 && month <= 12 && !cumulativeCountMonthIndexes.has(month)) {
+          cumulativeCountMonthIndexes.set(month, cellIndex)
+        }
+        return
+      }
+
       const countMatch = MONTH_COUNT_PATTERN.exec(label)
       if (countMatch) {
         const month = Number(countMatch[1])
@@ -116,6 +150,43 @@ function locateHeader(rows) {
         if (month >= 1 && month <= 12 && !orderIndexes.has(month)) {
           orderIndexes.set(month, cellIndex)
         }
+        return
+      }
+
+      const cumulativeOrderMatch = MONTH_CUMULATIVE_ORDER_PATTERN.exec(label)
+      if (cumulativeOrderMatch) {
+        const month = Number(cumulativeOrderMatch[1])
+        if (month >= 1 && month <= 12 && !cumulativeOrderMonthIndexes.has(month)) {
+          cumulativeOrderMonthIndexes.set(month, cellIndex)
+        }
+        return
+      }
+
+      // 先匹配「N月累计客户数」再匹配「N月客户数」，否则前者会被后者吃掉
+      const cumulativeCustomerMatch = MONTH_CUMULATIVE_CUSTOMER_PATTERN.exec(label)
+      if (cumulativeCustomerMatch) {
+        const month = Number(cumulativeCustomerMatch[1])
+        if (month >= 1 && month <= 12 && !cumulativeCustomerIndexes.has(month)) {
+          cumulativeCustomerIndexes.set(month, cellIndex)
+        }
+        return
+      }
+
+      const customerMatch = MONTH_CUSTOMER_PATTERN.exec(label)
+      if (customerMatch) {
+        const month = Number(customerMatch[1])
+        if (month >= 1 && month <= 12 && !customerIndexes.has(month)) {
+          customerIndexes.set(month, cellIndex)
+        }
+        return
+      }
+
+      const cr5MonthMatch = MONTH_CR5_PATTERN.exec(label)
+      if (cr5MonthMatch) {
+        const month = Number(cr5MonthMatch[1])
+        if (month >= 1 && month <= 12 && !cr5MonthIndexes.has(month)) {
+          cr5MonthIndexes.set(month, cellIndex)
+        }
       }
     })
 
@@ -129,6 +200,12 @@ function locateHeader(rows) {
         weightIndexes,
         salesIndexes,
         orderIndexes,
+        customerIndexes,
+        cumulativeCustomerIndexes,
+        cr5MonthIndexes,
+        cumulativeSalesMonthIndexes,
+        cumulativeCountMonthIndexes,
+        cumulativeOrderMonthIndexes,
         metricIndexes,
         cr5Index,
         cumulativeSalesIndex,
@@ -181,15 +258,30 @@ export function parseSalesSheet(rows) {
     weightIndexes,
     salesIndexes,
     orderIndexes,
+    customerIndexes,
+    cumulativeCustomerIndexes,
+    cr5MonthIndexes,
+    cumulativeSalesMonthIndexes,
+    cumulativeCountMonthIndexes,
+    cumulativeOrderMonthIndexes,
     metricIndexes,
     cr5Index,
     cumulativeSalesIndex,
   } = header
   const hasMonthColumns =
-    countIndexes.size > 0 || weightIndexes.size > 0 || salesIndexes.size > 0 || orderIndexes.size > 0
+    countIndexes.size > 0 ||
+    weightIndexes.size > 0 ||
+    salesIndexes.size > 0 ||
+    orderIndexes.size > 0 ||
+    customerIndexes.size > 0 ||
+    cumulativeCustomerIndexes.size > 0 ||
+    cr5MonthIndexes.size > 0 ||
+    cumulativeSalesMonthIndexes.size > 0 ||
+    cumulativeCountMonthIndexes.size > 0 ||
+    cumulativeOrderMonthIndexes.size > 0
   if (!hasMonthColumns && metricIndexes.size === 0 && cr5Index < 0) {
     throw new Error(
-      '未找到销售数据列：需要“N月条数”“N月重量”“N月订单数”“客户CR5率”或动销指标列',
+      '未找到销售数据列：需要“N月条数”“N月重量”“N月销量”“N月累计销量”“N月累计条数”“N月订单数”“N月累计订单数”“N月客户数”“N月客户CR5率”“客户CR5率”或动销指标列',
     )
   }
 
@@ -229,6 +321,12 @@ export function parseSalesSheet(rows) {
     const counts = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
     const sales = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
     const orders = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
+    const customers = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
+    const cumulativeCustomers = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
+    const cr5ByMonth = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
+    const cumulativeSalesByMonth = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
+    const cumulativeCountByMonth = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
+    const cumulativeOrdersByMonth = Array.from({ length: SALES_MONTH_FIELDS.length }, () => null)
     for (const { month, index } of SALES_MONTH_FIELDS) {
       const countColumn = countIndexes.get(month)
       if (countColumn !== undefined) {
@@ -258,6 +356,60 @@ export function parseSalesSheet(rows) {
           rowErrors,
         )
       }
+      const cumulativeSalesMonthColumn = cumulativeSalesMonthIndexes.get(month)
+      if (cumulativeSalesMonthColumn !== undefined) {
+        cumulativeSalesByMonth[index] = parseQuantity(
+          row.cells[cumulativeSalesMonthColumn],
+          `${month}月累计销量`,
+          row.rowNumber,
+          rowErrors,
+        )
+      }
+      const cumulativeOrderMonthColumn = cumulativeOrderMonthIndexes.get(month)
+      if (cumulativeOrderMonthColumn !== undefined) {
+        cumulativeOrdersByMonth[index] = parseQuantity(
+          row.cells[cumulativeOrderMonthColumn],
+          `${month}月累计订单数`,
+          row.rowNumber,
+          rowErrors,
+        )
+      }
+      const cumulativeCountMonthColumn = cumulativeCountMonthIndexes.get(month)
+      if (cumulativeCountMonthColumn !== undefined) {
+        cumulativeCountByMonth[index] = parseQuantity(
+          row.cells[cumulativeCountMonthColumn],
+          `${month}月累计条数`,
+          row.rowNumber,
+          rowErrors,
+        )
+      }
+      const customerColumn = customerIndexes.get(month)
+      if (customerColumn !== undefined) {
+        customers[index] = parseQuantity(
+          row.cells[customerColumn],
+          `${month}月客户数`,
+          row.rowNumber,
+          rowErrors,
+        )
+      }
+      const cumulativeCustomerColumn = cumulativeCustomerIndexes.get(month)
+      if (cumulativeCustomerColumn !== undefined) {
+        cumulativeCustomers[index] = parseQuantity(
+          row.cells[cumulativeCustomerColumn],
+          `${month}月累计客户数`,
+          row.rowNumber,
+          rowErrors,
+        )
+      }
+      const cr5MonthColumn = cr5MonthIndexes.get(month)
+      if (cr5MonthColumn !== undefined) {
+        cr5ByMonth[index] = parseRatio(
+          row.cells[cr5MonthColumn],
+          `${month}月客户CR5率`,
+          row.rowNumber,
+          rowErrors,
+        )
+      }
     }
 
     const metrics = {}
@@ -281,7 +433,23 @@ export function parseSalesSheet(rows) {
     }
 
     seenKeys.set(skuId, row.rowNumber)
-    parsedRows.push({ skuId, product, color, counts, sales, orders, metrics, cr5, cumulativeSales })
+    parsedRows.push({
+      skuId,
+      product,
+      color,
+      counts,
+      sales,
+      orders,
+      customers,
+      cumulativeCustomers,
+      cr5ByMonth,
+      cumulativeSalesByMonth,
+      cumulativeCountByMonth,
+      cumulativeOrdersByMonth,
+      metrics,
+      cr5,
+      cumulativeSales,
+    })
   }
 
   if (!parsedRows.length) {
@@ -292,7 +460,16 @@ export function parseSalesSheet(rows) {
 
   const months = SALES_MONTH_FIELDS.map((entry) => entry.month).filter(
     (month) =>
-      countIndexes.has(month) || salesIndexes.has(month) || weightIndexes.has(month) || orderIndexes.has(month),
+      countIndexes.has(month) ||
+      salesIndexes.has(month) ||
+      weightIndexes.has(month) ||
+      orderIndexes.has(month) ||
+      customerIndexes.has(month) ||
+      cumulativeCustomerIndexes.has(month) ||
+      cr5MonthIndexes.has(month) ||
+      cumulativeSalesMonthIndexes.has(month) ||
+      cumulativeCountMonthIndexes.has(month) ||
+      cumulativeOrderMonthIndexes.has(month),
   )
   const metricFields = HEAT_FACTOR_FIELDS.map(({ field }) => field).filter((field) =>
     metricIndexes.has(field),
@@ -320,6 +497,12 @@ export function attachSalesToInventory(salesRows, inventoryItems) {
       counts: row.counts,
       sales: row.sales,
       orders: row.orders,
+      customers: row.customers ?? null,
+      cumulativeCustomers: row.cumulativeCustomers ?? null,
+      cr5ByMonth: row.cr5ByMonth ?? null,
+      cumulativeSalesByMonth: row.cumulativeSalesByMonth ?? null,
+      cumulativeCountByMonth: row.cumulativeCountByMonth ?? null,
+      cumulativeOrdersByMonth: row.cumulativeOrdersByMonth ?? null,
       metrics: row.metrics,
       cr5: row.cr5 ?? null,
       cumulativeSales: row.cumulativeSales ?? null,

@@ -12,7 +12,7 @@ export const MAIN_PANEL = {
   purchaseLabel: '采购下单',
   purchasePath: '/purchase',
   purchaseRouteName: 'purchase',
-  // 采购下单页的两个子面板：下单面板（拆单 + 确认）/ 下单历史（只读流水）。
+  // 采购下单页的两个子面板：下单面板（拆单 + 确认）/ 下单历史（查询 + 删除流水）。
   purchaseOrderTabLabel: '下单面板',
   purchaseHistoryTabLabel: '下单历史',
   purchaseHistoryPath: '/purchase/history',

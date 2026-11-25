@@ -15,6 +15,7 @@ import {
   vatQuantityOptions,
 } from '@/purchase'
 import { formatQuantity } from '@/utils/inventory'
+import { QUANTITY_MAX, vQuantityDigits } from '@/utils/quantityInput'
 
 // 单个 SKU 的分订单编辑器：采购下单页按需安排拆单时使用，缸规则换算也在这里。
 // 染厂来自「下单设置」里该 SKU 的可选染厂，允许临时手输（不回写设置）；
@@ -198,7 +199,7 @@ watch(
 function handleVatCountChange(index, value) {
   const entry = props.modelValue[index]
   if (quantityModeOf(entry) !== 'vat') return
-  const vatCount = Math.max(0, Math.round(Number(value) || 0))
+  const vatCount = Math.min(QUANTITY_MAX, Math.max(0, Math.round(Number(value) || 0)))
   const perVat = Number(entry?.kgPerVat) || kgPerVat.value
   if (!(perVat > 0)) return
   patchEntry(index, {
@@ -260,7 +261,7 @@ function handleQuantityModeChange(index, value) {
 function handleQuantityChange(index, value) {
   if (quantityModeOf(props.modelValue[index]) !== 'kg') return
   patchEntry(index, {
-    quantity: Math.max(0, Math.round(Number(value) || 0)),
+    quantity: Math.min(QUANTITY_MAX, Math.max(0, Math.round(Number(value) || 0))),
   })
 }
 
@@ -468,8 +469,10 @@ const ruleTitle = computed(() => {
             >
               <ElInputNumber
                 v-if="quantityModeOf(entry) === 'vat'"
+                v-quantity-digits
                 :model-value="vatCountOf(entry)"
                 :min="0"
+                :max="QUANTITY_MAX"
                 :step="1"
                 :controls="false"
                 :disabled="!Number(entry.kgPerVat)"
@@ -521,8 +524,10 @@ const ruleTitle = computed(() => {
               </span>
               <ElInputNumber
                 v-else
+                v-quantity-digits
                 :model-value="roundWholeKg(entry.quantity)"
                 :min="0"
+                :max="QUANTITY_MAX"
                 :step="1"
                 :precision="0"
                 :controls="false"

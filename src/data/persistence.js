@@ -20,6 +20,7 @@ import {
   parseSnapshotText,
 } from './serialize.js'
 import { primeInventoryState } from '@/stores/inventory'
+import { defaultSkuAliases } from '@/data/inventoryItems'
 
 // 持久化的业务口径：事实层（导入数据）生成快照，计划层（需安排）按 skuId 单独存，
 // 两者加载时重新挂接，互不覆盖。写入一律先落 IndexedDB，不做任何 localStorage 兜底。
@@ -43,13 +44,30 @@ function normalizeWorkspaceRecord(record) {
   const plans = {}
   for (const [skuId, planned] of Object.entries(source.plans ?? {})) {
     const value = Number(planned)
-    if (String(skuId).trim() && Number.isFinite(value) && value > 0) plans[skuId] = value
+    const canonicalSkuId = defaultSkuAliases.get(skuId)?.skuId ?? skuId
+    if (
+      String(canonicalSkuId).trim() &&
+      Number.isFinite(value) &&
+      value > 0 &&
+      (!Object.prototype.hasOwnProperty.call(plans, canonicalSkuId) || canonicalSkuId === skuId)
+    ) {
+      plans[canonicalSkuId] = value
+    }
+  }
+  const undoHistory = {}
+  for (const [skuId, undo] of Object.entries(source.undoHistory ?? {})) {
+    const canonicalSkuId = defaultSkuAliases.get(skuId)?.skuId ?? skuId
+    if (
+      !Object.prototype.hasOwnProperty.call(undoHistory, canonicalSkuId) ||
+      canonicalSkuId === skuId
+    ) {
+      undoHistory[canonicalSkuId] = undo
+    }
   }
   return {
     activeSnapshotId: source.activeSnapshotId ?? null,
     plans,
-    undoHistory:
-      source.undoHistory && typeof source.undoHistory === 'object' ? { ...source.undoHistory } : {},
+    undoHistory,
     updatedAt: source.updatedAt ?? null,
   }
 }

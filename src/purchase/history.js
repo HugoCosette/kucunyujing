@@ -1,5 +1,4 @@
-// 下单历史的只读视图模型：把 append-only 的订单流水聚成「批次 → 分订单」两级。
-// 这里只有派生计算，没有任何写入口；到货 / 改单 / 作废仍然只能在订单弹窗里走 stores/purchase.js。
+// 下单历史视图模型：把订单流水聚成「批次 → 分订单」两级，页面数字只做派生计算。
 //
 // 批次 = 一次「确认下单」产生的 batchId（可能含多个 SKU、多个染厂）；
 // 分订单 = 订单流水的一行（SKU × 染厂），到货与待收由 receipts 派生，不单独存。
@@ -30,14 +29,54 @@ function num(value) {
   return Number.isFinite(amount) ? amount : 0
 }
 
-function monthOf(stamp) {
-  const value = text(stamp)
-  return /^\d{4}-\d{2}/.test(value) ? value.slice(0, 7) : ''
+function padded(value) {
+  return String(value).padStart(2, '0')
 }
 
-function dayOf(stamp) {
+// submittedAt 是 UTC ISO，界面上的「确认时间」按本地时区显示；
+// 日期筛选与批次号都用本地日，否则凌晨确认的单会被算到前一天。
+function localDayOf(stamp) {
   const value = text(stamp)
-  return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : ''
+  const time = Date.parse(value)
+  if (!Number.isFinite(time)) {
+    return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : ''
+  }
+  const date = new Date(time)
+  return `${date.getFullYear()}-${padded(date.getMonth() + 1)}-${padded(date.getDate())}`
+}
+
+function localMonthOf(stamp) {
+  return localDayOf(stamp).slice(0, 7)
+}
+
+// 导出与历史页共用同一套文案口径，避免文件里的时间和屏幕上对不上。
+export function formatHistoryMoment(value) {
+  const stamp = Date.parse(value ?? '')
+  if (!Number.isFinite(stamp)) return '—'
+  const date = new Date(stamp)
+  return `${date.getFullYear()}-${padded(date.getMonth() + 1)}-${padded(date.getDate())} ${padded(
+    date.getHours(),
+  )}:${padded(date.getMinutes())}`
+}
+
+export function formatHistoryKg(value) {
+  const amount = Number(value)
+  if (!Number.isFinite(amount)) return '—'
+  return amount.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
+
+export function percentText(progress) {
+  return `${Math.round(Math.min(1, Math.max(0, Number(progress) || 0)) * 100)}%`
+}
+
+export function vatTextOf(row) {
+  if (row.quantityMode === 'kg') return '按公斤'
+  if (row.quantityMode === 'vat') {
+    if (row.vatCount && row.kgPerVat) return `${row.vatCount} 缸 × ${row.kgPerVat} 公斤/缸`
+    return '按缸（缸规未完整）'
+  }
+  if (row.vatCount && row.kgPerVat) return `按缸 · ${row.vatCount} × ${row.kgPerVat}`
+  return '—'
 }
 
 function receiveTone(quantity, received, pending) {
@@ -72,7 +111,8 @@ function rowOf(order) {
     progress: quantity > 0 ? Math.min(1, received / quantity) : 0,
     note: text(order?.note),
     submittedAt: text(order?.submittedAt),
-    month: text(order?.month) || monthOf(order?.submittedAt),
+    day: localDayOf(order?.submittedAt),
+    month: localMonthOf(order?.submittedAt) || text(order?.month),
     cancelled,
     cancelledAt: text(order?.cancelledAt) || null,
     revisionCount: Array.isArray(order?.revisions) ? order.revisions.length : 0,
@@ -144,7 +184,7 @@ export function buildOrderHistory(orders) {
         key: batchId,
         batchId,
         submittedAt: list[0].submittedAt,
-        month: text(list[0].month) || monthOf(list[0].submittedAt),
+        month: localMonthOf(list[0].submittedAt) || text(list[0].month),
         code: '',
       }),
     )
@@ -155,12 +195,12 @@ export function buildOrderHistory(orders) {
       second.submittedAt.localeCompare(first.submittedAt) || first.batchId.localeCompare(second.batchId),
   )
 
-  // 批次号按天顺排成 PO-20261116-01：同一天的先后与流水一致，换筛选也不会变。
+  // 批次号按本地日期顺排成 PO-20261116-01：同一天的先后与流水一致，换筛选也不会变。
   const dayCounters = new Map()
   for (const batch of [...batches].sort((first, second) =>
     first.submittedAt.localeCompare(second.submittedAt),
   )) {
-    const day = dayOf(batch.submittedAt) || '00000000'
+    const day = localDayOf(batch.submittedAt).replace(/-/g, '') || '00000000'
     const sequence = (dayCounters.get(day) ?? 0) + 1
     dayCounters.set(day, sequence)
     batch.code = `PO-${day.replace(/-/g, '')}-${String(sequence).padStart(2, '0')}`
@@ -185,19 +225,32 @@ function matchesKeyword(row, needle) {
 }
 
 /**
- * 筛选：keyword 命中任意字段（或批次号），month 取 'all' 或 YYYY-MM，status 取 active / cancelled / all。
+ * 筛选：keyword 命中任意字段（或批次号）；from / to 是本地日期 YYYY-MM-DD，两端都含；
+ * batchId 只取某一批；status 取 active / cancelled / all。
  * 命中后批次只保留命中的分订单，合计也跟着重算，界面上的数字始终等于看到的行。
  */
-export function filterHistory(history, { keyword = '', month = 'all', status = 'active' } = {}) {
+export function filterHistory(
+  history,
+  { keyword = '', from = '', to = '', status = 'active', batchId = '' } = {},
+) {
   const needle = text(keyword).toLowerCase()
+  const start = text(from)
+  const end = text(to)
+  const onlyBatch = text(batchId)
   const batches = []
 
   for (const batch of history?.batches ?? []) {
-    if (month !== 'all' && batch.month !== month) continue
+    if (onlyBatch && text(batch.batchId) !== onlyBatch) continue
     const codeHit = needle !== '' && batch.code.toLowerCase().includes(needle)
     const orders = batch.orders.filter((row) => {
       if (status === 'active' && row.cancelled) return false
       if (status === 'cancelled' && !row.cancelled) return false
+      if (start || end) {
+        // 日期比不了的单（没有可解析的确认时间）在限定范围时一律排除。
+        if (!row.day) return false
+        if (start && row.day < start) return false
+        if (end && row.day > end) return false
+      }
       if (!needle || codeHit) return true
       return matchesKeyword(row, needle)
     })

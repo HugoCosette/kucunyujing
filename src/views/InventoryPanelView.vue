@@ -13,11 +13,9 @@ import {
   ElOption,
   ElSelect,
 } from 'element-plus'
-import { zipSync } from 'fflate'
 // 系数由 store 维护，便于配置页修改后全局生效。
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import AddSkuDialog from '@/components/AddSkuDialog.vue'
-import ImportSourcesDialog from '@/components/ImportSourcesDialog.vue'
 import ImportSplitTablesDialog from '@/components/ImportSplitTablesDialog.vue'
 import PurchaseOrderRecordsDialog from '@/components/PurchaseOrderRecordsDialog.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
@@ -32,6 +30,7 @@ import { MAIN_PANEL } from '@/data/panels'
 import { persistFactLayer, schedulePlanPersist } from '@/data/persistence'
 import { orderSummaryOf } from '@/purchase'
 import { groupRowsByProduct } from '@/utils/productGroups'
+import { QUANTITY_MAX, vQuantityDigits } from '@/utils/quantityInput'
 import {
   calculateInventoryRow,
   formatQuantity,
@@ -51,7 +50,6 @@ import {
   resolveSpuGrade,
 } from '@/stocking'
 import { evaluateRowHealth } from '@/utils/skuHealth'
-import { IMPORT_TEMPLATE_COLUMNS, IMPORT_TEMPLATE_SAMPLE_ROWS } from '@/utils/inventoryImport'
 
 const inventoryStore = useInventoryStore()
 // 屏蔽列表是独立页面（导航右侧入口），toast 里也直接跳过去。
@@ -119,6 +117,12 @@ function scoreCellTitle(row) {
 // SPU 等级只按「该品名全部 SKU 的月均条数合计」判定，与备货模式 / 系数无关，改配置立刻生效。
 const spuGrades = computed(() => normalizeSpuGrades(stockingStore.config.spuGrades))
 const spuGradeThresholds = computed(() => describeSpuGradeThresholds(spuGrades.value))
+// SPU 等级筛选的「未分级」档：整个品名都没有月均条数，父行徽标显示「—」。
+const UNGRADED_SPU_GRADE_KEY = 'ungraded'
+const spuGradeFilterOptions = computed(() => [
+  ...spuGrades.value.tiers.map(({ key, label }) => ({ key, label })),
+  { key: UNGRADED_SPU_GRADE_KEY, label: '未分级' },
+])
 // 小额补货门槛（设置 → 备货配置 → 筛选显示规则）：紧急 / 常规两档里「建议需安排不足门槛」的 SKU 不列出来。
 // 只改筛选结果与计数，行仍在「全部」里、数据一行不动；口径与「需安排」格的占位提示一致
 // （补到正常库存即绿区中位的建议值），所以采纳前后判断不会跳。
@@ -138,6 +142,7 @@ const {
   colorFilter,
   selectedWarningTones,
   selectedModeLabels,
+  selectedSpuGradeKeys,
   onlyOrdered,
   onlyOrdering,
   expandedProductKeys,
@@ -145,6 +150,31 @@ const {
   selectedRowId,
   tableScrollTop,
 } = storeToRefs(viewStore)
+
+// 两个模式多选不渲染一坨标签胶囊（选两个就会被压成「+1」），只在框里显示一行摘要：
+// 单选显示值、多选按「、」连起来，放不下由 CSS 截断，完整列表在悬停标题里。
+const spuFilterSummary = computed(() =>
+  selectedSpuGradeKeys.value
+    .map((key) => spuGradeFilterOptions.value.find((option) => option.key === key)?.label ?? key)
+    .join('、'),
+)
+const spuFilterTitle = computed(() => {
+  const basis =
+    'SPU 模式 = 该品名下全部可见 SKU 的月均条数之和落在哪一档（S+ / S / A / B / C / Z），阈值见设置页「SPU 分级」'
+  const count = selectedSpuGradeKeys.value.length
+  return count
+    ? `已选 ${spuFilterSummary.value}（共 ${count} 项），下面的预警计数已按此收窄；${basis}`
+    : basis
+})
+const modeFilterSummary = computed(() => selectedModeLabels.value.join('、'))
+const modeFilterTitle = computed(() => {
+  const basis =
+    'SKU 模式 = 热销 / 常规 / 按量 / 尾货 / 滞销（带「·专属品」标记），按备货配置的模式区间判定'
+  const count = selectedModeLabels.value.length
+  return count
+    ? `已选 ${modeFilterSummary.value}（共 ${count} 项），下面的预警计数已按此收窄；${basis}`
+    : basis
+})
 const expandingProductKeys = ref(new Set())
 // 需安排草稿同样跟着 store 走：直接持有对象引用，手填的值切页回来还在（导入时统一清空）。
 const plannedDrafts = viewStore.plannedDrafts
@@ -327,18 +357,12 @@ const urgentPlanRows = ref([])
 // 弹窗里的长列表按虚拟滚动渲染：上万个紧急 SKU 时直接 v-for 会把主线程卡住十几秒。
 const URGENT_PLAN_ROW_HEIGHT = 48
 
-// 主面板与销售表共用同一条导入流程：分表清洗出总表 + 销售表后在这里预览并确认写入。
+// 主面板与销售表共用同一条导入流程：分表清洗出总表 + 销售表后直接写入，不再弹预览确认框。
 const sourceImport = useSourceImport({
   onApplied: handleSourcesImported,
 })
-const {
-  dialogVisible: importDialogVisible,
-  summary: importSummary,
-  cancel: cancelImport,
-  confirm: confirmImport,
-} = sourceImport
 
-// 导入分表：选 5 张分表 → 清洗出总表 + 销售表 → 复用上面的导入流程确认写入。
+// 导入分表：选 5 张分表 → 清洗出总表 + 销售表 → 直接写入。
 const {
   dialogVisible: splitImportDialogVisible,
   roles: splitImportRoles,
@@ -388,6 +412,16 @@ function isItemHidden(item) {
 const inventoryLeafRows = shallowRef([])
 // 每个品名的月均条数合计（含该品名下全部可见 SKU，被屏蔽的不算）：SPU 等级按它判定，不随筛选变化。
 const productMonthlyTotals = shallowRef(new Map())
+// 品名 → SPU 等级 key，口径与父行徽标同一份（全部可见 SKU 的月均合计，不看筛选），
+// 所以按等级筛选是整组保留 / 整组隐藏，父行合计不会被筛切断。
+const productGradeKeys = computed(() => {
+  const grades = spuGrades.value
+  const keys = new Map()
+  for (const [product, monthlyAvg] of productMonthlyTotals.value) {
+    keys.set(product, resolveSpuGrade(monthlyAvg, grades)?.key ?? UNGRADED_SPU_GRADE_KEY)
+  }
+  return keys
+})
 const leafRowIndexById = new Map()
 
 function displayColor(color) {
@@ -726,7 +760,9 @@ const warningCounts = computed(() => {
   const counts = { all: 0, red: 0, yellow: 0, green: 0, purple: 0 }
   // 被小额门槛挡掉的数量：给筛选按钮的悬停说明用，计数对不上时能解释清。
   const lowPlanned = { red: 0, yellow: 0 }
-  for (const row of inventoryLeafRows.value) {
+  // 计数只跟「除预警色以外」的筛选：数字等于点下该档后能看到的行数，
+  // 选中某档时也不会因为自己的选择把数字越点越小。
+  for (const row of scopedInventoryLeafRows.value) {
     counts.all += 1
     const tone = dataTone(row)
     if (!(tone in counts)) continue
@@ -739,15 +775,18 @@ const warningCounts = computed(() => {
   return { ...counts, lowPlanned }
 })
 
-// 筛选按钮的悬停说明：写明为什么紧急 / 常规的计数比预期少，以及计数按哪个态算。
+// 筛选按钮的悬停说明：计数按「除预警色以外」的筛选算，并写明小额门槛排除了多少。
 function warningFilterTitle(key) {
-  if (key === 'all') return '清除采购状态与预警筛选（保留品名、颜色和模式条件）'
+  if (key === 'all') {
+    return `清除采购状态与预警筛选（保留品名、颜色、SPU / SKU 模式条件）；计数 ${warningCounts.value.all} 行 = 当前筛选内的可见 SKU 数（含模式缺省 / 不参与备货的行）`
+  }
   const label = warningFilters.find((filter) => filter.key === key)?.label ?? ''
+  const scope = `计数 ${warningCounts.value[key] ?? 0} 个 = 当前筛选内本档的 SKU 数（不含预警色自身的选择）`
   // 计数按数据态（把需安排清零）：采纳后行仍留在原档，灯变绿表示预计已补，确认下单后才移出。
   const basis =
     key === 'red' || key === 'yellow'
-      ? `只看${label}（按数据态判定：采纳后仍留在本档，灯变绿表示预计已补，确认下单后才移出）`
-      : `只看${label}（按数据态判定：还没下单的需安排不算进来）`
+      ? `只看${label}（按数据态判定：采纳后仍留在本档，灯变绿表示预计已补，确认下单后才移出）；${scope}`
+      : `只看${label}（按数据态判定：还没下单的需安排不算进来）；${scope}`
   if (key !== 'red' && key !== 'yellow') return basis
   if (lowPlannedThreshold.value <= 0) {
     return `${basis}；小额补货门槛已在设置里关闭`
@@ -764,7 +803,18 @@ const hasActiveFilters = computed(
     onlyOrdered.value ||
     onlyOrdering.value ||
     selectedWarningTones.value.length > 0 ||
-    selectedModeLabels.value.length > 0,
+    selectedModeLabels.value.length > 0 ||
+    selectedSpuGradeKeys.value.length > 0,
+)
+
+// 「资料类」条件是否生效：关键词（取防抖后的值）+ 两个模式。
+// 预警 chip 的计数按它收窄（见 scopedInventoryLeafRows），所以组名要跟着标「筛选后」。
+const hasScopeFilters = computed(
+  () =>
+    appliedProductFilter.value !== '' ||
+    appliedColorFilter.value !== '' ||
+    selectedModeLabels.value.length > 0 ||
+    selectedSpuGradeKeys.value.length > 0,
 )
 const isAllFilterSelected = computed(
   () =>
@@ -774,9 +824,9 @@ const isAllFilterSelected = computed(
 )
 
 // 「已下单」筛的是采购执行层：该 SKU 有未作废的分订单（累积下单 > 0）。
-// 与「下单中」互斥，属于采购状态组；两者分别计数，不与预警组叠加。
+// 与「下单中」互斥，属于采购状态组；两者分别计数，与预警组同口径（按资料类筛选后的范围算）。
 const orderedCount = computed(
-  () => inventoryLeafRows.value.filter((row) => (row.ordered ?? 0) > 0).length,
+  () => scopedInventoryLeafRows.value.filter((row) => (row.ordered ?? 0) > 0).length,
 )
 
 function toggleOrderFilter() {
@@ -788,7 +838,7 @@ function toggleOrderFilter() {
 
 // 「下单中」筛的是主面板已采纳并锁定、等待确认下单的 SKU。
 const orderingCount = computed(
-  () => inventoryLeafRows.value.filter((row) => isPlannedLocked(row)).length,
+  () => scopedInventoryLeafRows.value.filter((row) => isPlannedLocked(row)).length,
 )
 
 function toggleOrderingFilter() {
@@ -821,32 +871,41 @@ watch([productFilter, colorFilter], () => {
   }, 250)
 })
 
-const filteredInventoryLeafRows = computed(() => {
+// 「资料类」筛选结果（品名 / 颜色 / SPU 模式 / SKU 模式）：两组 chip 的计数都按它算。
+// 采购状态与预警色互斥、点任一个会清掉另一组，所以计数不把自己所在组的选择算进去，
+// 数字正好等于「点下去能看到的行数」，也不会因为选了自己而越点越小。
+const scopedInventoryLeafRows = computed(() => {
   const product = appliedProductFilter.value
   const color = appliedColorFilter.value
-  const tones = selectedWarningTones.value
   const modes = selectedModeLabels.value
-  const orderedOnly = onlyOrdered.value
-  const orderingOnly = onlyOrdering.value
-  if (
-    !product &&
-    !color &&
-    tones.length === 0 &&
-    modes.length === 0 &&
-    !orderedOnly &&
-    !orderingOnly
-  ) {
+  const gradeKeys = selectedSpuGradeKeys.value
+  if (!product && !color && modes.length === 0 && gradeKeys.length === 0) {
     return inventoryLeafRows.value
   }
 
-  const toneSet = tones.length > 0 ? new Set(tones) : null
   const modeSet = modes.length > 0 ? new Set(modes) : null
+  const gradeSet = gradeKeys.length > 0 ? new Set(gradeKeys) : null
+  const grades = productGradeKeys.value
   return inventoryLeafRows.value.filter(
     (row) =>
       (!product || row.searchProduct.includes(product)) &&
       (!color || row.searchColor.includes(color)) &&
-      (!toneSet || (toneSet.has(dataTone(row)) && !isLowPlanned(row))) &&
       (!modeSet || modeSet.has(row.modeLabel)) &&
+      (!gradeSet ||
+        gradeSet.has(grades.get(row.product) ?? UNGRADED_SPU_GRADE_KEY)),
+  )
+})
+
+const filteredInventoryLeafRows = computed(() => {
+  const tones = selectedWarningTones.value
+  const orderedOnly = onlyOrdered.value
+  const orderingOnly = onlyOrdering.value
+  const scoped = scopedInventoryLeafRows.value
+  if (tones.length === 0 && !orderedOnly && !orderingOnly) return scoped
+  const toneSet = tones.length > 0 ? new Set(tones) : null
+  return scoped.filter(
+    (row) =>
+      (!toneSet || (toneSet.has(dataTone(row)) && !isLowPlanned(row))) &&
       (!orderedOnly || (row.ordered ?? 0) > 0) &&
       (!orderingOnly || isPlannedLocked(row)),
   )
@@ -869,6 +928,13 @@ function resetFilters() {
   onlyOrdering.value = false
   selectedWarningTones.value = []
   selectedModeLabels.value = []
+  selectedSpuGradeKeys.value = []
+}
+
+// 工具栏上的「清除筛选」：所有条件一起清，并把防抖副本同步掉（否则关键词输入框已空、表格还按旧词筛）。
+function clearAllFilters() {
+  resetFilters()
+  applyKeywordFilters()
 }
 
 function toggleWarningFilter(key) {
@@ -1122,6 +1188,7 @@ watch(
     appliedColorFilter,
     selectedWarningTones,
     selectedModeLabels,
+    selectedSpuGradeKeys,
     onlyOrdered,
     onlyOrdering,
   ],
@@ -1174,6 +1241,13 @@ function restoreTableView() {
   const keptModes = selectedModeLabels.value.filter((label) => modeNames.has(label))
   if (keptModes.length !== selectedModeLabels.value.length) selectedModeLabels.value = keptModes
 
+  // SPU 等级存的是档位 key（改阈值只换档、不换 key），这里只清历史残留。
+  const gradeKeys = new Set(spuGradeFilterOptions.value.map((option) => option.key))
+  const keptGrades = selectedSpuGradeKeys.value.filter((key) => gradeKeys.has(key))
+  if (keptGrades.length !== selectedSpuGradeKeys.value.length) {
+    selectedSpuGradeKeys.value = keptGrades
+  }
+
   const target = tableScrollTop.value
   if (target > 0) {
     // 排在筛选 watch 的「回到顶部」之后执行，否则会被它压回 0。
@@ -1221,7 +1295,12 @@ onBeforeUnmount(() => {
 const urgentRows = computed(() =>
   inventoryLeafRows.value.filter((row) => dataTone(row) === 'red' && !isLowPlanned(row)),
 )
-const excludedUrgentCount = computed(() => warningCounts.value.lowPlanned.red ?? 0)
+// 紧急补货清单是全量口径（不受筛选影响），被门槛排除的数量也必须按全量算，
+// 不能复用 chips 的「当前筛选内」计数，否则弹窗里的排除数与清单对不上。
+const excludedUrgentCount = computed(
+  () =>
+    inventoryLeafRows.value.filter((row) => dataTone(row) === 'red' && isLowPlanned(row)).length,
+)
 const hasUrgentPlan = computed(() =>
   urgentPlanRows.value.some((row) => row.additionalPlan > 0),
 )
@@ -1292,7 +1371,7 @@ function writePlanned(plans) {
 //   草稿（plannedDrafts，可编辑未采纳）→ 已采纳（item.planned，锁定，下单时清零）→ 建议值（补到正常库存）。
 function draftQuantityFrom(value) {
   const numeric = Number(value)
-  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0
+  return Number.isFinite(numeric) && numeric > 0 ? Math.min(QUANTITY_MAX, Math.round(numeric)) : 0
 }
 
 function draftQuantity(id) {
@@ -1756,34 +1835,6 @@ function handleProductCellClick(row) {
   selectedRowId.value = row.id
 }
 
-function escapeXml(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;')
-}
-
-function getExcelColumnName(index) {
-  let name = ''
-  let current = index + 1
-  while (current > 0) {
-    const remainder = (current - 1) % 26
-    name = String.fromCharCode(65 + remainder) + name
-    current = Math.floor((current - 1) / 26)
-  }
-  return name
-}
-
-function createExcelCell(value, reference, styleIndex = 0) {
-  const style = styleIndex > 0 ? ` s="${styleIndex}"` : ''
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return `<c r="${reference}"${style}><v>${value}</v></c>`
-  }
-
-  return `<c r="${reference}" t="inlineStr"${style}><is><t xml:space="preserve">${escapeXml(value ?? '')}</t></is></c>`
-}
 // 导入成功后清空需安排草稿并重建表格；总表与销售表的写入已在 useSourceImport 内完成。
 function handleSourcesImported(summary) {
   for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
@@ -1815,73 +1866,6 @@ function handleSourcesImported(summary) {
   showImportToast(`成功导入：${messages.join('；')}`)
 }
 
-function buildSimpleWorkbook({ sheetName, rows, columnWidths }) {
-  const worksheetRows = rows
-    .map((row, rowIndex) => {
-      const cells = row
-        .map((value, columnIndex) => {
-          const reference = `${getExcelColumnName(columnIndex)}${rowIndex + 1}`
-          return createExcelCell(value, reference, rowIndex === 0 ? 1 : 0)
-        })
-        .join('')
-      return `<row r="${rowIndex + 1}">${cells}</row>`
-    })
-    .join('')
-  const cols = columnWidths
-    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
-    .join('')
-  const dimension = `A1:${getExcelColumnName(rows[0].length - 1)}${rows.length}`
-  const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="${dimension}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${cols}</cols><sheetData>${worksheetRows}</sheetData></worksheet>`
-  const styleXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FF2F3B43"/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF3F6F8"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
-  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${sheetName}" sheetId="1" r:id="rId1"/></sheets></workbook>`
-  const files = {
-    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
-    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
-    'xl/workbook.xml': workbookXml,
-    'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
-    'xl/worksheets/sheet1.xml': worksheetXml,
-    'xl/styles.xml': styleXml,
-  }
-
-  return zipSync(
-    Object.fromEntries(
-      Object.entries(files).map(([path, content]) => [path, new TextEncoder().encode(content)]),
-    ),
-    { level: 6 },
-  )
-}
-
-function saveWorkbookFile(workbookBytes, fileName) {
-  const blob = new Blob([workbookBytes], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const downloadUrl = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = downloadUrl
-  link.download = fileName
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000)
-}
-
-function downloadImportTemplate() {
-  try {
-    const workbookBytes = buildSimpleWorkbook({
-      sheetName: '导入模板',
-      rows: [IMPORT_TEMPLATE_COLUMNS, ...IMPORT_TEMPLATE_SAMPLE_ROWS],
-      columnWidths: IMPORT_TEMPLATE_COLUMNS.map((column) =>
-        column === '品名' ? 18 : column === '颜色' ? 16 : 12,
-      ),
-    })
-    saveWorkbookFile(workbookBytes, '库存导入模板.xlsx')
-    ElMessage.success('导入模板已保存，模板中的示例行请替换为真实数据')
-  } catch (error) {
-    console.error('Failed to build inventory import template', error)
-    ElMessage.error(`模板生成失败：${error instanceof Error ? error.message : '未知错误'}`)
-  }
-}
-
 </script>
 
 <template>
@@ -1911,15 +1895,15 @@ function downloadImportTemplate() {
       <PanelNavigation />
       <div class="page-head">
         <h1 class="page-title">需求表</h1>
+        <ElButton
+          class="import-split-button"
+          size="small"
+          title="选择 5 张分表，先清洗出总表与销售表再导入"
+          @click="triggerSplitImport"
+        >
+          导入分表
+        </ElButton>
         <div class="page-head__actions">
-          <ElButton
-            class="import-split-button"
-            size="small"
-            title="选择 5 张分表，先清洗出总表与销售表再导入"
-            @click="triggerSplitImport"
-          >
-            导入分表
-          </ElButton>
           <ElButton
             class="add-sku-button"
             size="small"
@@ -1928,13 +1912,11 @@ function downloadImportTemplate() {
           >
             添加SKU
           </ElButton>
-          <ElButton class="import-template-button" size="small" @click="downloadImportTemplate">
-            导入模板
-          </ElButton>
           <ElButton
             class="urgent-plan-button"
             size="small"
             :disabled="urgentRows.length === 0"
+            :title="`全量 ${urgentRows.length} 个紧急 SKU（不受筛选影响，已按小额补货门槛排除；当前筛选内 ${warningCounts.red} 个）`"
             @click="openUrgentPlanDialog"
           >
             紧急补货 <span class="urgent-count">{{ urgentRows.length }}</span>
@@ -1942,98 +1924,154 @@ function downloadImportTemplate() {
         </div>
       </div>
       <div class="inventory-filters" aria-label="库存筛选">
-        <ElInput
-          v-model="productFilter"
-          class="text-filter"
-          placeholder="品名"
-          aria-label="按品名筛选"
-          clearable
-        />
-        <ElInput
-          v-model="colorFilter"
-          class="text-filter"
-          placeholder="颜色"
-          aria-label="按颜色筛选"
-          clearable
-        />
-        <ElSelect
-          v-model="selectedModeLabels"
-          class="text-filter"
-          multiple
-          collapse-tags
-          clearable
-          placeholder="按模式筛选"
-          aria-label="按模式筛选"
-        >
-          <ElOption v-for="name in modeOptions" :key="name" :label="name" :value="name" />
-        </ElSelect>
-        <div class="warning-filters" role="group" aria-label="采购状态筛选">
-          <button
-            type="button"
-            class="warning-filter warning-filter--all"
-            :class="{ 'warning-filter--active': isAllFilterSelected }"
-            :aria-pressed="isAllFilterSelected"
-            :title="warningFilterTitle('all')"
-            @click="toggleWarningFilter('all')"
-          >
-            全部
-            <span class="warning-filter-count">{{ warningCounts.all }}</span>
-          </button>
-          <button
-            type="button"
-            class="warning-filter warning-filter--ordering"
-            :class="{ 'warning-filter--active': onlyOrdering }"
-            :aria-pressed="onlyOrdering"
-            :title="`只看下单中（已锁定、等待确认下单）的 SKU，共 ${orderingCount} 个`"
-            @click="toggleOrderingFilter"
-          >
-            下单中
-            <span class="warning-filter-count">{{ orderingCount }}</span>
-          </button>
-          <button
-            type="button"
-            class="warning-filter warning-filter--order"
-            :class="{ 'warning-filter--active': onlyOrdered }"
-            :aria-pressed="onlyOrdered"
-            :title="`只看已下单（有备货订单）的 SKU，共 ${orderedCount} 个`"
-            @click="toggleOrderFilter"
-          >
-            已下单
-            <span class="warning-filter-count">{{ orderedCount }}</span>
-          </button>
-        </div>
-        <div
-          class="warning-filters warning-filters--tones"
-          role="group"
-          aria-label="预警状态筛选"
-        >
-          <button
-            v-for="filter in warningToneFilters"
-            :key="filter.key"
-            type="button"
-            class="warning-filter"
-            :class="[
-              `warning-filter--${filter.key}`,
-              { 'warning-filter--active': selectedWarningTones.includes(filter.key) },
-            ]"
-            :aria-pressed="selectedWarningTones.includes(filter.key)"
-            :title="warningFilterTitle(filter.key)"
-            @click="toggleWarningFilter(filter.key)"
-          >
-            <span
-              class="warning-filter-indicator"
-              :class="`urgency-indicator--${filter.key}`"
-              aria-hidden="true"
+        <div class="filter-row">
+          <div class="filter-group" role="group" aria-label="关键词筛选">
+            <span class="filter-group__label">查找</span>
+            <ElInput
+              v-model="productFilter"
+              class="text-filter"
+              placeholder="品名"
+              aria-label="按品名筛选"
+              clearable
             />
-            {{ filter.label }}
-            <span class="warning-filter-count">{{ warningCounts[filter.key] }}</span>
-          </button>
+            <ElInput
+              v-model="colorFilter"
+              class="text-filter"
+              placeholder="颜色"
+              aria-label="按颜色筛选"
+              clearable
+            />
+          </div>
+          <div class="filter-group" role="group" aria-label="模式筛选">
+            <span class="filter-group__label">模式</span>
+            <ElSelect
+              v-model="selectedSpuGradeKeys"
+              class="text-filter mode-filter"
+              :class="{ 'is-filtering': selectedSpuGradeKeys.length > 0 }"
+              multiple
+              clearable
+              placeholder="按SPU模式筛选"
+              aria-label="按SPU模式筛选"
+              :title="spuFilterTitle"
+            >
+              <ElOption
+                v-for="option in spuGradeFilterOptions"
+                :key="option.key"
+                :label="option.label"
+                :value="option.key"
+              />
+              <template #tag>
+                <span v-if="selectedSpuGradeKeys.length" class="mode-filter__value">
+                  <span class="mode-filter__summary">{{ spuFilterSummary }}</span>
+                  <span class="mode-filter__count">{{ selectedSpuGradeKeys.length }}</span>
+                </span>
+              </template>
+            </ElSelect>
+            <ElSelect
+              v-model="selectedModeLabels"
+              class="text-filter mode-filter"
+              :class="{ 'is-filtering': selectedModeLabels.length > 0 }"
+              multiple
+              clearable
+              placeholder="按SKU模式筛选"
+              aria-label="按SKU模式筛选"
+              :title="modeFilterTitle"
+            >
+              <ElOption v-for="name in modeOptions" :key="name" :label="name" :value="name" />
+              <template #tag>
+                <span v-if="selectedModeLabels.length" class="mode-filter__value">
+                  <span class="mode-filter__summary">{{ modeFilterSummary }}</span>
+                  <span class="mode-filter__count">{{ selectedModeLabels.length }}</span>
+                </span>
+              </template>
+            </ElSelect>
+          </div>
+          <div class="filter-row__end">
+            <span class="meta inventory-filters__count">{{ filteredSkuCount }} 个 SKU</span>
+            <button
+              v-if="hasActiveFilters"
+              type="button"
+              class="filter-clear"
+              title="清空关键词、SPU / SKU 模式与采购状态 / 预警筛选"
+              @click="clearAllFilters"
+            >
+              清除筛选
+            </button>
+            <ElButton class="toggle-groups-button" size="small" @click="toggleAllProductGroups">
+              {{ inventoryRows.length > 0 && inventoryRows.every((row) => expandedProductKeys.includes(row.id)) ? '全部收起' : '全部展开' }}
+            </ElButton>
+          </div>
         </div>
-        <span class="meta inventory-filters__count">{{ filteredSkuCount }} 个 SKU</span>
-        <div class="toolbar__end">
-          <ElButton class="toggle-groups-button" size="small" @click="toggleAllProductGroups">
-            {{ inventoryRows.length > 0 && inventoryRows.every((row) => expandedProductKeys.includes(row.id)) ? '全部收起' : '全部展开' }}
-          </ElButton>
+        <div class="filter-row filter-row--state">
+          <div class="filter-group" role="group" aria-label="采购状态筛选">
+            <span class="filter-group__label">采购</span>
+            <button
+              type="button"
+              class="warning-filter warning-filter--all"
+              :class="{ 'warning-filter--active': isAllFilterSelected }"
+              :aria-pressed="isAllFilterSelected"
+              :title="warningFilterTitle('all')"
+              @click="toggleWarningFilter('all')"
+            >
+              全部
+              <span class="warning-filter-count">{{ warningCounts.all }}</span>
+            </button>
+            <button
+              type="button"
+              class="warning-filter warning-filter--ordering"
+              :class="{ 'warning-filter--active': onlyOrdering }"
+              :aria-pressed="onlyOrdering"
+              :title="`只看下单中（已锁定、等待确认下单）的 SKU，当前筛选内共 ${orderingCount} 个`"
+              @click="toggleOrderingFilter"
+            >
+              下单中
+              <span class="warning-filter-count">{{ orderingCount }}</span>
+            </button>
+            <button
+              type="button"
+              class="warning-filter warning-filter--order"
+              :class="{ 'warning-filter--active': onlyOrdered }"
+              :aria-pressed="onlyOrdered"
+              :title="`只看已下单（有备货订单）的 SKU，当前筛选内共 ${orderedCount} 个`"
+              @click="toggleOrderFilter"
+            >
+              已下单
+              <span class="warning-filter-count">{{ orderedCount }}</span>
+            </button>
+          </div>
+          <div class="filter-group" role="group" aria-label="预警状态筛选">
+            <span
+              class="filter-group__label"
+              :class="{ 'filter-group__label--scoped': hasScopeFilters }"
+              :title="
+                hasScopeFilters
+                  ? '下面的预警计数已按「查找」与「模式」的筛选收窄，不是全量'
+                  : ''
+              "
+              >预警{{ hasScopeFilters ? ' · 筛选后' : '' }}</span
+            >
+            <button
+              v-for="filter in warningToneFilters"
+              :key="filter.key"
+              type="button"
+              class="warning-filter"
+              :class="[
+                `warning-filter--${filter.key}`,
+                { 'warning-filter--active': selectedWarningTones.includes(filter.key) },
+              ]"
+              :aria-pressed="selectedWarningTones.includes(filter.key)"
+              :title="warningFilterTitle(filter.key)"
+              @click="toggleWarningFilter(filter.key)"
+            >
+              <span
+                class="warning-filter-indicator"
+                :class="`urgency-indicator--${filter.key}`"
+                aria-hidden="true"
+              />
+              {{ filter.label }}
+              <span class="warning-filter-count">{{ warningCounts[filter.key] }}</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2255,6 +2293,7 @@ function downloadImportTemplate() {
                     @keydown.enter.prevent="handlePlannedEnter(row, $event)"
                   >
                     <ElInputNumber
+                      v-quantity-digits
                       :model-value="getPlannedDraft(row)"
                       :placeholder="getPlannedPlaceholder(row)"
                       :title="
@@ -2263,6 +2302,7 @@ function downloadImportTemplate() {
                           : getPlannedPlaceholderTitle(row)
                       "
                       :min="0"
+                      :max="QUANTITY_MAX"
                       :controls="false"
                       size="small"
                       class="editable-number planned-input"
@@ -2501,7 +2541,9 @@ function downloadImportTemplate() {
               <div role="cell">
                 <ElInputNumber
                   v-model="row.additionalPlan"
+                  v-quantity-digits
                   :min="0"
+                  :max="QUANTITY_MAX"
                   :precision="0"
                   :controls="false"
                   size="small"
@@ -2542,13 +2584,6 @@ function downloadImportTemplate() {
         </div>
       </template>
     </ElDialog>
-
-    <ImportSourcesDialog
-      v-model="importDialogVisible"
-      :summary="importSummary"
-      @confirm="confirmImport"
-      @cancel="cancelImport"
-    />
 
     <ImportSplitTablesDialog
       v-model="splitImportDialogVisible"
@@ -2729,14 +2764,86 @@ function downloadImportTemplate() {
 
 .inventory-filters {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
-  padding: 7px 8px;
+  padding: 8px;
   margin-bottom: 8px;
   border: 1px solid var(--industrial-grid);
   border-radius: 3px;
   background: var(--industrial-surface);
+}
+
+/* 两行布局：第一行「查找 + 模式」（右侧结果数 / 清除 / 展开），第二行「采购状态 + 预警色」。
+   分行的目的是把互斥的两组 chip 拆开，别和上面的输入框挤在一行里抢宽度。 */
+.filter-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-height: 26px;
+}
+
+.filter-row--state {
+  padding-top: 6px;
+  border-top: 1px dashed var(--industrial-grid-light);
+}
+
+.filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 同一条行内相邻两组之间加一道细竖线，避免「采购全部 / 预警紧急」被连读。 */
+.filter-group + .filter-group {
+  padding-left: 10px;
+  border-left: 1px solid var(--industrial-grid-light);
+}
+
+.filter-group__label {
+  padding-right: 2px;
+  color: var(--industrial-muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* 资料类筛选生效时，预警组名改成「预警 · 筛选后」，并提亮提示计数已被收窄。 */
+.filter-group__label--scoped {
+  color: var(--industrial-primary);
+  font-weight: 600;
+}
+
+.filter-row__end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.filter-clear {
+  height: 24px;
+  padding: 0 8px;
+  color: var(--industrial-primary);
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.filter-clear:hover,
+.filter-clear:focus-visible {
+  border-color: var(--industrial-grid);
+  background: #e5edf1;
+}
+
+.filter-clear:focus-visible {
+  outline: 2px solid var(--industrial-primary);
+  outline-offset: 1px;
 }
 
 .inventory-filters :deep(.el-input__wrapper),
@@ -2760,40 +2867,88 @@ function downloadImportTemplate() {
   font-size: 12px;
 }
 
-.toolbar__end {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-}
-
 .text-filter {
   width: 150px;
 }
 
-.warning-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+.mode-filter {
+  width: 176px;
 }
 
-/* 已筛选 SKU 数紧跟在预警筛选按钮块的右侧，不再顶到工具栏最右端。 */
+/* 两个模式多选：不渲染标签胶囊，只显示一行可截断的摘要（避免选两个就被压成「+1」）。
+   EP 给内容加了 -8px 左边距，这里抵消掉，让摘要和「品名 / 颜色」输入框的文字对齐。 */
+.inventory-filters :deep(.mode-filter .el-select__selection) {
+  flex-wrap: nowrap;
+  margin-left: 0;
+  min-width: 0;
+  /* EP 的输入框与占位符都是绝对定位，容器本身没有高度；不补 24px 会被 overflow 裁掉。 */
+  min-height: 24px;
+  overflow: hidden;
+}
+
+.inventory-filters :deep(.mode-filter .el-select__selection.is-near) {
+  margin-left: 0;
+}
+
+.mode-filter__summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--industrial-text);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 摘要 + 「已选几个」角标：角标只回答「有几个条件生效」，不是「还有几个没显示」。 */
+.mode-filter__value {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mode-filter__count {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  color: #fff;
+  border-radius: 8px;
+  background: var(--industrial-primary);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* 模式框正在生效：浅底 + 主色描边 + 左侧色条，跟 hover / focus 区分开，
+   提示「下面的预警计数已按这些条件收窄」。 */
+.inventory-filters :deep(.mode-filter.is-filtering .el-select__wrapper) {
+  background: #eaf1f4;
+  box-shadow:
+    inset 0 0 0 1px var(--industrial-primary),
+    inset 2px 0 0 var(--industrial-primary);
+}
+
+/* 已筛选 SKU 数放在第一行右侧，和「清除筛选」「全部展开」成组。 */
 .inventory-filters__count {
-  margin-left: 4px;
+  margin-left: 0;
 }
 
 .warning-filter {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 22px;
-  padding: 0 7px;
+  min-height: 24px;
+  padding: 0 8px;
   color: var(--industrial-muted);
   border: 1px solid var(--industrial-grid);
   border-radius: 2px;
   background: var(--industrial-surface);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -2807,13 +2962,6 @@ function downloadImportTemplate() {
 .warning-filter:focus-visible {
   outline: 2px solid var(--industrial-primary);
   outline-offset: 2px;
-}
-
-/* 采购状态筛选不是预警色，与前面那组隔开，避免被读成预警态 */
-.warning-filters--tones {
-  padding-left: 8px;
-  margin-left: 2px;
-  border-left: 1px solid var(--industrial-grid);
 }
 
 .warning-filter-indicator {
@@ -2877,8 +3025,7 @@ function downloadImportTemplate() {
   text-align: center;
 }
 
-.import-split-button,
-.import-template-button {
+.import-split-button {
   --el-button-text-color: var(--industrial-primary);
   --el-button-bg-color: var(--industrial-surface);
   --el-button-border-color: var(--industrial-primary);

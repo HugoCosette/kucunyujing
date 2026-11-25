@@ -13,6 +13,8 @@
 | 预览构建产物 | `npm run preview` |
 | 备货口径自检（打印配置校验 + 5 档样例评估） | `node tools/check-stocking.mjs` |
 | 离线跑清洗（读 `tools/cleaning/data/`，写 `output/`） | `cd tools/cleaning; npm install; npm run clean` |
+| 桌面开发（Electron + HMR） | `npm run desktop:dev` |
+| 打 Windows 离线包（dir 免安装 / nsis 安装包） | `npm run pack:win:dir` / `npm run pack:win`（详见 [离线打包说明.md](./docs/功能说明/离线打包说明.md)） |
 
 仓库没有 lint / 单元测试 / 格式化配置，`npm run build` 是唯一的自动校验；其余按 §4 的「手验」逐条走。
 
@@ -26,6 +28,7 @@
    | 分表清洗 / 单位换算 / 汇总 | `tools/cleaning/engine.mjs` | [数据清洗规则.md](./docs/功能说明/数据清洗规则.md) |
    | 模式判定 / 系数 / 加权月销量 | `src/stocking/engine.js` | [模式与系数设置.md](./docs/功能说明/模式与系数设置.md) |
    | 健康度评分（含按量 2 项判定） | `src/stocking/scoring.js`；输入因子 `src/utils/skuHealth.js` | 同上，第 12 节 |
+   | 本次补货风险（净偏离合计） | `src/stocking/replenishRisk.js` | 同上，12.5 节 |
    | SPU 分级 | `src/stocking/spuGrades.js` | 同上 |
    | 缸规则 | `src/purchase/vat.js` | [采购下单流程.md](./docs/功能说明/采购下单流程.md) |
    | 下单填量颜色（不足八成黄 / 八成~100% 绿 / 超一缸内绿 / 超过一缸红） | `src/purchase/fillTone.js` | 同上，3.7 节 |
@@ -45,7 +48,7 @@
 | 路径 | 管什么 |
 | --- | --- |
 | `src/views/` | 页面：`InventoryPanelView` 主面板、`SalesPanelView` 销售表、`PurchaseOrderView` 采购下单（含「下单面板 / 下单历史」两个子面板）、`ConfigView` 设置壳、`HiddenSkusView` 屏蔽列表 |
-| `src/components/` | 弹窗与设置块：导入（`ImportSplitTablesDialog` / `ImportSourcesDialog`）、`SkuDetailDialog` + `SkuDetailTrigger`、补货与订单（`SkuOrderEditor` / `PurchaseOrderRecordsDialog`）、`OrderHistoryPanel`（下单历史子面板）、设置页各块（`PurchaseSettingsPanel` / `ScoringSettings` / `SpuGradeSettings` / `VatRuleSettings` / `HiddenSkusPanel` / `DataStoragePanel`） |
+| `src/components/` | 弹窗与设置块：导入（`ImportSplitTablesDialog`）、`SkuDetailDialog` + `SkuDetailTrigger`、补货与订单（`SkuOrderEditor` / `PurchaseOrderRecordsDialog`）、`OrderHistoryPanel`（下单历史子面板）、设置页各块（`PurchaseSettingsPanel` / `ScoringSettings` / `SpuGradeSettings` / `VatRuleSettings` / `HiddenSkusPanel` / `DataStoragePanel`） |
 | `src/stores/` | `inventory`（四页共用的库存与销售表状态）、`inventoryView`（主面板视图状态，只留内存）、`stocking`（方案配置）、`purchase`（设置、草稿与分订单） |
 | `src/data/` | 持久化唯一层：`repo.js` 契约、`indexedDbRepo.js` 实现、`db.js` 封装、`serialize.js` 序列化、`persistence.js` 快照与计划层、`bootstrap.js` 启动编排、`transfer.js` 全量导出导入、`panels.js` 导航、`inventoryItems.js` 种子 |
 | `src/stocking/` | 备货自包含模块，`config.json` 是唯一配置来源（v4 多方案） |
@@ -56,12 +59,13 @@
 | `src/workers/` | `cleanMergeWorker`（清洗）、`persistWorker`（快照 gzip） |
 | `tools/cleaning/` | 清洗引擎 + 命令行 `clean-merge.js` + 造数脚本 `simulate-customers.js`；自包含目录，不参与网页构建但**不要删除或改名** |
 | `tools/check-stocking.mjs` | 备货口径自检脚本 |
+| `electron/` | 桌面外壳：`main.cjs`（`app://` 固定 origin + 窗口）、`dev.mjs`（开发态起 Vite 再拉 Electron）、`make-update.mjs`（生成前端热更新包），配置在 `electron-builder.json` |
 | `docs/` | `功能说明/` 是各域口径（以它为准）；`需求文档/` 是需求原文；`prototype/` 是视觉原型 |
 
 ## 3. 最容易被改错的几件事
 
 - 四个面板共用同一个 `inventory` store；销售表是独立视图，行为以主面板为准。
-- 导入只有一个流程、一个入口：主面板「导入分表」→ 5 张分表 → Worker 清洗出总表 + 销售表 → 预览确认。销售表页**没有**自己的导入入口，空态也指向主面板。
+- 导入只有一个流程、一个入口：主面板「导入分表」→ 5 张分表 → Worker 清洗出总表 + 销售表 → 直接写入（无预览确认弹窗）。销售表页**没有**自己的导入入口，空态也指向主面板。
 - 客户CR5率只在销售表展示，是比例列（父行按累积条数加权平均，不求和），不写回主面板、不进备货配置。
 - 设置页是一个壳两个域：备货配置（模式与系数 / 销量加权 / 评分 / SPU 分级 / 筛选显示规则）与下单配置（缸规则 / 染厂清单 / 分单人员表 / 树形分类与分单 / SKU 可选染厂）。草稿只在点「确定」时落盘，未确定前切页要提示。
 - `SkuDetailDialog` 只传 `:item` + `v-model:visible`；行内入口是 24px 方形按钮 `SkuDetailTrigger`，别改回小圆点。
@@ -78,6 +82,7 @@
 | 采购下单 / 缸规则 / 到货 | [采购下单流程.md](./docs/功能说明/采购下单流程.md) | 需安排（= 待下单列表）→ 拆单 → 确认下单 → 到货；缸数与公斤单向换算；下单历史能看到批次 |
 | 持久化 / 种子 / 快照 | [数据持久化方案.md](./docs/功能说明/数据持久化方案.md) | 刷新页面数据还在；「设置 → 数据 → 本机数据存储」有快照与占用；清空后回到种子 |
 | 主面板大表性能 | [主面板性能优化.md](./docs/功能说明/主面板性能优化.md) | 3 万行级筛选与滚动不卡；虚拟列表滚动位置切页回来不变 |
+| Windows 离线桌面版 | [离线打包说明.md](./docs/功能说明/离线打包说明.md) | `npm run build` 产物仍是 `/kucunyujing/` 前缀；`npm run pack:win:dir` 启动后 origin 为 `app://kucunyujing`，切页与刷新数据都在；覆盖 `resources/web` 后数据仍在 |
 | 改了什么 | [开发迭代记录.md](./docs/功能说明/开发迭代记录.md) | 每次功能改动追加一节，写明需求编号与验证方式 |
 
 `需求文档/需求文档1.X.md` 是需求原文，与实现冲突时**以实现和 `功能说明/` 为准**。

@@ -26,7 +26,7 @@ export const SCORING_DIMENSIONS = [
   { key: 'growth', label: '销售环比率', unit: '%', decimals: 1 },
   { key: 'ratio', label: '本次进销比', unit: '%', decimals: 1 },
   { key: 'activeMonths', label: '动销月份', unit: '月', decimals: 0 },
-  { key: 'consumption', label: '预估月消耗', unit: '条', decimals: 1 },
+  { key: 'consumption', label: '预估月消耗', unit: '公斤', decimals: 1 },
 ]
 
 const SCORING_DEFAULTS = {
@@ -194,8 +194,10 @@ function formatNumber(value, decimals) {
   return decimals > 0 ? String(roundTo(value, decimals)) : String(Math.round(value))
 }
 
+// 展示口径：维度实测值一律取整（与主面板数量列一致）。`definition.decimals` 只用于
+// 分档判定前的取整与配置页输入步长，不再决定展示精度。
 function formatValue(value, definition) {
-  const text = formatNumber(value, definition.decimals)
+  const text = formatNumber(value, 0)
   return definition.unit === '%' ? `${text}%` : `${text} ${definition.unit}`
 }
 
@@ -275,25 +277,26 @@ function describeGrowth(counts, now) {
   if (previousValue === 0) {
     return `${current} 月 vs ${previous} 月：100%（${previous} 月销量为 0，按 100% 计；${current} 月 ${formatNumber(
       currentValue,
-      2,
+      0,
     )} 公斤）`
   }
   if (currentValue === 0) {
     return `${current} 月 vs ${previous} 月：-100%（${current} 月销量为 0，按 -100% 计；${previous} 月 ${formatNumber(
       previousValue,
-      2,
+      0,
     )} 公斤）`
   }
 
   const rate = ((currentValue - previousValue) / previousValue) * 100
-  return `${current} 月 vs ${previous} 月：${formatNumber(rate, 1)}%（${current} 月 ${formatNumber(
+  return `${current} 月 vs ${previous} 月：${formatNumber(rate, 0)}%（${current} 月 ${formatNumber(
     currentValue,
-    2,
-  )} 公斤 ÷ ${previous} 月 ${formatNumber(previousValue, 2)} 公斤）`
+    0,
+  )} 公斤 ÷ ${previous} 月 ${formatNumber(previousValue, 0)} 公斤）`
 }
 
 // 留空的端点按不限（-∞ / +∞）处理；三条区间都没命中时按中风险兜底。
-function tierOf(value, entry) {
+// 对外也用它：补货风险里的「本次进销比（按填报）」沿用同一套区间判定。
+export function matchScoringTier(value, entry) {
   for (const tier of TIER_MATCH_ORDER) {
     const band = entry.ranges[tier]
     const from = band.from ?? Number.NEGATIVE_INFINITY
@@ -367,21 +370,22 @@ function buildDetail(key, value, detail) {
 
   switch (key) {
     case 'cr5':
-      return `前 5 客户销量占比 ${formatNumber(value, 1)}%`
+      return `前 5 客户销量占比 ${formatNumber(value, 0)}%`
     case 'customers':
       return `累计客户 ${formatNumber(value, 0)} 个`
     case 'activeMonths':
       return `最长连续动销 ${formatNumber(value, 0)} 个月`
     case 'ratio':
-      return `建议补货 ${formatNumber(detail.suggestedKg, 2)} 公斤 ÷ 累积销量 ${formatNumber(
+      return `建议补货 ${formatNumber(detail.suggestedKg, 0)} 公斤 ÷ 累积销量 ${formatNumber(
         detail.cumulativeSales,
-        2,
+        0,
       )} 公斤`
     case 'consumption':
-      return `加权月销 ${formatNumber(detail.monthlySales, 2)} 公斤 − 预计库存 ${formatNumber(
+      // 两个操作数都按取整展示，等式用约等号，避免「看到的是整数、相减差 1」的疑问。
+      return `加权月销 ${formatNumber(detail.monthlySales, 0)} 公斤 − 预计库存 ${formatNumber(
         detail.projectedKg,
-        2,
-      )} 公斤`
+        0,
+      )} 公斤 ≈ ${formatNumber(value, 0)} 公斤`
     default:
       return ''
   }
@@ -406,7 +410,7 @@ export function evaluateScoring({
     const raw = values[definition.key]
     const available = Number.isFinite(raw)
     const value = available ? roundTo(raw, definition.decimals) : null
-    const tier = available ? tierOf(value, entry) : null
+    const tier = available ? matchScoringTier(value, entry) : null
     const score = tier ? scoring.scores[tier] : null
 
     return {
@@ -448,7 +452,7 @@ export function evaluateScoring({
   return {
     participates: true,
     total,
-    totalText: total === null ? '--' : formatNumber(total, 1),
+    totalText: total === null ? '--' : formatNumber(total, 0),
     tone,
     toneLabel:
       tone === 'red' ? '高风险' : tone === 'yellow' ? '中风险' : tone === 'green' ? '低风险' : '数据不足',
@@ -517,7 +521,7 @@ export function validateBulkScoring(source) {
   return errors
 }
 
-function describeBulkRule(key, scoring) {
+export function describeBulkRule(key, scoring) {
   const { normalFrom, normalTo } = scoring[key]
   if (key === 'ratio') {
     const from = `${formatNumber(normalFrom, 2)}%`
@@ -529,7 +533,7 @@ function describeBulkRule(key, scoring) {
   return `${from} ~ ${to} 个中风险，少于 ${from} 个高风险，多于 ${to} 个低风险`
 }
 
-function resolveBulkTier(key, value, scoring) {
+export function resolveBulkTier(key, value, scoring) {
   const { normalFrom, normalTo } = scoring[key]
   if (key === 'ratio') {
     if (value < normalFrom) return 'low'

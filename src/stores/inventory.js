@@ -4,6 +4,7 @@ import { initialInventoryItems } from '@/data/inventoryItems'
 import { applyPlanLayer } from '@/data/serialize'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 import { findBaselineMonth } from '@/stocking'
+import { composeProductColorSkuId } from '@/utils/inventory'
 
 // 演示数据只有基础数量列（周销量与库存 / 欠货 / 周转入）：唯一标识、动销指标、累积条数 /
 // 累积销量、客户CR5率、树形分类、1-12 月条数与销量都按周销量折算一组稳定数值，
@@ -91,6 +92,46 @@ function demoCustomerCr5(id, activeCustomers) {
   return (25 + ((id * 37) % 60)) / 100
 }
 
+// 每月客户数 / 累计客户数 / 每月 CR5（演示数据）：客户平摊到动销月份（当作每月都是新客户），
+// 累计列取前缀和；12 月还没有数据，累计保持末值、CR5 留空，与销量图一致。
+function demoCustomerSeries(totalCustomers, activeMonths, id) {
+  const perMonth = new Array(12).fill(0)
+  const cumulative = new Array(12).fill(0)
+  const cr5ByMonth = new Array(12).fill(null)
+  const months = Math.min(activeMonths, DEMO_LAST_MONTH)
+  if (totalCustomers > 0 && months > 0) {
+    const base = Math.floor(totalCustomers / months)
+    let rest = totalCustomers - base * months
+    for (let offset = 0; offset < months; offset += 1) {
+      const index = DEMO_LAST_MONTH - 1 - offset
+      perMonth[index] = base + (rest > 0 ? 1 : 0)
+      if (rest > 0) rest -= 1
+    }
+  }
+
+  const overallCr5 = demoCustomerCr5(id, totalCustomers)
+  let running = 0
+  for (let index = 0; index < 12; index += 1) {
+    running += perMonth[index]
+    cumulative[index] = running
+    if (perMonth[index] > 0 && overallCr5 !== null) {
+      // 每月在整体 CR5 附近浮动 ±6%，折线才有起伏
+      const shift = ((index % 3) - 1) * 0.06
+      cr5ByMonth[index] = Number(Math.min(1, Math.max(0.01, overallCr5 + shift)).toFixed(4))
+    }
+  }
+  return { perMonth, cumulative, cr5ByMonth }
+}
+
+// 累计销量（公斤）：逐月累加，后面的空月保持末值（与累计客户数同一写法）。
+function demoCumulativeSeries(series) {
+  let running = 0
+  return series.map((value) => {
+    if (Number.isFinite(value)) running += value
+    return Number(running.toFixed(2))
+  })
+}
+
 function withDemoSourceFields(item) {
   // 周消耗 × 4 周 = 月均条数（与清洗口径「周消耗 = 月均条数 ÷ 4」一致）。
   const monthlyAvg = item.monthlyAvgCount ?? item.weeklyUsage * 4
@@ -103,7 +144,7 @@ function withDemoSourceFields(item) {
   const activeCustomers = item.activeCustomers ?? demoCustomers(monthlyAvg, item.id)
   return {
     ...item,
-    skuId: item.skuId ?? `DEMO-${String(item.id).padStart(3, '0')}`,
+    skuId: item.skuId ?? composeProductColorSkuId(item.product, item.color),
     treeCategory: item.treeCategory ?? DEMO_TREE_CATEGORIES[item.product] ?? '',
     totalOutbound: item.totalOutbound ?? 0,
     monthlyAvgCount,
@@ -127,10 +168,18 @@ function withDemoSourceFields(item) {
 function createDemoSalesSheet(items) {
   const bySku = new Map()
   for (const item of items) {
+    const customerSeries = demoCustomerSeries(item.activeCustomers, item.activeMonths, item.id)
+    const orderSeries = demoMonthlySeries(item.totalOrders, item.activeMonths)
     bySku.set(item.skuId, {
       counts: [...item.monthCounts],
       sales: [...item.monthSales],
-      orders: demoMonthlySeries(item.totalOrders, item.activeMonths),
+      orders: orderSeries,
+      customers: customerSeries.perMonth,
+      cumulativeCustomers: customerSeries.cumulative,
+      cr5ByMonth: customerSeries.cr5ByMonth,
+      cumulativeSalesByMonth: demoCumulativeSeries(item.monthSales),
+      cumulativeCountByMonth: demoCumulativeSeries(item.monthCounts),
+      cumulativeOrdersByMonth: demoCumulativeSeries(orderSeries),
       metrics: Object.fromEntries(DEMO_METRIC_FIELDS.map((field) => [field, item[field] ?? null])),
       cr5: demoCustomerCr5(item.id, item.activeCustomers),
       cumulativeSales: item.cumulativeSales ?? null,
