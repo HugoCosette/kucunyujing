@@ -21,6 +21,9 @@ const HEADER_ALIASES = new Map([
   ['公斤系数', 'kgFactor'],
   ['出码率', 'unitRate'],
   ['单位', 'unit'],
+  // 在途对账的到仓信号：生产入库 / 退货入库（总表新增列，旧文件缺列时按 0）
+  ['生产入库', 'producedIn'],
+  ['退货入库', 'returnedIn'],
   // 旧版总表仍用「在途库存」列名承载进仓重量：保留别名，兼容旧文件。
   ['在途库存', 'inTransitStock'],
   // 以下列已不参与总表导入，只用于统计并提示。
@@ -199,6 +202,9 @@ export function parseInventorySheet(rows) {
         readCell('unit'),
       ),
       unitRate: Number(String(readCell('unitRate') ?? '').trim().replace(/,/g, '')) || null,
+      // 到仓信号（公斤）：生产入库用于冲抵在途，退货入库只算库存增加
+      producedIn: parseQuantity(readCell('producedIn'), '生产入库', row.rowNumber, rowErrors),
+      returnedIn: parseQuantity(readCell('returnedIn'), '退货入库', row.rowNumber, rowErrors),
       ...quantities,
     })
   }

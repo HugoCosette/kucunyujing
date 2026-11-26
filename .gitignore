@@ -47,6 +47,9 @@ tools/cleaning/data/*
 !tools/cleaning/data/.gitkeep
 tools/cleaning/output/
 
+# 开发态回写的分订单调试镜像（种子 src/purchase/orders.json 保持为空）
+src/purchase/orders.dev.json
+
 # 表格文件一律不入库：体积大，且含真实业务数据（历史已清理）
 # 若确实需要让某个样板/模板入库，用 !path/to/file.xlsx 单独放行
 *.xlsx

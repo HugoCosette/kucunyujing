@@ -33,6 +33,8 @@ const CONFIG = {
     '周销量', // 月均销量（公斤）÷ 4
     '周转入', // 暂无数据源（出入库明细无周转入单据）
     '生产中', // 生产排单的「进仓重量」（公斤）
+    '生产入库', // 出入库明细「入库数量」里来源单据为生产/加工入库的部分（公斤）：到仓信号
+    '退货入库', // 出入库明细「入库数量」里来源单据含「退货」的部分（公斤）：只增库存，不算到仓
     '在仓库存',
     '总出库数量',
   ],
@@ -47,6 +49,26 @@ function isKilogramConvertible(row) {
   if (unit === '公斤') return true
   if (unit === '码') return toNumber(row['出码率']) > 0
   return false
+}
+
+// —— 出入库明细的两个入端口径（列级过滤）——
+// 出库行（出库数量 > 0）照旧算销量 / 订单 / 客户 / 月份；入库行（入库数量 > 0）只进这两列，
+// 绝不混进动销指标。生产入库是「到仓信号」，退货入库只增加库存、不冲抵在途。
+const INBOUND_FIELD = '入库数量'
+const SOURCE_DOC_FIELD = '来源单据'
+const PRODUCTION_INBOUND_PATTERN = /生产入库|加工入库|生产进仓|加工进仓/
+const RETURN_INBOUND_PATTERN = /退货/
+
+function hasInboundQty(row) {
+  return toNumber(row[INBOUND_FIELD]) > 0
+}
+
+function isProductionInbound(row) {
+  return hasInboundQty(row) && PRODUCTION_INBOUND_PATTERN.test(cellText(row[SOURCE_DOC_FIELD]))
+}
+
+function isReturnInbound(row) {
+  return hasInboundQty(row) && RETURN_INBOUND_PATTERN.test(cellText(row[SOURCE_DOC_FIELD]))
 }
 
 /** 基准表：决定总表的行集合（左连接主表）。
@@ -94,8 +116,11 @@ const RATES = {
 const JOINS = [
   {
     label: '出入库明细',
-    // 出库数量=0 的行是退货/纯入库，不算订单、也不算动销月份
-    rowFilter: (row) => toNumber(row['出库数量']) > 0,
+    // 出库行照旧算销量；入库行（出库数量为 0）只进「生产入库 / 退货入库」两列，
+    // 既不算订单、也不算动销月份（见列级 when）。
+    rowFilter: (row) => toNumber(row['出库数量']) > 0 || hasInboundQty(row),
+    // 老列统一只统计出库行；入库列在自己的 when 里单独放行。
+    defaultWhen: (row) => toNumber(row['出库数量']) > 0,
     columns: [
       { field: '出库数量', as: '总出库数量' },
       // 累积条数 = 总出库数量 ÷ 单位换算系数（码→100、公斤→20；件/条等无规则的记 0），只用于判定模式与 SPU 展示
@@ -123,6 +148,26 @@ const JOINS = [
         top: 5,
         customerField: '客户',
         digits: 4,
+        optional: true,
+      },
+      // 生产入库（公斤）：到仓信号，来源单据为生产/加工入库
+      {
+        field: INBOUND_FIELD,
+        as: '生产入库',
+        toKilogram: true,
+        digits: 2,
+        when: isProductionInbound,
+        whenFields: [SOURCE_DOC_FIELD],
+        optional: true,
+      },
+      // 退货入库（公斤）：客户退货回到仓里，只增加库存，不冲抵在途
+      {
+        field: INBOUND_FIELD,
+        as: '退货入库',
+        toKilogram: true,
+        digits: 2,
+        when: isReturnInbound,
+        whenFields: [SOURCE_DOC_FIELD],
         optional: true,
       },
     ],
@@ -605,6 +650,7 @@ function sourceFields(source) {
     if (column.divideBy?.field) fields.add(column.divideBy.field)
     if (column.onlyUnits?.field) fields.add(column.onlyUnits.field)
     if (column.monthDateField) fields.add(column.monthDateField)
+    for (const name of column.whenFields ?? []) fields.add(name)
   }
   return [...fields]
 }
@@ -754,6 +800,13 @@ function createAggregator(source, base) {
   const seenYears = new Set()
   let incompleteRows = 0
 
+  // 列级放行：列上有 when 就用它，否则用数据源的 defaultWhen。
+  // 出入库明细靠这个把「入库行」挡在销量 / 订单 / 客户 / 月份之外，只让入库列通过。
+  const columnAllowed = (column, row) => {
+    const gate = column.when ?? source.defaultWhen
+    return !gate || gate(row)
+  }
+
   const add = (row) => {
     if (source.rowFilter && !source.rowFilter(row)) return
     const parts = keyParts(row, source.keyFields)
@@ -776,6 +829,7 @@ function createAggregator(source, base) {
         if (column.onlyUnits && !column.onlyUnits.include.includes(textValue(row[column.onlyUnits.field]))) {
           return
         }
+        if (!columnAllowed(column, row)) return
         current[i] = updateState(column, current[i], row)
       })
     }
@@ -801,13 +855,18 @@ function createAggregator(source, base) {
           if (column.onlyUnits && !column.onlyUnits.include.includes(textValue(row[column.onlyUnits.field]))) {
             return
           }
+          if (!columnAllowed(column, row)) return
           current[i] = updateState(column, current[i], row)
         })
       }
     }
 
     // 客户首见月要跨年看（累计客户数含往年客户），所以不受上面「只统计最新一年」的限制
-    if (cumulativeCustomerColumns.length && parsedMonth) {
+    if (
+      cumulativeCustomerColumns.length &&
+      parsedMonth &&
+      columnAllowed(cumulativeCustomerColumns[0], row)
+    ) {
       const customer = textValue(row[cumulativeCustomerColumns[0].field])
       if (customer) {
         let firstMonths = customerFirstMonths.get(key)
@@ -824,7 +883,9 @@ function createAggregator(source, base) {
     // 累计销量 / 条数 / 订单都要含往年：按行顺序攒全历史总量（与卡片同一次累加），
     // 再按月攒一份，finish 时用「全历史 − 本月之后」得出截至当月，末月必然等于卡片值
     for (const kind of cumulativeKinds) {
-      const value = cumulativeRowValue(cumulativeSample.get(kind), row)
+      const sample = cumulativeSample.get(kind)
+      if (!columnAllowed(sample, row)) continue
+      const value = cumulativeRowValue(sample, row)
       const id = `${kind}|${key}`
       cumulativeTotals.set(id, (cumulativeTotals.get(id) || 0) + value)
       if (!parsedMonth || value === 0) continue

@@ -111,6 +111,25 @@ export function buildOrderIndex(orders) {
   return index
 }
 
+// 累计下单（公斤）：把订单聚合索引压成 skuId → 公斤，供在途对账使用。
+// 口径仍然只有 buildOrderIndex 一份，这里只做投影，不再另算一遍。
+export function orderedTotalsOf(index) {
+  const totals = new Map()
+  for (const [skuId, entry] of index ?? []) {
+    if (entry?.ordered > 0) totals.set(skuId, entry.ordered)
+  }
+  return totals
+}
+
+// 手工登记的到货（公斤）：与导入的生产入库一样算「已到仓」，两者相加才是到仓累计。
+export function receivedTotalsOf(index) {
+  const totals = new Map()
+  for (const [skuId, entry] of index ?? []) {
+    if (entry?.received > 0) totals.set(skuId, entry.received)
+  }
+  return totals
+}
+
 export function orderSummaryOf(index, skuId) {
   const key = String(skuId ?? '').trim()
   return (key && index?.get(key)) || EMPTY_ORDER_ENTRY

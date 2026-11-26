@@ -17,15 +17,19 @@ import {
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import AddSkuDialog from '@/components/AddSkuDialog.vue'
 import ImportSplitTablesDialog from '@/components/ImportSplitTablesDialog.vue'
+import ImportDiffDialog from '@/components/ImportDiffDialog.vue'
 import PurchaseOrderRecordsDialog from '@/components/PurchaseOrderRecordsDialog.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
+import TableHeaderHint from '@/components/TableHeaderHint.vue'
 import VirtualList from '@/components/VirtualList.vue'
 import { useSourceImport } from '@/composables/useSourceImport'
 import { useSplitImport } from '@/composables/useSplitImport'
 import { useInventoryStore } from '@/stores/inventory'
 import { useInventoryViewStore } from '@/stores/inventoryView'
 import { usePurchaseStore } from '@/stores/purchase'
+import { buildInventoryColumnHints, checkInventoryColumnHints } from '@/data/columnHints'
+import { loadImportDiffs } from '@/data/importDiff'
 import { MAIN_PANEL } from '@/data/panels'
 import { persistFactLayer, schedulePlanPersist } from '@/data/persistence'
 import { orderSummaryOf } from '@/purchase'
@@ -72,6 +76,8 @@ const bulkHealthScoring = computed(
   () =>
     getAutoModes(stockingStore.config).find((mode) => mode.key === 'bulk')?.healthScoring ?? null,
 )
+// 表头悬停说明里的模式区间 / 评分权重等数字跟着当前方案走，改配置后自动重算。
+const columnHints = computed(() => buildInventoryColumnHints(stockingStore.config))
 // 行对象在导入 / 改配置时整体重建，按行缓存不会读到旧分；salesSheet / scoring 再各校验一次。
 const rowHealthCache = new WeakMap()
 function getRowHealth(row) {
@@ -132,6 +138,8 @@ const displayFilters = computed(() =>
 const lowPlannedThreshold = computed(() => resolveLowPlannedThreshold(displayFilters.value))
 const inventoryItems = inventoryStore.inventoryItems
 const plannedUndoHistory = inventoryStore.plannedUndoHistory
+// 在途对账：每行的已安排 / 生产中 / 在途都从这里取，口径只在 store 里算一份。
+const inTransitOf = inventoryStore.inTransitOf
 // 采购下单模块：分订单以唯一标识为键；哪些 SKU 要下、下多少完全由「需安排」决定。
 const purchaseStore = usePurchaseStore()
 const productCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
@@ -145,6 +153,7 @@ const {
   selectedSpuGradeKeys,
   onlyOrdered,
   onlyOrdering,
+  onlyArrived,
   expandedProductKeys,
   selectedSkuIds,
   selectedRowId,
@@ -375,6 +384,20 @@ const {
   cancel: cancelSplitImport,
 } = useSplitImport({ sourceImport })
 
+// 「SKU 数据变动」：每次导入后自动弹一次差异汇总；历史几份（含刷新后）从「数据变动」按钮回看。
+// diff 由 data 层在导入时算好并落盘（src/data/importDiff.js），这里只负责读出来给弹窗。
+const importDiffs = shallowRef([])
+const importDiffDialogVisible = ref(false)
+
+async function refreshImportDiffs() {
+  importDiffs.value = await loadImportDiffs()
+}
+
+function openImportDiffDialog() {
+  if (!importDiffs.value.length) return
+  importDiffDialogVisible.value = true
+}
+
 // —— 派生数据 ——
 // 3 万行量级下不能靠 computed 全量重算，改为「单行缓存 + 增量刷新」：
 // 结构性变化（导入/新增/改品名）才重建排序，编辑数值时只重算该行。
@@ -387,12 +410,14 @@ const itemById = computed(() => {
 function buildLeafRow(item) {
   // 模式与系数按当前配置现算：配置改动后重新渲染即同步，无需额外回写。
   const evaluated = evaluateItem(item, stockingEvaluator.value)
-  // 采购执行层：已下单 / 已到货来自订单流水（只统计 active），直接进预计库存。
+  // 采购执行层：已下单 / 已到货来自订单流水（只统计 active）；
+  // 在途由 src/purchase/inTransit.js 对账得出，传入后预计库存改用「在仓 + 在途 + 需安排」。
   const orders = orderSummaryOf(purchaseStore.orderIndex, evaluated.skuId)
   const row = calculateInventoryRow({
     ...evaluated,
     ordered: orders.ordered,
     received: orders.received,
+    ...(inTransitOf(evaluated.skuId) ?? {}),
   })
   return {
     ...row,
@@ -546,6 +571,8 @@ function refreshLeafRows(ids) {
 rebuildLeafRows()
 // 新增、导入等改变行数的情况兜底重建。
 watch(() => inventoryItems.length, rebuildLeafRows)
+// 行数不变但数据集换了（每天导入同一批 SKU）时，靠事实层版本号重建。
+watch(() => inventoryStore.factRevision, rebuildLeafRows)
 // 备货配置（模式 / 系数）修改后，整表按新配置重算。
 watch(() => stockingStore.config, rebuildLeafRows)
 // 手动清单变化（策略切换、改系数、恢复自动）同样要整表重算。
@@ -586,7 +613,23 @@ function buildRowWithPlanned(item, planned) {
     ...evaluated,
     ordered: orders.ordered,
     received: orders.received,
+    ...(inTransitOf(evaluated.skuId) ?? {}),
   })
+}
+
+// —— 在途三列（已安排 / 生产中 / 在途）——
+// 都来自对账结果；没有基线（还没导入过）时退回导入值 / 旧口径，不让列变空。
+function producingText(row) {
+  return formatQuantity(Number.isFinite(row.producingKg) ? row.producingKg : row.inTransitStock)
+}
+
+function arrangedText(row) {
+  return Number.isFinite(row.arrangedKg) ? formatQuantity(row.arrangedKg) : '—'
+}
+
+function inTransitText(row) {
+  if (Number.isFinite(row.inTransitKg)) return formatQuantity(row.inTransitKg)
+  return row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered)
 }
 
 function previewOfLeaf(row) {
@@ -725,9 +768,11 @@ function openOrderDialog(row) {
 
 function orderCellTitle(row) {
   if (!row || row.isProductGroup) return ''
-  return `累计下单 ${formatQuantity(row.ordered)} 公斤，到货 ${formatQuantity(
-    row.received,
-  )} 公斤，待收 ${formatQuantity(row.pendingOrder)} 公斤`
+  const inTransit = Number.isFinite(row.inTransitKg) ? row.inTransitKg : null
+  // 在途归零 = 这批货已经进仓，行尾图标转灰：它是「下过单」的记录，不再是待收。
+  const state =
+    inTransit === null ? '' : inTransit > 0 ? `在途 ${formatQuantity(inTransit)} 公斤` : '已全部到仓'
+  return `下过单${state ? `（${state}）` : ''}：累计下单 ${formatQuantity(row.ordered)} 公斤，点行尾图标看分订单`
 }
 
 // 撤销订单后把公斤数退回需安排：落在未锁的草稿层（显示但不计入预计库存），
@@ -802,6 +847,7 @@ const hasActiveFilters = computed(
     colorFilter.value.trim() !== '' ||
     onlyOrdered.value ||
     onlyOrdering.value ||
+    onlyArrived.value ||
     selectedWarningTones.value.length > 0 ||
     selectedModeLabels.value.length > 0 ||
     selectedSpuGradeKeys.value.length > 0,
@@ -820,19 +866,51 @@ const isAllFilterSelected = computed(
   () =>
     !onlyOrdered.value &&
     !onlyOrdering.value &&
+    !onlyArrived.value &&
     selectedWarningTones.value.length === 0,
 )
 
-// 「已下单」筛的是采购执行层：该 SKU 有未作废的分订单（累积下单 > 0）。
-// 与「下单中」互斥，属于采购状态组；两者分别计数，与预警组同口径（按资料类筛选后的范围算）。
+// 采购状态三态（互斥）：下单中（已采纳、等确认下单）→ 已下单（确认了、还没到仓）→ 已到仓（下过单、货已全部进仓）。
+// 判据都看在途（已安排 + 生产中），不看只增不减的「累积下单」：累积下单到仓后还是原值，
+// 拿它当「已下单」会让货已经进仓的 SKU 一直挂在「已下单」里，跟预警的时间轴对不上。
+function hasOrderInTransit(row) {
+  return (row.inTransitKg ?? 0) > 0
+}
+
+// 已下单 = 我们下过单（有有效订单流水）且货还没到仓。只看到途不够：
+// 第一次导入时排单表里可能本来就有产量（提前备货 / 外面下的单），那批货不是「我们已下单」。
+function isOrderWaitingArrival(row) {
+  return (row.ordered ?? 0) > 0 && hasOrderInTransit(row)
+}
+
+// 已到仓 = 下过单，且那批货已经全部进仓（在途归零），回到普通 SKU 等下一次预警。
+function isOrderSettled(row) {
+  return (row.ordered ?? 0) > 0 && !hasOrderInTransit(row)
+}
+
+// 三个 chip 分别计数，与预警组同口径（按资料类筛选后的范围算）。
 const orderedCount = computed(
-  () => scopedInventoryLeafRows.value.filter((row) => (row.ordered ?? 0) > 0).length,
+  () => scopedInventoryLeafRows.value.filter(isOrderWaitingArrival).length,
+)
+
+// 已到仓 = 下过单但已经全部到仓：留个记录，方便回看「这个品上次那单到齐没有」。
+const arrivedCount = computed(
+  () => scopedInventoryLeafRows.value.filter(isOrderSettled).length,
 )
 
 function toggleOrderFilter() {
   const isSelected = onlyOrdered.value
   selectedWarningTones.value = []
   onlyOrdered.value = !isSelected
+  onlyOrdering.value = false
+  onlyArrived.value = false
+}
+
+function toggleArrivedFilter() {
+  const isSelected = onlyArrived.value
+  selectedWarningTones.value = []
+  onlyArrived.value = !isSelected
+  onlyOrdered.value = false
   onlyOrdering.value = false
 }
 
@@ -845,6 +923,7 @@ function toggleOrderingFilter() {
   const isSelected = onlyOrdering.value
   selectedWarningTones.value = []
   onlyOrdered.value = false
+  onlyArrived.value = false
   onlyOrdering.value = !isSelected
 }
 
@@ -900,14 +979,16 @@ const filteredInventoryLeafRows = computed(() => {
   const tones = selectedWarningTones.value
   const orderedOnly = onlyOrdered.value
   const orderingOnly = onlyOrdering.value
+  const arrivedOnly = onlyArrived.value
   const scoped = scopedInventoryLeafRows.value
-  if (tones.length === 0 && !orderedOnly && !orderingOnly) return scoped
+  if (tones.length === 0 && !orderedOnly && !orderingOnly && !arrivedOnly) return scoped
   const toneSet = tones.length > 0 ? new Set(tones) : null
   return scoped.filter(
     (row) =>
       (!toneSet || (toneSet.has(dataTone(row)) && !isLowPlanned(row))) &&
-      (!orderedOnly || (row.ordered ?? 0) > 0) &&
-      (!orderingOnly || isPlannedLocked(row)),
+      (!orderedOnly || isOrderWaitingArrival(row)) &&
+      (!orderingOnly || isPlannedLocked(row)) &&
+      (!arrivedOnly || isOrderSettled(row)),
   )
 })
 const inventoryRows = computed(() => {
@@ -926,6 +1007,7 @@ function resetFilters() {
   colorFilter.value = ''
   onlyOrdered.value = false
   onlyOrdering.value = false
+  onlyArrived.value = false
   selectedWarningTones.value = []
   selectedModeLabels.value = []
   selectedSpuGradeKeys.value = []
@@ -941,12 +1023,14 @@ function toggleWarningFilter(key) {
   if (key === 'all') {
     onlyOrdered.value = false
     onlyOrdering.value = false
+    onlyArrived.value = false
     selectedWarningTones.value = []
     return
   }
 
   onlyOrdered.value = false
   onlyOrdering.value = false
+  onlyArrived.value = false
   const selectedTones = new Set(selectedWarningTones.value)
   if (selectedTones.has(key)) selectedTones.delete(key)
   else selectedTones.add(key)
@@ -1019,7 +1103,6 @@ function toggleAllProductGroups() {
 // 只渲染视口内的行，DOM 节点数量与数据量解耦。
 const TABLE_ROW_HEIGHT = 34
 const TABLE_OVERSCAN = 8
-const isStockingGroupExpanded = ref(false)
 const TABLE_COLUMNS = [
   // 批量补货勾选列：表头是全选（作用于当前筛选结果），品名父行勾选连带其下所有 SKU。
   { key: 'select', label: '选择', width: 44, group: '选择' },
@@ -1030,10 +1113,11 @@ const TABLE_COLUMNS = [
   { key: 'urgency', label: '预警', width: 44, group: '商品' },
   { key: 'planned', label: '需安排', width: 142, group: '入口' },
   { key: 'inTransitStock', label: '生产中', width: 84, group: '入口' },
-  // 「备货」= 采购执行层：只来自订单流水，与导入数据无关。三列互为校验：累积下单 = 待收 + 到货。
-  { key: 'ordered', label: '累积下单', width: 84, group: '备货' },
-  { key: 'pending', label: '待收', width: 76, group: '备货' },
-  { key: 'received', label: '到货', width: 78, group: '备货' },
+  // 已安排 = 下了单但还没上排单的部分；生产中 + 已安排 = 在途（见 src/purchase/inTransit.js）
+  { key: 'arranged', label: '已安排', width: 84, group: '入口' },
+  // 下过单 = 订单流水的累计下单（只增不减，留痕用）。到没到仓看在途库存列：
+  // 「待收 / 到货」两列已删 —— 到仓事实以导入的出入库明细为准，手工到货只做兜底。
+  { key: 'ordered', label: '下过单', width: 84, group: '入口' },
   { key: 'backorder', label: '欠货', width: 68, group: '出口' },
   { key: 'weeklySales', label: '周销量', width: 76, group: '出口' },
   { key: 'turnoverIn', label: '周转入', width: 74, group: '库存(公斤)' },
@@ -1046,17 +1130,7 @@ const TABLE_COLUMNS = [
   { key: 'shortage', label: '缺口量', width: 72, group: '数据反馈' },
   { key: 'shortageRate', label: '缺口率', width: 76, group: '数据反馈' },
 ]
-const visibleTableColumns = computed(() => {
-  if (isStockingGroupExpanded.value) return TABLE_COLUMNS
-
-  let insertedStockingPlaceholder = false
-  return TABLE_COLUMNS.flatMap((column) => {
-    if (column.group !== '备货') return [column]
-    if (insertedStockingPlaceholder) return []
-    insertedStockingPlaceholder = true
-    return [{ key: 'stockingGroupPlaceholder', label: '', width: 44, group: '备货' }]
-  })
-})
+const visibleTableColumns = computed(() => TABLE_COLUMNS)
 // 各列按自身宽度分配剩余空间，始终铺满可用宽度，避免右侧出现空列
 const tableGridTemplate = computed(() =>
   visibleTableColumns.value
@@ -1075,6 +1149,11 @@ const tableColumnGroups = computed(() => {
   }
   return groups
 })
+
+// 开发态自检：增删列后忘了补 / 清表头说明时在控制台点名（生产构建不执行）。
+if (import.meta.env.DEV) {
+  checkInventoryColumnHints(TABLE_COLUMNS, columnHints.value)
+}
 
 const tableScrollRef = ref(null)
 const tableViewportHeight = ref(600)
@@ -1191,6 +1270,7 @@ watch(
     selectedSpuGradeKeys,
     onlyOrdered,
     onlyOrdering,
+    onlyArrived,
   ],
   () => {
     tableScrollTop.value = 0
@@ -1269,6 +1349,8 @@ function restoreTableView() {
 
 onMounted(() => {
   restoreTableView()
+  // 「数据变动」按钮要知道有没有历史记录可看，启动时把最近几份读进内存。
+  void refreshImportDiffs()
   const element = tableScrollRef.value
   if (!element) return
   tableViewportHeight.value = element.clientHeight || tableViewportHeight.value
@@ -1836,7 +1918,7 @@ function handleProductCellClick(row) {
 }
 
 // 导入成功后清空需安排草稿并重建表格；总表与销售表的写入已在 useSourceImport 内完成。
-function handleSourcesImported(summary) {
+async function handleSourcesImported(summary, diff) {
   for (const key of Object.keys(plannedDrafts)) delete plannedDrafts[key]
   plannedPreviews.clear()
   autoFilledDrafts.clear()
@@ -1864,6 +1946,12 @@ function handleSourcesImported(summary) {
     )
   }
   showImportToast(`成功导入：${messages.join('；')}`)
+
+  // 导入完直接把「这次变了什么」摆出来：主面板是全量数据，不看这份看不出变化。
+  if (diff) {
+    await refreshImportDiffs()
+    importDiffDialogVisible.value = true
+  }
 }
 
 </script>
@@ -1902,6 +1990,19 @@ function handleSourcesImported(summary) {
           @click="triggerSplitImport"
         >
           导入分表
+        </ElButton>
+        <ElButton
+          class="import-diff-button"
+          size="small"
+          :disabled="importDiffs.length === 0"
+          :title="
+            importDiffs.length === 0
+              ? '导入一次分表后，这里能看到每个 SKU 的库存 / 销量 / 排单 / 入库变化'
+              : `看最近一次导入的 SKU 数据变动（共保留 ${importDiffs.length} 份）`
+          "
+          @click="openImportDiffDialog"
+        >
+          数据变动
         </ElButton>
         <div class="page-head__actions">
           <ElButton
@@ -2032,11 +2133,22 @@ function handleSourcesImported(summary) {
               class="warning-filter warning-filter--order"
               :class="{ 'warning-filter--active': onlyOrdered }"
               :aria-pressed="onlyOrdered"
-              :title="`只看已下单（有备货订单）的 SKU，当前筛选内共 ${orderedCount} 个`"
+              :title="`只看已下单、还没到仓（在途 > 0）的 SKU，当前筛选内共 ${orderedCount} 个`"
               @click="toggleOrderFilter"
             >
               已下单
               <span class="warning-filter-count">{{ orderedCount }}</span>
+            </button>
+            <button
+              type="button"
+              class="warning-filter warning-filter--arrived"
+              :class="{ 'warning-filter--active': onlyArrived }"
+              :aria-pressed="onlyArrived"
+              :title="`只看下过单、货已全部到仓（在途 = 0）的 SKU，当前筛选内共 ${arrivedCount} 个`"
+              @click="toggleArrivedFilter"
+            >
+              已到仓
+              <span class="warning-filter-count">{{ arrivedCount }}</span>
             </button>
           </div>
           <div class="filter-group" role="group" aria-label="预警状态筛选">
@@ -2095,18 +2207,7 @@ function handleSourcesImported(summary) {
               class="inventory-vtable__head-cell inventory-vtable__head-cell--group"
               :style="{ gridColumn: `span ${group.span}` }"
             >
-              <button
-                v-if="group.label === '备货'"
-                type="button"
-                class="stocking-group-toggle"
-                :aria-expanded="isStockingGroupExpanded"
-                :title="isStockingGroupExpanded ? '收起备货列' : '展开备货列'"
-                @click="isStockingGroupExpanded = !isStockingGroupExpanded"
-              >
-                <span>{{ group.label }}</span>
-                <span aria-hidden="true">{{ isStockingGroupExpanded ? '▾' : '▸' }}</span>
-              </button>
-              <template v-else>{{ group.label }}</template>
+              {{ group.label }}
             </div>
           </div>
           <div
@@ -2117,7 +2218,6 @@ function handleSourcesImported(summary) {
               v-for="column in visibleTableColumns"
               :key="column.key"
               class="inventory-vtable__head-cell"
-              :aria-hidden="column.key === 'stockingGroupPlaceholder' ? 'true' : undefined"
               :class="{
                 'inventory-vtable__head-cell--deep-right':
                   column.key === 'inTransitStock' || column.key === 'warehouseStock',
@@ -2131,8 +2231,11 @@ function handleSourcesImported(summary) {
                 aria-label="全选当前筛选结果"
                 @change="toggleSelectAllFiltered"
               />
-              <span v-else-if="column.key === 'stockingGroupPlaceholder'" aria-hidden="true" />
-              <template v-else>{{ column.label }}</template>
+              <TableHeaderHint
+                v-else
+                :label="column.label"
+                :hint="columnHints[column.key] ?? null"
+              />
             </div>
           </div>
         </div>
@@ -2350,39 +2453,18 @@ function handleSourcesImported(summary) {
                 </div>
               </div>
               <div class="inventory-vtable__cell inventory-vtable__cell--deep-right">
-                {{ formatQuantity(row.inTransitStock) }}
+                {{ producingText(row) }}
+              </div>
+              <div class="inventory-vtable__cell">
+                {{ arrangedText(row) }}
               </div>
               <div
-                v-if="!isStockingGroupExpanded"
-                class="inventory-vtable__cell inventory-vtable__cell--stocking-placeholder"
-                aria-hidden="true"
-              />
-              <div
-                v-if="isStockingGroupExpanded"
                 class="inventory-vtable__cell inventory-vtable__cell--ordered"
                 :title="orderCellTitle(row)"
               >
                 <span class="ordered-value">
                   {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
                 </span>
-              </div>
-              <div
-                v-if="isStockingGroupExpanded"
-                class="inventory-vtable__cell"
-                :title="orderCellTitle(row)"
-              >
-                {{
-                  row.isProductGroup && !row.pendingOrder
-                    ? '—'
-                    : formatQuantity(row.pendingOrder)
-                }}
-              </div>
-              <div
-                v-if="isStockingGroupExpanded"
-                class="inventory-vtable__cell inventory-vtable__cell--received"
-                :title="orderCellTitle(row)"
-              >
-                {{ row.isProductGroup && !row.received ? '—' : formatQuantity(row.received) }}
               </div>
               <div class="inventory-vtable__cell">
                 {{ formatQuantity(row.backorder) }}
@@ -2398,13 +2480,14 @@ function handleSourcesImported(summary) {
                 :title="orderCellTitle(row)"
               >
                 <span class="in-transit-ordered-value">
-                  {{ row.isProductGroup && !row.ordered ? '—' : formatQuantity(row.ordered) }}
+                  {{ inTransitText(row) }}
                 </span>
                 <button
                   v-if="!row.isProductGroup && row.ordered > 0"
                   type="button"
                   class="ordered-detail-button"
-                  :aria-label="`查看 ${row.product} ${row.color} 的采购订单`"
+                  :class="{ 'ordered-detail-button--settled': !hasOrderInTransit(row) }"
+                  :aria-label="`查看 ${row.product} ${row.color} 的采购订单（下过单）`"
                   title="查看采购订单详情"
                   @click.stop="openOrderDialog(row)"
                 >
@@ -2601,6 +2684,8 @@ function handleSourcesImported(summary) {
       :item="orderDialogRow"
       @cancelled="handleOrderCancelled"
     />
+
+    <ImportDiffDialog v-model="importDiffDialogVisible" :entries="importDiffs" />
 
     <AddSkuDialog
       v-model:visible="addSkuDialogVisible"
@@ -3037,6 +3122,16 @@ function handleSourcesImported(summary) {
   --el-button-active-border-color: var(--industrial-primary-active);
 }
 
+/* 「数据变动」是查看入口，不跟导入抢注意力：默认描边按钮，没记录时置灰 */
+.import-diff-button {
+  --el-button-text-color: var(--industrial-text);
+  --el-button-bg-color: var(--industrial-surface);
+  --el-button-border-color: var(--industrial-grid);
+  --el-button-hover-text-color: var(--industrial-primary);
+  --el-button-hover-bg-color: #eaf1f4;
+  --el-button-hover-border-color: var(--industrial-primary);
+}
+
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
@@ -3314,25 +3409,6 @@ function handleSourcesImported(summary) {
   font-weight: 600;
 }
 
-.stocking-group-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-.stocking-group-toggle:focus-visible {
-  outline: 2px solid var(--industrial-primary);
-  outline-offset: -2px;
-}
-
 .inventory-vtable__row > :last-child {
   border-right: 0;
 }
@@ -3416,6 +3492,19 @@ function handleSourcesImported(summary) {
 /* 整行悬停时把入口提亮一档：图标本身低调，但鼠标在这行上就能看见它 */
 .inventory-vtable__row--body:hover .ordered-detail-button {
   opacity: 0.9;
+}
+
+/* 在途已归零（货已全部到仓）：图标转灰，只作为「这个品下过单」的痕迹留着 */
+.ordered-detail-button--settled {
+  color: #7b8d97;
+  opacity: 0.4;
+}
+
+.ordered-detail-button--settled:hover,
+.ordered-detail-button--settled:focus-visible {
+  background: #eef2f5;
+  color: #3f5661;
+  opacity: 1;
 }
 
 .ordered-detail-button:focus-visible {

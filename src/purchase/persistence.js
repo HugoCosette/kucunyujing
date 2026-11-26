@@ -7,6 +7,9 @@ import { DOC_KEY_ORDERS, writeDocument } from '@/data/repo.js'
 // 与 src/stocking 同一套持久化策略：JSON 源文件是默认值，开发态设置写回磁盘，
 // 构建产物里的设置走 localStorage；订单与草稿体积会涨到几十 MB，一律走 IndexedDB
 // （localStorage 单源约 5 MB，装不下就会静默丢单）。
+// orders.json 是出厂种子且必须为空（updatedAt 固定在 epoch，任何本机文档都比它新）；
+// 开发态回写只写 orders.dev.json 这份调试镜像，不参与启动读取 —— 否则种子里会带着
+// 上一个浏览器 / 端口下的真实订单，新 origin 一打开就继承别人的下单记录。
 
 export const SETTINGS_FILE_NAME = 'purchaseSettings.json'
 export const SETTINGS_SAVE_ENDPOINT = '/__purchase-settings/save'
@@ -126,6 +129,7 @@ export function setSettingsRuntime(settings) {
 export function loadOrders() {
   if (currentOrders) return currentOrders
 
+  // 种子恒为空：本机没有任何订单时才走到它，返回空文档（0 张分订单）。
   const fileSnapshot = normalizePurchaseOrders(fileOrders)
   const cached = readCache(ORDERS_STORAGE_KEY, normalizePurchaseOrders)
   currentOrders = cached && stampOf(cached) > stampOf(fileSnapshot) ? cached : fileSnapshot
@@ -150,7 +154,7 @@ export async function saveSettings(settings) {
   return { settings: next, written }
 }
 
-// 保存：先更新运行时，再落 IndexedDB（唯一真相），开发态顺手写回 src/purchase/orders.json。
+// 保存：先更新运行时，再落 IndexedDB（唯一真相），开发态顺手写回 src/purchase/orders.dev.json。
 // persisted=false 表示本机数据没存住（例如隐私模式禁用 IndexedDB），调用方要提示用户。
 export async function saveOrders(orders) {
   const next = normalizePurchaseOrders({ ...orders, updatedAt: new Date().toISOString() })

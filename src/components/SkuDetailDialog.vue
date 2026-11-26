@@ -278,8 +278,14 @@ const salesOfSku = computed(() => {
 
 // —— 健康度评分 ——
 // 主面板传的是算过库存列的行，销售表传的是原始行，这里统一按当前配置重算一遍再评分。
+// 在途由 store 的对账结果提供，没导入过基线时是空对象，calculateInventoryRow 自动走旧口径。
 const calculatedRow = computed(() =>
-  props.item ? calculateInventoryRow(evaluated.value) : null,
+  props.item
+    ? calculateInventoryRow({
+        ...evaluated.value,
+        ...(inventoryStore.inTransitOf(evaluated.value.skuId) ?? {}),
+      })
+    : null,
 )
 // 按量模式用专属的两项判定（建议值进销比 / 累积客户数），区间取配置页「按量」模式里的设置。
 const bulkHealthScoring = computed(
@@ -366,6 +372,7 @@ const replenishPreviewRow = computed(() => {
     ...evaluated.value,
     ordered: orders.ordered,
     received: orders.received,
+    ...(inventoryStore.inTransitOf(evaluated.value.skuId) ?? {}),
     planned: plannedResolved.value,
   })
 })

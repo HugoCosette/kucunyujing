@@ -5,6 +5,7 @@ import { useInventoryStore } from '@/stores/inventory'
 import { usePurchaseStore } from '@/stores/purchase'
 import {
   MAX_SNAPSHOTS,
+  clearInTransitBaseline,
   deleteSnapshot,
   getStorageSummary,
   requestPersistence,
@@ -182,6 +183,23 @@ async function handleClear() {
   ElMessage.success('已清空，正在重新加载')
   window.setTimeout(() => window.location.reload(), 400)
 }
+
+// 换了测试数据、或者发现口径跑偏时用：基线一清，下次导入会按当次的「生产中 / 生产入库」重新起算。
+async function handleResetInTransit() {
+  try {
+    await ElMessageBox.confirm(
+      '重置在途基线后，下一次导入会按当次导入的「生产中 / 生产入库」重新起算，当前算出的在途会清零。确定继续？',
+      '重置在途基线',
+      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  await clearInTransitBaseline()
+  inventoryStore.setInTransitBaseline(null)
+  ElMessage.success('已重置在途基线，重新导入一次即可重新起算')
+}
 </script>
 
 <template>
@@ -190,6 +208,14 @@ async function handleClear() {
       <h2 class="panel__title">本机数据存储</h2>
       <div class="panel__head-actions">
         <button type="button" class="btn btn--sm" @click="refresh">刷新</button>
+        <button
+          type="button"
+          class="btn btn--sm"
+          title="下一次导入按当次的「生产中 / 生产入库」重新起算在途"
+          @click="handleResetInTransit"
+        >
+          重置在途基线
+        </button>
       </div>
     </div>
 

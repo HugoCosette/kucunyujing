@@ -14,11 +14,14 @@ function createInventoryViewState() {
     selectedModeLabels: ref([]),
     // SPU 等级筛选：存档位 key（配置里改名不影响），'ungraded' 表示月均缺失、父行显示「—」的品名。
     selectedSpuGradeKeys: ref([]),
-    // 采购状态组单选：全部（两者都为 false）、已下单或下单中。
-    // 已下单口径是「该 SKU 有未作废的分订单」（累积下单 > 0）。
+    // 采购状态组单选：全部（三者都为 false）、下单中、已下单或已到仓。
+    // 已下单 = 已确认下单、还没到仓（在途 > 0）；货到仓后转成「已到仓」，不再算已下单。
+    // 不能拿「累积下单 > 0」当已下单：累积下单只增不减，货进仓以后会一直命中。
     onlyOrdered: ref(false),
     // 下单中 = 已采纳、等待确认下单，由主面板需安排的锁定记录判定。
     onlyOrdering: ref(false),
+    // 已到仓 = 下过单（累积下单 > 0）且已全部到仓（在途 = 0）：给「这个品下过单」留个记录。
+    onlyArrived: ref(false),
     // null = 还没进过主面板（默认全部展开）；[] = 用户主动把品名都收起了。
     expandedProductKeys: ref(null),
     // 批量补货勾选：只记 SKU 标识集合。行会随虚拟滚动装卸，选择状态不能挂在行上。

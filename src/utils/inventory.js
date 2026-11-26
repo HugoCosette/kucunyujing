@@ -39,16 +39,17 @@ function resolveIssue(item, kgFactor) {
 }
 
 // 预警灯只描述「当前指标相对三档的位置」，纯给人看：
-// 低于红线 → 紧急补货；高于峰值 → 降低库存；正常 ±20% → 无需补货；其余常规补货。
+// < 红线 → 紧急补货；> 峰值 → 降低库存；≥ 正常 × 80%（且没超峰值）→ 无需补货；其余常规补货。
+// 绿区上沿取「峰值」而不是「正常 × 120%」：需安排直接进预计库存，加量必须单调变好 ——
+// 上沿若停在 1.2 × 正常，已补到位的行再加点量就会从绿掉回黄，还顶着「常规补货」的文案，
+// 而实际含义是「已超目标、暂时别加」，方向读反了。
 function getUrgency(indicator, coefficients) {
   if (indicator === null || Number.isNaN(indicator)) {
     return { text: '模式缺省', tone: 'unavailable' }
   }
   if (indicator < coefficients.redLine) return { text: '紧急补货', tone: 'red' }
   if (indicator > coefficients.peak) return { text: '降低库存', tone: 'purple' }
-  if (indicator >= coefficients.normal * 0.8 && indicator <= coefficients.normal * 1.2) {
-    return { text: '无需补货', tone: 'green' }
-  }
+  if (indicator >= coefficients.normal * 0.8) return { text: '无需补货', tone: 'green' }
   return { text: '常规补货', tone: 'yellow' }
 }
 
@@ -62,19 +63,36 @@ export function calculateInventoryRow(item) {
   const received = Number(item.received) > 0 ? Number(item.received) : 0
   const pendingOrder = Math.max(0, ordered - received)
   const turnoverIn = item.turnoverIn ?? 0
-  // 生产中 = 生产排单的进仓重量（公斤）：新导入写在 producing，旧数据写在 inTransitStock 时优先取它。
+  // 生产中（原始）= 生产排单的进仓重量（公斤，累计流水）：新导入写在 producing，旧数据写在 inTransitStock 时优先取它。
   const inTransitStock = Number.isFinite(item.inTransitStock)
     ? item.inTransitStock
-    : item.producing
+    : Number.isFinite(item.producing)
+      ? item.producing
+      : 0
   // 在仓库存是 SKU 自己的单位（码或公斤）→ 换算成公斤
   const warehouseKg = kgFactor ? item.warehouseStock * kgFactor : null
-  // 理论库存是事实层：只由导入数据派生（公斤）
-  const theoreticalStock = warehouseKg === null ? null : warehouseKg + inTransitStock
-  // 预计库存 = 在仓kg + 生产中 + 累计下单 + 锁定需安排。
-  // 写成「待收 + 到货」与「累计下单」等价（待收 = 累计下单 − 到货）：到货时一减一增，合计不变，
+  // 在途（新口径）：调用方按 skuId 对账后传入 inTransitKg 时，预计库存 = 在仓 + 在途 + 需安排。
+  // 排单（producing）与累计下单（ordered）已经算进在途，这里不再单独相加，避免同一批货算两遍。
+  // 没传 inTransitKg 时保持旧口径（理论库存 + 累积下单 + 需安排），确保旧调用方行为不变。
+  const inTransitKg = Number.isFinite(item.inTransitKg) ? Math.max(0, item.inTransitKg) : null
+  const producingKg = Number.isFinite(item.producingKg) ? Math.max(0, item.producingKg) : null
+  const arrangedKg = Number.isFinite(item.arrangedKg) ? Math.max(0, item.arrangedKg) : null
+  // 理论库存 = 在仓 + 在途（也就是「预计库存 − 需安排」），与「在途 = 已安排 + 生产中」同一套口径。
+  // 不能再用生产排单的原始累计：排单是只增不减的流水，滚动导入后已入库的那批货还留在表里，
+  // 理论库存会虚高（例：D3 到仓 500 之后 = 在仓 1500 + 排单 500 = 2000）。没有对账值时退回旧口径。
+  const theoreticalStock =
+    warehouseKg === null
+      ? null
+      : warehouseKg + (inTransitKg === null ? inTransitStock : inTransitKg)
+  // 预计库存 = 在仓kg + 在途 + 锁定需安排 = 理论库存 + 需安排。
+  // 旧口径写成「待收 + 到货」与「累计下单」等价（待收 = 累计下单 − 到货）：到货时一减一增，合计不变，
   // 所以登记 / 撤销到货不会让预计库存跳动；超收（到货 > 累计下单）时也能把已到的货如实算进来。
   const projectedStock =
-    theoreticalStock === null ? null : theoreticalStock + pendingOrder + received + planned
+    theoreticalStock === null
+      ? null
+      : inTransitKg === null
+        ? theoreticalStock + pendingOrder + received + planned
+        : theoreticalStock + planned
 
   const metric = item.modeMetric ?? 'none'
   const coefficients = item.stockingCoefficients ?? null
@@ -129,6 +147,10 @@ export function calculateInventoryRow(item) {
     ordered,
     received,
     pendingOrder,
+    // 新口径（调用方传了 inTransitKg 时才有值）：在途 = 已安排 + 生产中
+    inTransitKg,
+    producingKg,
+    arrangedKg,
     theoreticalStock,
     projectedStock,
     daysOfStock: indicator,
@@ -144,10 +166,14 @@ export function calculateInventoryRow(item) {
   }
 }
 
-// 建议需安排（公斤）：补到「正常库存」（绿区中位）的差额，基于理论库存；
-// 累计下单（含已到货）算作即将到货，先扣掉，避免同一缺口重复补两次。
+// 建议需安排（公斤）：补到「正常库存」（绿区中位）的差额。
+// 新口径：基于在仓 + 在途（在途已含累积下单与排单在产），不会把同一批货扣两遍。
+// 旧口径（没有 inTransitKg 时）：基于理论库存，累积下单算作即将到货先扣掉。
 export function getSuggestedPlanned(row) {
   if (!row?.strategyAvailable) return 0
+  if (Number.isFinite(row.inTransitKg)) {
+    return Math.max(0, Math.ceil(row.normalStock - (Number(row.warehouseKg) || 0) - row.inTransitKg))
+  }
   const incoming = Number(row.ordered) > 0 ? Number(row.ordered) : 0
   return Math.max(0, Math.ceil(row.normalStock - row.theoreticalStock - incoming))
 }

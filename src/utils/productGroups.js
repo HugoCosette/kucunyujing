@@ -16,6 +16,10 @@ export const PRODUCT_SUMMARY_FIELDS = [
   'ordered',
   'received',
   'pendingOrder',
+  // 在途对账三列：已安排 / 生产中 / 在途，父行按子行求和（缺省的子行跳过）
+  'arrangedKg',
+  'producingKg',
+  'inTransitKg',
 ]
 
 const strategyFields = ['redLineStock', 'normalStock', 'peakStock', 'shortage']
@@ -41,8 +45,8 @@ function createProductSummary(allRows) {
     summary[field] = sumField(allRows, field)
   }
 
-  // 日库销比由「汇总库存条数 ÷ 汇总日销量」还原，和子行同一口径。
-  const projectedUnits = sumField(allRows, 'projectedUnits')
+  // 日库销比由「汇总库存 ÷ 汇总日销量」还原，和子行同一口径。
+  const projectedUnits = sumField(allRows, 'projectedStock')
   const dailySales = sumField(allRows, 'dailySales')
   let daysOfStock = null
   if (projectedUnits !== null) {

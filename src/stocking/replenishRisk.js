@@ -108,9 +108,12 @@ function buildQuantityFactor(row, state) {
   const normal = Number(row.normalFactor)
   const peak = Number(row.peakFactor)
   const lowBand = Number.isFinite(normal) ? Math.round(normal * 0.8) : null
-  const highBand = Number.isFinite(normal) ? Math.round(normal * 1.2) : null
+  // 正常带的上沿是峰值（与预警灯的绿区同一口径），不是「正常 × 120%」。
+  const highBand = Number.isFinite(peak) ? Math.round(peak) : null
   const bandText =
-    lowBand === null ? '' : `${formatInt(lowBand)} ~ ${formatInt(highBand)} ${unit}`
+    lowBand === null || highBand === null
+      ? ''
+      : `${formatInt(lowBand)} ~ ${formatInt(highBand)} ${unit}`
 
   let detail = `加权月销量为 0，${noun}按 ∞ 计，直接判库存偏多`
   if (available) {

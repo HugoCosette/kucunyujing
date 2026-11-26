@@ -41,6 +41,9 @@ export function applyImportedInventory(store, importedItems, { salesBySku = null
       treeCategory: entry.treeCategory ?? '',
       planned: previous?.planned ?? null,
       producing: entry.producing,
+      // 到仓信号（公斤）：生产入库 / 退货入库，来自清洗后的总表
+      producedIn: entry.producedIn ?? 0,
+      returnedIn: entry.returnedIn ?? 0,
       backorder: entry.backorder,
       weeklySales: entry.weeklySales,
       warehouseStock: entry.warehouseStock,
@@ -70,6 +73,8 @@ export function applyImportedInventory(store, importedItems, { salesBySku = null
   for (const [id, undo] of nextUndoHistory) plannedUndoHistory[id] = undo
 
   inventoryItems.splice(0, inventoryItems.length, ...nextItems)
+  // 行数相同时（每天导入同一批 SKU）视图靠这个版本号才会重建
+  store.bumpFactRevision?.()
 
   return nextItems
 }

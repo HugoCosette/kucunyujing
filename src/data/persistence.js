@@ -1,15 +1,18 @@
 import { gzipSync, strToU8 } from 'fflate'
 import { hashText } from './textHash.js'
 import {
+  DOC_KEY_IN_TRANSIT,
   META_KEY_WORKSPACE,
   deleteSnapshot as removeSnapshot,
   estimateStorage as readStorageEstimate,
   isIndexedDbAvailable,
   isPersistentStorage,
   listSnapshots,
+  readDocument,
   readMeta,
   readSnapshot,
   requestPersistentStorage,
+  writeDocument,
   writeMeta,
   writeSnapshot,
 } from './repo.js'
@@ -24,7 +27,9 @@ import { defaultSkuAliases } from '@/data/inventoryItems'
 
 // 持久化的业务口径：事实层（导入数据）生成快照，计划层（需安排）按 skuId 单独存，
 // 两者加载时重新挂接，互不覆盖。写入一律先落 IndexedDB，不做任何 localStorage 兜底。
-export const MAX_SNAPSHOTS = 5
+// 导入快照的回滚名额：每天全量导入会新建一份，只保留最新 N 份 + 当前正在用的那份。
+// 14 份 ≈ 两周回滚窗口；每份是事实层的整份副本（压缩后几 MB），要长期留底请导出 xlsx，不要靠快照。
+export const MAX_SNAPSHOTS = 14
 
 // 内存镜像：workspace 记录（当前快照 + 计划层），启动时从 IndexedDB 读回来。
 const workspace = {
@@ -280,6 +285,46 @@ async function pruneSnapshots() {
 }
 
 // ---------------------------------------------------------------------------
+// 在途对账基线：每 SKU 的排单 / 生产入库初值。单独一份文档，跨快照保留 ——
+// 它记录的是「从哪一天开始算增量」，跟着快照回滚就会把历史产量重新算进在途。
+// ---------------------------------------------------------------------------
+
+export async function readInTransitBaseline() {
+  if (!isIndexedDbAvailable()) return null
+  try {
+    const record = await readDocument(DOC_KEY_IN_TRANSIT)
+    return record?.version ? record : null
+  } catch (error) {
+    console.warn('读取在途基线失败', error)
+    return null
+  }
+}
+
+export async function writeInTransitBaseline(baseline) {
+  if (!isIndexedDbAvailable() || !baseline) return null
+  try {
+    await writeDocument(DOC_KEY_IN_TRANSIT, baseline)
+    return baseline
+  } catch (error) {
+    lastError = error
+    console.warn('保存在途基线失败', error)
+    return null
+  }
+}
+
+// 重置基线：下次导入从当天的排单 / 生产入库重新起算（换测试数据、或者发现口径跑偏时用）。
+export async function clearInTransitBaseline() {
+  if (!isIndexedDbAvailable()) return false
+  try {
+    await writeDocument(DOC_KEY_IN_TRANSIT, null)
+    return true
+  } catch (error) {
+    console.warn('重置在途基线失败', error)
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 启动水合 / 快照切换 / 存储概览
 // ---------------------------------------------------------------------------
 
@@ -292,16 +337,26 @@ export async function hydrateFromStorage() {
   workspace.undoHistory = record.undoHistory
   workspace.updatedAt = record.updatedAt
 
+  const inTransitBaseline = await readInTransitBaseline()
+  const hasPlans = Object.keys(record.plans).length > 0
+  // 在途基线不属于快照，任何一条启动路径都要把它带给 store
+  const prime = (extra = {}) =>
+    primeInventoryState({
+      planLayer: hasPlans ? getWorkspace() : null,
+      inTransitBaseline,
+      ...extra,
+    })
+
   const noSnapshot = { supported: true, restored: false }
   if (!record.activeSnapshotId) {
     // 没有导入过快照（例如只在演示数据上采纳过需安排）：事实层用种子数据，计划层照样要挂回来。
-    if (Object.keys(record.plans).length) primeInventoryState({ planLayer: getWorkspace() })
+    if (hasPlans || inTransitBaseline) prime()
     return noSnapshot
   }
 
   const snapshot = await readSnapshot(record.activeSnapshotId)
   if (!snapshot?.bytes) {
-    if (Object.keys(record.plans).length) primeInventoryState({ planLayer: getWorkspace() })
+    if (hasPlans || inTransitBaseline) prime()
     return noSnapshot
   }
 
@@ -311,16 +366,15 @@ export async function hydrateFromStorage() {
   } catch (error) {
     lastError = error
     console.error('快照解压失败，仍用种子数据启动', error)
-    if (Object.keys(record.plans).length) primeInventoryState({ planLayer: getWorkspace() })
+    if (hasPlans || inTransitBaseline) prime()
     return { supported: true, restored: false, error }
   }
 
   // 在挂载前把状态放好，store 创建时直接用它，不会先渲染一遍种子数据。
   // 需安排交给 store 按 skuId 挂回行上（行 id 会随快照变化，不能存 id）。
-  primeInventoryState({
+  prime({
     inventoryItems: payload.items,
     salesSheet: payload.salesSheet,
-    planLayer: getWorkspace(),
   })
   return {
     supported: true,

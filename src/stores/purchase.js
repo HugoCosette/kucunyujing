@@ -31,7 +31,7 @@ function snapshotOf(order) {
   }
 }
 
-// 涓嬪崟妯″潡鍏ㄥ簲鐢ㄥ崟渚嬶細璁剧疆锛堟煋鍘?/ 鍒嗙被-浜哄憳 / SKU 鍙€夋煋鍘傦級涓庡垎璁㈠崟鍚勫瓨涓€浠姐€?
+// 下单模块全应用单例：设置（染厂 / 分类-人员 / SKU 可选染厂）与分订单各存一份。
 // 分订单以「唯一标识」为键：主面板重新导入后行 id 会重排，只有唯一标识稳定。
 export const usePurchaseStore = defineStore('purchase', () => {
   const settings = shallowRef(loadSettings())
@@ -43,7 +43,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
   )
   const treeCategories = computed(() => settings.value.treeCategories)
 
-  // 銆屽璐с€嶅垪涓庨璁″簱瀛橀兘鍙杩欎釜绱㈠紩锛氭寜鍞竴鏍囪瘑姹囨€?active 璁㈠崟锛堜綔搴熺殑涓嶇畻锛夈€?
+  // 「备货」列与预计库存都只读这个索引：按唯一标识汇总 active 订单（作废的不算）。
   const orderIndex = computed(() => buildOrderIndex(orders.value.orders))
 
   let ordersSaveTimer = 0
@@ -56,7 +56,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
     ElMessage.error('分订单没能存到本机（浏览器可能禁用了 IndexedDB），关闭页面会丢失')
   }
 
-  // 鍒嗚鍗曠紪杈戠殑鏄€岃崏绋裤€嶏細涓婚潰鏉垮畬鍏ㄦ劅鐭ヤ笉鍒帮紝纭涓嬪崟鍚庢墠杩?orders 娴佹按銆?
+  // 分订单编辑的是「草稿」：主面板完全感知不到，确认下单后才进 orders 流水。
   function orderEntries(skuId) {
     const key = String(skuId ?? '').trim()
     return key ? orders.value.drafts[key] ?? [] : []
@@ -79,9 +79,9 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return orderSummary(skuId).total
   }
 
-  // 褰曞叆鏄繛缁殑锛堟敼鏁伴噺銆侀€夋煋鍘傦級锛屽啓鐩橀槻鎶?400ms锛涚寮€椤甸潰鏃?flush 涓€娆°€?
-  // 杩愯鎬佷繚鐣欒繕娌″～鍐欑殑绌虹櫧琛岋紙鍚﹀垯鍒氱偣銆屾坊鍔犲垎璁㈠崟銆嶇殑琛屼細琚綊涓€鍖栦涪鎺夛級锛?
-  // 钀界洏鏃?saveOrders 鎸夐粯璁ゅ彛寰勪涪寮冪┖鐧借銆?
+  // 录入是连续的（改数量、选染厂），写盘防抖 400ms；离开页面时 flush 一次。
+  // 运行态保留还没填写的空白行（否则刚点「添加分订单」的行会被归一化丢掉），
+  // 落盘时 saveOrders 按默认口径丢弃空白行。
   function commitOrders(next) {
     orders.value = normalizeOrders({ ...next, updatedAt: nowIso() }, { keepBlankEntries: true })
     if (ordersSaveTimer) clearTimeout(ordersSaveTimer)
@@ -102,7 +102,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return result
   }
 
-  // 涓嬪崟椤电紪杈戠殑鏄崏绋匡紙drafts锛夛紝纭涓嬪崟鍚庢墠鎴愪负璁㈠崟銆?
+  // 下单页编辑的是草稿（drafts），确认下单后才成为订单。
   function setOrderEntries(skuId, entries) {
     const key = String(skuId ?? '').trim()
     if (!key) return
@@ -117,8 +117,8 @@ export const usePurchaseStore = defineStore('purchase', () => {
     setOrderEntries(skuId, [])
   }
 
-  // 纭涓嬪崟锛氳崏绋?鈫?璁㈠崟锛堝彧杩藉姞锛屼笉鐗╃悊鍒犻櫎锛夛紝鍚屼竴鎵瑰叡鐢?batchId銆?
-  // targets: [{ skuId, product, color, entries? }]锛涜繑鍥炲疄闄呯敓鎴愮殑璁㈠崟涓庤烦杩囧師鍥犮€?
+  // 确认下单：草稿 → 订单（只追加，不物理删除），同一批共用 batchId。
+  // targets: [{ skuId, product, color, entries? }]；返回实际生成的订单与跳过原因。
   function submitOrders(targets) {
     const at = nowIso()
     const seed = Date.now().toString(36)
@@ -139,7 +139,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
         const orderQuantity = quantityMode === 'kg' ? Math.round(quantity) : quantity
         const vatCount = Number(entry?.vatCount)
         const kgPerVat = Number(entry?.kgPerVat)
-        // 缂烘煋鍘傛垨娌℃湁鍏枻鏁帮細涓嶈兘鎴愪负璁㈠崟锛岃涓嬫潵缁欓〉闈㈡彁绀恒€?
+        // 缺染厂或没有公斤数：不能成为订单，记下来给页面提示。
         if (
           !(orderQuantity > 0) ||
           !(String(entry?.factoryId ?? '').trim() || String(entry?.factoryName ?? '').trim()) ||
@@ -174,7 +174,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
       }
 
       if (accepted) delete drafts[skuId]
-      else skipped.push({ skuId, reason: '娌℃湁鍙彁浜ょ殑鍒嗚鍗曪紙缂烘煋鍘傛垨鍏枻鏁帮級' })
+      else skipped.push({ skuId, reason: '没有可提交的分订单（缺染厂或公斤数）' })
     }
 
     if (!created.length) return { batchId, at, items: [], skipped }
@@ -182,7 +182,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return { batchId, at, items: created, skipped }
   }
 
-  // 鎾ら攢鏁村紶鍒嗚鍗曪細淇濈暀娴佹按锛坰tatus=cancelled锛夛紝杩斿洖琚挙鍏枻鏁帮紝璋冪敤澶勬嵁姝ゅ洖琛ラ渶瀹夋帓銆?
+  // 撤销整张分订单：保留流水（status=cancelled），返回被撤公斤数，调用处据此回补需安排。
   function cancelOrder(orderId) {
     const at = nowIso()
     let cancelled = null
@@ -223,7 +223,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return removed
   }
 
-  // 鍒拌揣鏄拷鍔犱竴鏉″疄鏀惰褰曪紝涓嶈鐩?receivedQty锛況eceivedQty 鐢?receipts 姹傚拰娲剧敓銆?
+  // 到货是追加一条实收记录，不覆盖 receivedQty；receivedQty 由 receipts 求和派生。
   function receiveOrder(orderId, qty, by = '') {
     const amount = Number(qty)
     if (!Number.isFinite(amount) || amount <= 0) return null
@@ -316,7 +316,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return updated
   }
 
-  // 淇敼宸叉彁浜よ鍗曪細鍏佽鍘熷湴鏀癸紝浣嗘瘡娆¤惤涓€鏉?revisions 鐣欑棔銆?
+  // 修改已提交订单：允许原地改，但每次落一条 revisions 留痕。
   function updateOrder(orderId, patch, operator = '') {
     const at = nowIso()
     let updated = null
@@ -337,7 +337,7 @@ export const usePurchaseStore = defineStore('purchase', () => {
     return updated
   }
 
-  // 璁剧疆椤电敤鑽夌缂栬緫锛岀偣銆岀‘瀹氥€嶆墠璧拌繖閲岃惤鐩樸€?
+  // 设置页用草稿编辑，点「确定」才走这里落盘。
   async function applySettings(nextSettings) {
     const saved = await saveSettings(nextSettings)
     settings.value = saved.settings

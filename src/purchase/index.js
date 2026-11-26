@@ -2,5 +2,6 @@
 export * from './validate.js'
 export * from './resolve.js'
 export * from './vat.js'
+export * from './inTransit.js'
 export * from './persistence.js'
 export * from './fillTone.js'

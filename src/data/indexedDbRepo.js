@@ -19,6 +19,14 @@ export const META_KEY_SNAPSHOT_INDEX = 'snapshots'
 // 仍是小体量，继续走 localStorage，只在「导出全部数据」时一起打包。
 export const DOC_KEY_ORDERS = 'purchaseOrders'
 
+// 在途对账的切换日基线：每 SKU 的排单 / 生产入库初值。导入侧只用增量，
+// 所以这份必须独立存、跨快照保留（换快照不能把基线一起回滚）。
+export const DOC_KEY_IN_TRANSIT = 'inTransitBaseline'
+
+// 「SKU 数据变动」：每次导入后跟上一份比出来的差异（只留变动的行 + 汇总）。
+// 这是报表而不是事实层，独立一份文档，不进快照、不随快照回滚。
+export const DOC_KEY_IMPORT_DIFF = 'importDiff'
+
 export { isIndexedDbAvailable }
 
 export async function readMeta(key) {

@@ -1,10 +1,13 @@
-import { ref, shallowRef } from 'vue'
+import { computed, ref, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
 import { initialInventoryItems } from '@/data/inventoryItems'
 import { applyPlanLayer } from '@/data/serialize'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 import { findBaselineMonth } from '@/stocking'
 import { composeProductColorSkuId } from '@/utils/inventory'
+import { buildInTransitIndex, createInTransitBaseline } from '@/purchase/inTransit'
+import { orderedTotalsOf, receivedTotalsOf } from '@/purchase/resolve'
+import { usePurchaseStore } from './purchase'
 
 // 演示数据只有基础数量列（周销量与库存 / 欠货 / 周转入）：唯一标识、动销指标、累积条数 /
 // 累积销量、客户CR5率、树形分类、1-12 月条数与销量都按周销量折算一组稳定数值，
@@ -214,6 +217,12 @@ function createInventoryState() {
 
   const inventoryItems = ref(baseItems)
   const plannedUndoHistory = ref(plan.plannedUndoHistory)
+  // 事实层版本号：整表替换后行数可能不变（每天导入同样的 SKU），
+  // 视图靠它判断「数据集换了」而不是只比较长度。
+  const factRevision = ref(0)
+  function bumpFactRevision() {
+    factRevision.value += 1
+  }
   // 销售表：在“销售表”面板导入的 1-12 月条数与重量，按唯一标识叠加到主面板行上。
   // 数据可达数万 SKU，用 shallowRef 保存整体替换的对象，不做逐行深度响应式。
   // 只有演示数据（没有导入过快照，可能只挂回了需安排）才现生成一份，
@@ -222,8 +231,49 @@ function createInventoryState() {
     primed?.salesSheet ?? (primedItems ? null : createDemoSalesSheet(baseItems)),
   )
 
+  // 在途对账：基线记录「从哪天的排单 / 生产入库开始算增量」，跨快照保留；
+  // 全表的在途拆分每次渲染现算（口径只有 src/purchase/inTransit.js 一份）。
+  const inTransitBaseline = shallowRef(primed?.inTransitBaseline ?? null)
+  const inTransitIndex = computed(() =>
+    buildInTransitIndex({
+      items: inventoryItems.value,
+      orderedTotals: orderedTotalsOf(usePurchaseStore().orderIndex),
+      receivedTotals: receivedTotalsOf(usePurchaseStore().orderIndex),
+      baseline: inTransitBaseline.value,
+    }),
+  )
+
+  function setInTransitBaseline(baseline) {
+    inTransitBaseline.value = baseline ?? null
+  }
+
+  // 第一次导入时建基线：之后的导入只算增量，历史产量（实测 21.7 万公斤）不会被算进在途。
+  // 返回 created 让调用方决定是否落盘，store 本身不做 I/O。
+  function ensureInTransitBaseline(items = inventoryItems.value) {
+    if (inTransitBaseline.value) return { baseline: inTransitBaseline.value, created: false }
+    const baseline = createInTransitBaseline(items)
+    inTransitBaseline.value = baseline
+    return { baseline, created: true }
+  }
+
+  function inTransitOf(skuId) {
+    const key = String(skuId ?? '').trim()
+    return key ? inTransitIndex.value.get(key) ?? null : null
+  }
+
   // 模式与系数在视图计算时按当前配置现算，store 只保存导入的原始数据。
-  return { inventoryItems, plannedUndoHistory, salesSheet }
+  return {
+    inventoryItems,
+    plannedUndoHistory,
+    salesSheet,
+    factRevision,
+    bumpFactRevision,
+    inTransitBaseline,
+    inTransitIndex,
+    inTransitOf,
+    setInTransitBaseline,
+    ensureInTransitBaseline,
+  }
 }
 
 // 库存、需安排（采购下单的唯一来源）、撤销记录与销售表都是全局唯一的一份运行状态。

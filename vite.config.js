@@ -25,9 +25,12 @@ const PURCHASE_SETTINGS_FILE = path.resolve(
   'src/purchase/settings.json',
 )
 
+// 订单是运行时数据，orders.json 只是「空出厂种子」（updatedAt 固定在 epoch）：
+// 开发态回写必须写到另一份调试镜像，否则种子会被真实订单写脏，
+// 任何新浏览器 / 新端口打开都会继承上一个 origin 下的订单。
 const PURCHASE_ORDERS_FILE = path.resolve(
   fileURLToPath(new URL('.', import.meta.url)),
-  'src/purchase/orders.json',
+  'src/purchase/orders.dev.json',
 )
 
 // 清洗缓存：出码率 / 产品资料字典，开发态由导入流程写回（生产构建只读）。
@@ -103,19 +106,41 @@ function stockingConfigFilePlugin() {
           try {
             const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
             fs.mkdirSync(CLEANING_CACHE_DIR, { recursive: true })
-            if (Array.isArray(body.rates)) {
-              fs.writeFileSync(
-                CLEANING_CACHE_RATES_FILE,
-                `${JSON.stringify(body.rates, null, 0)}\n`,
-                'utf8',
-              )
+
+            // 缓存是「长期稳定、只增不减」的字典：条数变少时拒绝覆盖，
+            // 避免用演示 / 测试分表导入一次就把正式缓存冲掉（之后不选产品资料就只剩测试 SKU）。
+            // 确实要缩小规模时，用命令行 `node clean-merge.js --update-cache` 显式覆盖。
+            const countOf = (file) => {
+              try {
+                const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+                return Array.isArray(parsed) ? parsed.length : 0
+              } catch {
+                return 0
+              }
             }
-            if (Array.isArray(body.productMaster)) {
-              fs.writeFileSync(
-                CLEANING_CACHE_PRODUCT_FILE,
-                `${JSON.stringify(body.productMaster, null, 0)}\n`,
-                'utf8',
-              )
+            const writeIfNotShrinking = (file, label, entries) => {
+              if (!Array.isArray(entries)) return false
+              const existing = countOf(file)
+              if (entries.length < existing) {
+                server.config.logger.warn(
+                  `[cleaning-cache] 拒绝写入「${label}」：新数据 ${entries.length} 条 < 现有 ${existing} 条（缓存只增不减，需要缩小请用命令行 --update-cache）`,
+                )
+                return false
+              }
+              fs.writeFileSync(file, `${JSON.stringify(entries, null, 0)}\n`, 'utf8')
+              return true
+            }
+
+            const wroteRates = writeIfNotShrinking(CLEANING_CACHE_RATES_FILE, '出码率', body.rates)
+            const wroteProduct = writeIfNotShrinking(
+              CLEANING_CACHE_PRODUCT_FILE,
+              '产品资料',
+              body.productMaster,
+            )
+            if (!wroteRates && !wroteProduct) {
+              response.statusCode = 204
+              response.end()
+              return
             }
             const meta = {
               updatedAt: body.updatedAt ?? new Date().toISOString().slice(0, 10),

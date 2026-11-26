@@ -4,6 +4,8 @@ import { ElButton, ElInput, ElMessage } from 'element-plus'
 import PanelNavigation from '@/components/PanelNavigation.vue'
 import SkuDetailDialog from '@/components/SkuDetailDialog.vue'
 import SkuDetailTrigger from '@/components/SkuDetailTrigger.vue'
+import TableHeaderHint from '@/components/TableHeaderHint.vue'
+import { checkSalesColumnHints, salesColumnHint } from '@/data/columnHints'
 import { HEAT_FACTOR_FIELDS } from '@/data/quantityFields'
 import { schedulePlanPersist } from '@/data/persistence'
 import { SALES_MONTH_FIELDS, SALES_RATIO_COLUMNS, SALES_TABLE_COLUMNS } from '@/data/salesFields'
@@ -23,6 +25,7 @@ const MONTH_COLUMN_WIDTH = 92
 const tableColumns = SALES_TABLE_COLUMNS.map((column, index) => ({
   ...column,
   index,
+  hint: salesColumnHint(column),
   width:
     index === PRODUCT_INDEX
       ? 170
@@ -32,6 +35,11 @@ const tableColumns = SALES_TABLE_COLUMNS.map((column, index) => ({
           ? MONTH_COLUMN_WIDTH
           : 96,
 }))
+// 开发态自检：列增删后忘了补 / 清表头说明时在控制台点名（生产构建不执行）。
+if (import.meta.env.DEV) {
+  checkSalesColumnHints(tableColumns)
+}
+
 // 品名、颜色之后全部是数值列，参与品名父行求和；比例列（客户CR5率）单独按权重列加权平均。
 const ratioColumnIndexes = new Set(
   SALES_RATIO_COLUMNS.map((entry) =>
@@ -422,9 +430,8 @@ onBeforeUnmount(() => {
                 'sales-vtable__head-cell--product': column.index === PRODUCT_INDEX,
               }"
               role="columnheader"
-              :title="column.label"
             >
-              {{ column.label }}
+              <TableHeaderHint :label="column.label" :hint="column.hint" />
             </div>
           </div>
         </div>

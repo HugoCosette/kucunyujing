@@ -12,9 +12,9 @@ export function useSourceImport({ onApplied }) {
       return
     }
 
-    const persisted = applySourceImport(inventoryStore, summary)
+    const { persisted, diff } = applySourceImport(inventoryStore, summary)
 
-    onApplied?.(summary)
+    onApplied?.(summary, diff)
 
     // 快照压缩落库要一两秒，不阻塞界面；失败时明确提示，避免「界面说导入成功、刷新后没了」。
     void persisted.then((snapshotId) => {
